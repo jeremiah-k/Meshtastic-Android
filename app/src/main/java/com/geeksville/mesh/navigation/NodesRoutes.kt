@@ -129,6 +129,9 @@ fun NavGraphBuilder.nodeDetailGraph(
                 onNavigate = {
                     navController.navigate(it)
                 },
+                onNavigateBack = {
+                    navController.popBackStack()
+                },
                 viewModel = hiltViewModel(parentEntry),
             )
         }

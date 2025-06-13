@@ -163,9 +163,23 @@ fun NodeDetailScreen(
     uiViewModel: UIViewModel = hiltViewModel(),
     navigateToMessages: (String) -> Unit,
     onNavigate: (Route) -> Unit = {},
+    onNavigateBack: () -> Unit = {},
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val environmentState by viewModel.environmentState.collectAsStateWithLifecycle()
+
+    // Track if we've ever had a node loaded to detect removal
+    var hasHadNode by remember { mutableStateOf(false) }
+
+    // Navigate back if the node has been removed
+    LaunchedEffect(state.node) {
+        if (state.node != null) {
+            hasHadNode = true
+        } else if (hasHadNode) {
+            // Node was loaded before but is now null - it was removed
+            onNavigateBack()
+        }
+    }
 
     /* The order is with respect to the enum above: LogsType */
     val availabilities = remember(key1 = state, key2 = environmentState) {
