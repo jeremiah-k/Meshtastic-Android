@@ -142,8 +142,12 @@ internal fun rememberMapViewWithLifecycle(
                 }
 
                 Lifecycle.Event.ON_STOP -> {
-                    savedCenter = mapView.projection.currentCenter
-                    savedZoom = mapView.zoomLevelDouble
+                    try {
+                        savedCenter = mapView.projection.currentCenter
+                        savedZoom = mapView.zoomLevelDouble
+                    } catch (e: Exception) {
+                        errormsg("Failed to save map state during ON_STOP: ${e.message}")
+                    }
                 }
 
                 else -> {}
@@ -155,7 +159,11 @@ internal fun rememberMapViewWithLifecycle(
         onDispose {
             lifecycle.removeObserver(observer)
             wakeLock.safeRelease()
-            mapView.onDetach()
+            try {
+                mapView.onDetach()
+            } catch (e: Exception) {
+                errormsg("Failed to detach map view: ${e.message}")
+            }
         }
     }
     return mapView

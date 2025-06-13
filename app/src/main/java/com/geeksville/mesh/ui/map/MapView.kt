@@ -317,10 +317,11 @@ fun MapView(
 
             val (p, u) = node.position to node.user
             val nodePosition = GeoPoint(node.latitude, node.longitude)
-            MarkerWithLabel(
-                mapView = this,
-                label = "${u.shortName} ${formatAgo(p.time)}"
-            ).apply {
+            try {
+                MarkerWithLabel(
+                    mapView = this,
+                    label = "${u.shortName} ${formatAgo(p.time)}"
+                ).apply {
                 id = u.id
                 title = u.longName
                 snippet = context.getString(
@@ -350,6 +351,10 @@ fun MapView(
                     navigateToNodeDetails(node.num)
                     true
                 }
+            }
+            } catch (e: Exception) {
+                debug("Failed to create marker for node ${u.shortName}: ${e.message}")
+                null
             }
         }
     }
@@ -430,7 +435,12 @@ fun MapView(
                 }
                 else -> "${timeLeft / 86_400_000} day${if (timeLeft / 86_400_000 != 1L) "s" else ""}"
             }
-            MarkerWithLabel(this, label, emoji).apply {
+            try {
+                MarkerWithLabel(this, label, emoji)
+            } catch (e: Exception) {
+                debug("Failed to create waypoint marker ${pt.name}: ${e.message}")
+                return@mapNotNull null
+            }?.apply {
                 id = "${pt.id}"
                 title = "${pt.name} (${getUsername(waypoint.data.from)}$lock)"
                 snippet = "[$time] ${pt.description}  " + stringResource(R.string.expires) + ": $expireTimeStr"
