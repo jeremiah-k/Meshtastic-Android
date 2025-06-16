@@ -64,7 +64,7 @@ fun UserConfigScreen(
 
     UserConfigItemList(
         userConfig = state.userConfig,
-        enabled = state.connected,
+        enabled = true,
         onSaveClicked = viewModel::setOwner,
         metadata = state.metadata,
     )
