@@ -148,7 +148,7 @@ fun UserConfigItemList(
                         firmwareVersion < DeviceVersion("2.6.9") &&
                                 userInput.role.isUnmessageableRole()
                         ),
-                enabled = userInput.hasIsUnmessagable(),
+                enabled = enabled && userInput.hasIsUnmessagable(),
                 onCheckedChange = { userInput = userInput.copy { isUnmessagable = it } }
             )
         }
