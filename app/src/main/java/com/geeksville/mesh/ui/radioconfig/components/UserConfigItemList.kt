@@ -140,7 +140,7 @@ fun UserConfigItemList(
         }
         item { HorizontalDivider() }
 
-        if (userInput.hasIsUnmessagable()) {
+        if (firmwareVersion >= DeviceVersion("2.6.9")) {
             item {
                 SwitchPreference(
                     title = stringResource(R.string.unmessageable),
