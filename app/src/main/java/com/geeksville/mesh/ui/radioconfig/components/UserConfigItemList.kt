@@ -141,7 +141,6 @@ fun UserConfigItemList(
         item { HorizontalDivider() }
 
         item {
-            val canEditUnmessageable = enabled && userInput.hasIsUnmessagable()
             SwitchPreference(
                 title = stringResource(R.string.unmessageable),
                 summary = stringResource(R.string.unmonitored_or_infrastructure),
@@ -149,7 +148,7 @@ fun UserConfigItemList(
                         firmwareVersion < DeviceVersion("2.6.9") &&
                                 userInput.role.isUnmessageableRole()
                         ),
-                enabled = canEditUnmessageable,
+                enabled = enabled,
                 onCheckedChange = { userInput = userInput.copy { isUnmessagable = it } }
             )
         }
