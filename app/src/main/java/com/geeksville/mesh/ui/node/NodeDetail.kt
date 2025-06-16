@@ -328,7 +328,7 @@ private fun NodeDetailList(
                 NavCard(
                     title = stringResource(id = R.string.remote_admin),
                     icon = Icons.Default.Settings,
-                    enabled = true
+                    enabled = metricsState.isLocal || node.metadata != null
                 ) {
                     onAction(RadioConfigRoutes.RadioConfig(node.num))
                 }
