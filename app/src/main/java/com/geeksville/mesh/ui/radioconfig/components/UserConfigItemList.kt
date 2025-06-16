@@ -140,16 +140,17 @@ fun UserConfigItemList(
         }
         item { HorizontalDivider() }
 
-        if (firmwareVersion >= DeviceVersion("2.6.9")) {
-            item {
-                SwitchPreference(
-                    title = stringResource(R.string.unmessageable),
-                    summary = stringResource(R.string.unmonitored_or_infrastructure),
-                    checked = userInput.isUnmessagable,
-                    enabled = enabled,
-                    onCheckedChange = { userInput = userInput.copy { isUnmessagable = it } }
-                )
-            }
+        item {
+            SwitchPreference(
+                title = stringResource(R.string.unmessageable),
+                summary = stringResource(R.string.unmonitored_or_infrastructure),
+                checked = userInput.isUnmessagable || (
+                        firmwareVersion < DeviceVersion("2.6.9") &&
+                                userInput.role.isUnmessageableRole()
+                        ),
+                enabled = enabled && firmwareVersion >= DeviceVersion("2.6.9"),
+                onCheckedChange = { userInput = userInput.copy { isUnmessagable = it } }
+            )
         }
 
         item { HorizontalDivider() }
