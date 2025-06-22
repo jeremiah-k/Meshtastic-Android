@@ -2,7 +2,7 @@ name: Android CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [ fix/sticky-messages ]
     paths-ignore:
       - "**.md"
       - ".idea/**"
@@ -22,7 +22,7 @@ jobs:
 
   build:
     runs-on: ubuntu-latest
-    if: github.repository == 'meshtastic/Meshtastic-Android'
+    # if: github.repository == 'meshtastic/Meshtastic-Android'
     timeout-minutes: 30
 
     steps:
