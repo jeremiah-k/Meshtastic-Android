@@ -103,6 +103,17 @@ import kotlinx.coroutines.launch
 private const val MESSAGE_CHARACTER_LIMIT = 200
 private const val SNIPPET_CHARACTER_LIMIT = 50
 
+/**
+ * Displays the messaging UI for a specific contact or channel.
+ *
+ * Shows a list of messages, supports sending and replying to messages, quick chat actions, message selection for batch operations, and navigation to related screens. Manages input state, reply state, and selection mode, and provides UI for deleting or copying messages. Integrates with a view model for data and actions.
+ *
+ * @param contactKey The unique key identifying the contact or channel for this conversation.
+ * @param message The initial message text to populate the input field.
+ * @param navigateToMessages Callback to navigate to a different conversation, given a contact key.
+ * @param navigateToNodeDetails Callback to navigate to node details, given a node ID.
+ * @param onNavigateBack Callback invoked when the user navigates back from the screen.
+ */
 @Suppress("LongMethod", "CyclomaticComplexMethod")
 @Composable
 internal fun MessageScreen(
