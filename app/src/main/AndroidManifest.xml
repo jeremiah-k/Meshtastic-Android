@@ -225,6 +225,14 @@
         </receiver>
         <receiver android:name="com.geeksville.mesh.service.ReplyReceiver"/>
 
+        <!-- Handle Bluetooth pairing requests to prevent premature dialog dismissal -->
+        <receiver android:name="com.geeksville.mesh.repository.bluetooth.BluetoothPairingReceiver"
+            android:exported="false">
+            <intent-filter android:priority="1000">
+                <action android:name="android.bluetooth.device.action.PAIRING_REQUEST" />
+            </intent-filter>
+        </receiver>
+
         <activity
             android:name=".AppIntroduction"/>
 
