@@ -441,7 +441,8 @@ fun ConnectionsScreen(
                                     it
                                 )
                             },
-                            scanModel
+                            scanModel,
+                            uiViewModel
                         )
                     }
 

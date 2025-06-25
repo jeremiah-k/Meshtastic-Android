@@ -35,7 +35,6 @@ class BluetoothBroadcastReceiver @Inject constructor(
     internal val intentFilter get() = IntentFilter().apply {
         addAction(BluetoothAdapter.ACTION_STATE_CHANGED)
         addAction(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
-        addAction(BluetoothDevice.ACTION_PAIRING_REQUEST)
     }
 
     override fun onReceive(context: Context, intent: Intent) = exceptionReporter {
@@ -49,13 +48,7 @@ class BluetoothBroadcastReceiver @Inject constructor(
         if (intent.action == BluetoothDevice.ACTION_BOND_STATE_CHANGED) {
             bluetoothRepository.refreshState()
         }
-        if (intent.action == BluetoothDevice.ACTION_PAIRING_REQUEST) {
-            // Handle pairing request to ensure proper dialog behavior
-            val device = intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE)
-            val pairingVariant = intent.getIntExtra(BluetoothDevice.EXTRA_PAIRING_VARIANT, -1)
-            // Let the system handle the pairing dialog properly
-            // This ensures the dialog stays open for user interaction
-        }
+
     }
 
     private val Intent.bluetoothAdapterState: Int

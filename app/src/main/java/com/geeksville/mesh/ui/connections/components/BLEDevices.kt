@@ -38,9 +38,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.core.app.ActivityCompat
+import androidx.hilt.navigation.compose.hiltViewModel
 import com.geeksville.mesh.R
 import com.geeksville.mesh.android.getBluetoothPermissions
 import com.geeksville.mesh.model.BTScanModel
+import com.geeksville.mesh.model.UIViewModel
 
 @Suppress("LongMethod")
 @Composable
@@ -49,7 +51,8 @@ fun BLEDevices(
     selectedDevice: String,
     showBluetoothRationaleDialog: () -> Unit,
     requestBluetoothPermission: (Array<String>) -> Unit,
-    scanModel: BTScanModel
+    scanModel: BTScanModel,
+    uiViewModel: UIViewModel = hiltViewModel()
 ) {
     val context = LocalContext.current
     Row {
@@ -66,6 +69,9 @@ fun BLEDevices(
                 device,
                 device.fullAddress == selectedDevice
             ) {
+                if (!device.bonded) {
+                    uiViewModel.showSnackbar(context.getString(R.string.starting_pairing))
+                }
                 scanModel.onSelected(device)
             }
         }
