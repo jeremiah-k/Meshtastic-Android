@@ -326,7 +326,9 @@ private fun NodeDetailList(
                     onClick = { onAction(ServiceAction.GetDeviceMetadata(node.num)) }
                 )
                 NavCard(
-                    title = stringResource(id = R.string.remote_admin),
+                    title = stringResource(
+                        id = if (metricsState.isLocal) R.string.administration else R.string.remote_admin
+                    ),
                     icon = Icons.Default.Settings,
                     enabled = metricsState.isLocal || node.metadata != null
                 ) {

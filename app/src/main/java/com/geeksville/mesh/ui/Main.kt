@@ -241,8 +241,21 @@ fun MainScreen(
                                 // Avoid multiple copies of the same destination when
                                 // reselecting the same item
                                 launchSingleTop = true
-                                // Restore state when reselecting a previously selected item
-                                restoreState = true
+                                // Don't restore state for Nodes tab to prevent staying on node details
+                                // when switching tabs
+                                restoreState = destination != TopLevelDestination.Nodes
+                            }
+                        } else if (destination == TopLevelDestination.Nodes) {
+                            // If clicking on the same Nodes tab and we're in node detail,
+                            // navigate back to nodes list
+                            val currentRoute = navController.currentBackStackEntry?.destination
+                            if (currentRoute?.hasRoute<NodesRoutes.NodeDetail>() == true) {
+                                navController.navigate(NodesRoutes.Nodes) {
+                                    popUpTo(NodesRoutes.Nodes) {
+                                        inclusive = false
+                                    }
+                                    launchSingleTop = true
+                                }
                             }
                         }
                     }
