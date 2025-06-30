@@ -101,7 +101,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Random
 import java.util.UUID
@@ -2022,6 +2021,11 @@ class MeshService : Service(), Logging {
         radioConfigRepository.clearNodeDB()
     }
 
+    suspend fun clearDatabasesSync() {
+        debug("Clearing nodeDB synchronously")
+        radioConfigRepository.clearNodeDB()
+    }
+
     private fun updateLastAddress(deviceAddr: String?) {
         debug("setDeviceAddress: Passing through device change to radio service: ${deviceAddr.anonymize}")
         when (deviceAddr) {
@@ -2057,18 +2061,31 @@ class MeshService : Service(), Logging {
         override fun setDeviceAddress(deviceAddr: String?) = toRemoteExceptions {
             debug("Passing through device change to radio service: ${deviceAddr.anonymize}")
 
-            // Check if device address is actually changing to avoid unnecessary database clearing
+            // Check if device address is actually changing
             val isAddressChanging = when (deviceAddr) {
                 null, "" -> lastAddress.value != deviceAddr
                 lastAddress.value, NO_DEVICE_SELECTED -> false
                 else -> true
             }
 
-            // Clear database synchronously BEFORE connection state changes to prevent stale data display
+            // If address is changing, clear database before proceeding to prevent stale data
             if (isAddressChanging) {
                 debug("Device address changing, clearing database before connection")
-                runBlocking {
-                    radioConfigRepository.clearNodeDB()
+                try {
+                    // Use CompletableFuture to wait for database clearing without blocking main thread
+                    val future = java.util.concurrent.CompletableFuture<Unit>()
+                    serviceScope.handledLaunch {
+                        try {
+                            clearDatabasesSync()
+                            future.complete(Unit)
+                        } catch (e: Exception) {
+                            future.completeExceptionally(e)
+                        }
+                    }
+                    // Wait for database clearing with timeout
+                    future.get(2, java.util.concurrent.TimeUnit.SECONDS)
+                } catch (e: Exception) {
+                    warn("Failed to clear database before connection: ${e.message}")
                 }
             }
 
