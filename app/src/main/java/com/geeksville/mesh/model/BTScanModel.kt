@@ -241,10 +241,65 @@ class BTScanModel @Inject constructor(
             serviceRepository.meshService?.let { service ->
                 MeshService.changeDeviceAddress(context, service, address)
             }
-            devices.value = devices.value // Force a GUI update
+            // Trigger device list refresh to ensure UI shows correct device information
+            refreshDeviceList()
         } catch (ex: RemoteException) {
             errormsg("changeDeviceSelection failed, probably it is shutting down", ex)
             // ignore the failure and the GUI won't be updating anyways
+        }
+    }
+
+    private fun refreshDeviceList() {
+        // Force refresh of device list by re-combining all sources
+        viewModelScope.launch {
+            val currentDevices = mutableMapOf<String, DeviceListEntry>()
+
+            fun addDevice(entry: DeviceListEntry) {
+                currentDevices[entry.fullAddress] = entry
+            }
+
+            // Include a placeholder for "None"
+            addDevice(
+                DeviceListEntry(
+                    context.getString(R.string.none),
+                    NO_DEVICE_SELECTED,
+                    true
+                )
+            )
+
+            if (radioInterfaceService.isMockInterface()) {
+                addDevice(DeviceListEntry("Demo Mode", "m", true))
+            }
+
+            // Include paired Bluetooth devices
+            bluetoothRepository.state.value.bondedDevices
+                .map(::BLEDeviceListEntry)
+                .sortedBy { it.name }
+                .forEach(::addDevice)
+
+            // Include Network Service Discovery
+            networkRepository.resolvedList.value.forEach { service ->
+                val address = service.toAddressString()
+                val txtRecords = service.attributes
+                val shortNameBytes = txtRecords["shortname"]
+                val idBytes = txtRecords["id"]
+
+                val shortName = shortNameBytes?.let { String(it, Charsets.UTF_8) }
+                    ?: context.getString(R.string.meshtastic)
+                val deviceId = idBytes?.let { String(it, Charsets.UTF_8) }?.replace("!", "")
+                var displayName = shortName
+                if (deviceId != null) {
+                    displayName += "_$deviceId"
+                }
+                addDevice(DeviceListEntry(displayName, "t$address", true))
+            }
+
+            // Include USB devices
+            usbRepository.serialDevicesWithDrivers.value.forEach { (_, d) ->
+                addDevice(USBDeviceListEntry(radioInterfaceService, usbManagerLazy.get(), d))
+            }
+
+            devices.value = currentDevices
         }
     }
 
