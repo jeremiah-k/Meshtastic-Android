@@ -101,6 +101,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Random
 import java.util.UUID
@@ -2055,6 +2056,22 @@ class MeshService : Service(), Logging {
 
         override fun setDeviceAddress(deviceAddr: String?) = toRemoteExceptions {
             debug("Passing through device change to radio service: ${deviceAddr.anonymize}")
+
+            // Check if device address is actually changing to avoid unnecessary database clearing
+            val isAddressChanging = when (deviceAddr) {
+                null, "" -> lastAddress.value != deviceAddr
+                lastAddress.value, NO_DEVICE_SELECTED -> false
+                else -> true
+            }
+
+            // Clear database synchronously BEFORE connection state changes to prevent stale data display
+            if (isAddressChanging) {
+                debug("Device address changing, clearing database before connection")
+                runBlocking {
+                    radioConfigRepository.clearNodeDB()
+                }
+            }
+
             updateLastAddress(deviceAddr)
             val res = radioInterfaceService.setDeviceAddress(deviceAddr)
             if (res) {
