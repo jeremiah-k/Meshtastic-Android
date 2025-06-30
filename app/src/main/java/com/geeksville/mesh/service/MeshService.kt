@@ -2016,12 +2016,12 @@ class MeshService : Service(), Logging {
 
     lateinit var sharedPreferences: SharedPreferences
 
-    suspend fun clearDatabases() {
+    fun clearDatabases() = serviceScope.handledLaunch {
         debug("Clearing nodeDB")
         radioConfigRepository.clearNodeDB()
     }
 
-    private fun updateLastAddress(deviceAddr: String?) = serviceScope.handledLaunch {
+    private fun updateLastAddress(deviceAddr: String?) {
         debug("setDeviceAddress: Passing through device change to radio service: ${deviceAddr.anonymize}")
         when (deviceAddr) {
             null, "" -> {
@@ -2055,25 +2055,11 @@ class MeshService : Service(), Logging {
 
         override fun setDeviceAddress(deviceAddr: String?) = toRemoteExceptions {
             debug("Passing through device change to radio service: ${deviceAddr.anonymize}")
-
-            // Clear databases first to prevent showing stale data
-            val addressChanged = when (deviceAddr) {
-                null, "", lastAddress.value, NO_DEVICE_SELECTED -> false
-                else -> true
-            }
-
-            if (addressChanged) {
-                serviceScope.handledLaunch {
-                    clearDatabases()
-                    discardNodeDB()
-                }
-            }
-
             updateLastAddress(deviceAddr)
             val res = radioInterfaceService.setDeviceAddress(deviceAddr)
-            if (res && !addressChanged) {
+            if (res) {
                 discardNodeDB()
-            } else if (!res) {
+            } else {
                 serviceBroadcasts.broadcastConnection()
             }
             res
