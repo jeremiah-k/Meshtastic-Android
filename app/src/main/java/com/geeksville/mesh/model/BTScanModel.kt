@@ -48,6 +48,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.onCompletion
+import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
@@ -196,13 +198,15 @@ class BTScanModel @Inject constructor(
     }
 
     fun stopScan() {
-        if (scanJob != null) {
+        val currentJob = scanJob
+        if (currentJob != null) {
             debug("stopping scan")
             try {
-                scanJob?.cancel()
+                currentJob.cancel()
+                // Wait for cancellation to complete before clearing reference
+                scanJob = null
             } catch (ex: Throwable) {
                 warn("Ignoring error stopping scan, probably BT adapter was disabled suddenly: ${ex.message}")
-            } finally {
                 scanJob = null
             }
         }
@@ -211,10 +215,22 @@ class BTScanModel @Inject constructor(
 
     @SuppressLint("MissingPermission")
     fun startScan() {
-        debug("starting classic scan")
+        // Prevent concurrent scans - if already scanning, ignore request
+        if (scanJob != null) {
+            debug("Scan already in progress, ignoring request")
+            return
+        }
 
+        debug("starting classic scan")
         _spinner.value = true
-        scanJob = bluetoothRepository.scan()
+
+        val scanFlow = bluetoothRepository.scan()
+
+        // Check if scan flow is empty (failed to start)
+        scanJob = scanFlow
+            .onStart {
+                debug("Bluetooth scan started successfully")
+            }
             .onEach { result ->
                 val fullAddress = radioInterfaceService.toInterfaceAddress(
                     InterfaceId.BLUETOOTH,
@@ -230,9 +246,25 @@ class BTScanModel @Inject constructor(
                     oldDevs[entry.fullAddress] = entry
                     scanResult.value = oldDevs
                 }
-            }.catch { ex ->
-                serviceRepository.setErrorMessage("Unexpected Bluetooth scan failure: ${ex.message}")
-            }.launchIn(viewModelScope)
+            }
+            .catch { ex ->
+                warn("Bluetooth scan failed: ${ex.message}")
+                serviceRepository.setErrorMessage("Bluetooth scan failed: ${ex.message}")
+                // Reset state on error
+                _spinner.value = false
+                scanJob = null
+            }
+            .onCompletion { cause ->
+                debug("Bluetooth scan completed, cause: $cause")
+                _spinner.value = false
+                if (cause == null) {
+                    // Normal completion - check if we found any devices
+                    if (scanResult.value?.isEmpty() == true) {
+                        serviceRepository.setErrorMessage("No Bluetooth devices found")
+                    }
+                }
+            }
+            .launchIn(viewModelScope)
     }
 
     private fun changeDeviceAddress(address: String) {

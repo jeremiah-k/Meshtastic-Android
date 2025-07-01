@@ -36,8 +36,10 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -93,22 +95,28 @@ class BluetoothRepository @Inject constructor(
     }
 
     @SuppressLint("MissingPermission")
-    fun scan(): Flow<ScanResult> {
+    fun scan(): Flow<ScanResult> = flow {
         // Check if Bluetooth is available and enabled before scanning
         val adapter = bluetoothAdapterLazy.get()
         if (adapter == null) {
             debug("Bluetooth adapter not available")
-            return emptyFlow()
+            throw IllegalStateException("Bluetooth adapter not available")
         }
 
         if (!application.hasBluetoothPermission()) {
             debug("Bluetooth permissions not granted")
-            return emptyFlow()
+            throw SecurityException("Bluetooth permissions not granted")
         }
 
         if (!adapter.isEnabled) {
             debug("Bluetooth adapter not enabled")
-            return emptyFlow()
+            throw IllegalStateException("Bluetooth adapter not enabled")
+        }
+
+        val scanner = getBluetoothLeScanner()
+        if (scanner == null) {
+            debug("Bluetooth LE scanner not available")
+            throw IllegalStateException("Bluetooth LE scanner not available")
         }
 
         val filter = ScanFilter.Builder()
@@ -122,8 +130,11 @@ class BluetoothRepository @Inject constructor(
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
 
-        return getBluetoothLeScanner()?.scan(listOf(filter), settings)
-            ?.filter { it.device.name?.matches(Regex(BLE_NAME_PATTERN)) == true } ?: emptyFlow()
+        // Emit scan results from the scanner flow
+        emitAll(
+            scanner.scan(listOf(filter), settings)
+                .filter { it.device.name?.matches(Regex(BLE_NAME_PATTERN)) == true }
+        )
     }
 
     @RequiresPermission("android.permission.BLUETOOTH_CONNECT")
