@@ -99,6 +99,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.withTimeoutOrNull
@@ -365,7 +366,10 @@ class MeshService : Service(), Logging {
             .launchIn(serviceScope)
         radioConfigRepository.moduleConfigFlow.onEach { moduleConfig = it }
             .launchIn(serviceScope)
-        radioConfigRepository.channelSetFlow.onEach { channelSet = it }
+        // Only process channel data when we have an active device connection
+        radioConfigRepository.channelSetFlow
+            .filter { connectionState != ConnectionState.DISCONNECTED }
+            .onEach { channelSet = it }
             .launchIn(serviceScope)
         radioConfigRepository.serviceAction.onEach(::onServiceAction)
             .launchIn(serviceScope)

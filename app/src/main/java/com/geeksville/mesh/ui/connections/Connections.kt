@@ -223,13 +223,8 @@ fun ConnectionsScreen(
         onResult = { permissions ->
             if (permissions.entries.all { it.value }) {
                 info("Bluetooth permissions granted")
-                // We need to call the scan function which is in the Fragment
-                // Since we can't directly call scanLeDevice() from Composable,
-                // we might need to rethink how scanning is triggered or
-                // pass the scan trigger as a lambda.
-                // For now, let's assume we trigger the scan outside the Composable
-                // after permissions are granted. We can add a callback to the ViewModel.
-                scanModel.startScan()
+                // Don't automatically start scanning - let user manually trigger it
+                // This prevents premature scanning before Bluetooth adapter is fully ready
             } else {
                 warn("Bluetooth permissions denied")
                 uiViewModel.showSnackbar(context.permissionMissing)
@@ -662,8 +657,8 @@ fun ConnectionsScreen(
                         if (bluetoothPermissions.isNotEmpty()) {
                             requestBluetoothPermissionLauncher.launch(bluetoothPermissions)
                         } else {
-                            // If somehow no permissions are required, just scan
-                            scanModel.startScan()
+                            // Permissions already granted, user can manually scan
+                            showBluetoothRationaleDialog = false
                         }
                     }) {
                         Text(stringResource(R.string.okay))
