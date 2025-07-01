@@ -226,69 +226,33 @@ class BTScanModel @Inject constructor(
         debug("starting classic scan")
         _spinner.value = true
 
-        // Launch scan with delay and retry logic to handle Bluetooth stack timing issues
-        scanJob = viewModelScope.launch {
-            var retryCount = 0
-            val maxRetries = 2
-
-            while (retryCount <= maxRetries) {
-                try {
-                    // Longer delay to ensure Bluetooth stack is fully ready
-                    delay(if (retryCount == 0) 200L else 500L * retryCount)
-
-                val scanFlow = bluetoothRepository.scan()
-
-                scanFlow
-                    .onStart {
-                        debug("Bluetooth scan started")
-                    }
-                    .onEach { result ->
-                        val fullAddress = radioInterfaceService.toInterfaceAddress(
-                            InterfaceId.BLUETOOTH,
-                            result.device.address
-                        )
-                        // prevent log spam because we'll get lots of redundant scan results
-                        val isBonded = result.device.bondState == BluetoothDevice.BOND_BONDED
-                        val oldDevs = scanResult.value!!
-                        val oldEntry = oldDevs[fullAddress]
-                        // Don't spam the GUI with endless updates for non changing nodes
-                        if (oldEntry == null || oldEntry.bonded != isBonded) {
-                            val entry = DeviceListEntry(result.device.name, fullAddress, isBonded)
-                            oldDevs[entry.fullAddress] = entry
-                            scanResult.value = oldDevs
-                        }
-                    }
-                    .catch { ex ->
-                        warn("Bluetooth scan failed (attempt ${retryCount + 1}): ${ex.message}")
-                        if (retryCount >= maxRetries) {
-                            serviceRepository.setErrorMessage("Bluetooth scan failed after ${maxRetries + 1} attempts: ${ex.message}")
-                            throw ex // Re-throw to exit retry loop
-                        }
-                    }
-                    .onCompletion { cause ->
-                        debug("Bluetooth scan completed, cause: $cause")
-                        _spinner.value = false
-                        scanJob = null
-                    }
-                    .launchIn(this)
-
-                    // Scan started successfully, exit retry loop
-                    break
-
-                } catch (ex: Exception) {
-                    retryCount++
-                    if (retryCount > maxRetries) {
-                        warn("Failed to start Bluetooth scan after $maxRetries retries: ${ex.message}")
-                        serviceRepository.setErrorMessage("Failed to start scan after $maxRetries retries: ${ex.message}")
-                        _spinner.value = false
-                        scanJob = null
-                        break
-                    } else {
-                        warn("Bluetooth scan attempt $retryCount failed, retrying: ${ex.message}")
-                    }
+        scanJob = bluetoothRepository.scan()
+            .onEach { result ->
+                val fullAddress = radioInterfaceService.toInterfaceAddress(
+                    InterfaceId.BLUETOOTH,
+                    result.device.address
+                )
+                // prevent log spam because we'll get lots of redundant scan results
+                val isBonded = result.device.bondState == BluetoothDevice.BOND_BONDED
+                val oldDevs = scanResult.value!!
+                val oldEntry = oldDevs[fullAddress]
+                // Don't spam the GUI with endless updates for non changing nodes
+                if (oldEntry == null || oldEntry.bonded != isBonded) {
+                    val entry = DeviceListEntry(result.device.name, fullAddress, isBonded)
+                    oldDevs[entry.fullAddress] = entry
+                    scanResult.value = oldDevs
                 }
             }
-        }
+            .catch { ex ->
+                warn("Bluetooth scan failed: ${ex.message}")
+                serviceRepository.setErrorMessage("Bluetooth scan failed: ${ex.message}")
+            }
+            .onCompletion { cause ->
+                debug("Bluetooth scan completed, cause: $cause")
+                _spinner.value = false
+                scanJob = null
+            }
+            .launchIn(viewModelScope)
     }
 
     private fun changeDeviceAddress(address: String) {
