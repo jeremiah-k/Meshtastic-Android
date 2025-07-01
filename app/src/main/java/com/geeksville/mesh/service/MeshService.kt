@@ -2038,6 +2038,8 @@ class MeshService : Service(), Logging {
 
             else -> {
                 debug("SetDeviceAddress: Device address changed from $lastAddress to $deviceAddr")
+                // Clear in-memory node data immediately to prevent stale UI display
+                discardNodeDB()
                 _lastAddress.value = deviceAddr
                 sharedPreferences.edit {
                     putString("device_address", deviceAddr)
@@ -2057,9 +2059,7 @@ class MeshService : Service(), Logging {
             debug("Passing through device change to radio service: ${deviceAddr.anonymize}")
             updateLastAddress(deviceAddr)
             val res = radioInterfaceService.setDeviceAddress(deviceAddr)
-            if (res) {
-                discardNodeDB()
-            } else {
+            if (!res) {
                 serviceBroadcasts.broadcastConnection()
             }
             res
