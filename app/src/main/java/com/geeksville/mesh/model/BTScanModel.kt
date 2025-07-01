@@ -41,6 +41,7 @@ import com.geeksville.mesh.util.anonymize
 import com.hoho.android.usbserial.driver.UsbSerialDriver
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -50,6 +51,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.flow.onStart
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
@@ -203,7 +205,6 @@ class BTScanModel @Inject constructor(
             debug("stopping scan")
             try {
                 currentJob.cancel()
-                // Wait for cancellation to complete before clearing reference
                 scanJob = null
             } catch (ex: Throwable) {
                 warn("Ignoring error stopping scan, probably BT adapter was disabled suddenly: ${ex.message}")
@@ -224,44 +225,57 @@ class BTScanModel @Inject constructor(
         debug("starting classic scan")
         _spinner.value = true
 
-        val scanFlow = bluetoothRepository.scan()
+        // Launch scan with small delay to ensure Bluetooth stack is ready
+        scanJob = viewModelScope.launch {
+            try {
+                // Small delay to ensure previous scan cleanup is complete
+                delay(100)
 
-        scanJob = scanFlow
-            .onStart {
-                debug("Bluetooth scan started")
-            }
-            .onEach { result ->
-                val fullAddress = radioInterfaceService.toInterfaceAddress(
-                    InterfaceId.BLUETOOTH,
-                    result.device.address
-                )
-                // prevent log spam because we'll get lots of redundant scan results
-                val isBonded = result.device.bondState == BluetoothDevice.BOND_BONDED
-                val oldDevs = scanResult.value!!
-                val oldEntry = oldDevs[fullAddress]
-                // Don't spam the GUI with endless updates for non changing nodes
-                if (oldEntry == null || oldEntry.bonded != isBonded) {
-                    val entry = DeviceListEntry(result.device.name, fullAddress, isBonded)
-                    oldDevs[entry.fullAddress] = entry
-                    scanResult.value = oldDevs
-                }
-            }
-            .catch { ex ->
-                warn("Bluetooth scan failed: ${ex.message}")
-                serviceRepository.setErrorMessage("Bluetooth scan failed: ${ex.message}")
-            }
-            .onCompletion { cause ->
-                debug("Bluetooth scan completed, cause: $cause")
+                val scanFlow = bluetoothRepository.scan()
+
+                scanFlow
+                    .onStart {
+                        debug("Bluetooth scan started")
+                    }
+                    .onEach { result ->
+                        val fullAddress = radioInterfaceService.toInterfaceAddress(
+                            InterfaceId.BLUETOOTH,
+                            result.device.address
+                        )
+                        // prevent log spam because we'll get lots of redundant scan results
+                        val isBonded = result.device.bondState == BluetoothDevice.BOND_BONDED
+                        val oldDevs = scanResult.value!!
+                        val oldEntry = oldDevs[fullAddress]
+                        // Don't spam the GUI with endless updates for non changing nodes
+                        if (oldEntry == null || oldEntry.bonded != isBonded) {
+                            val entry = DeviceListEntry(result.device.name, fullAddress, isBonded)
+                            oldDevs[entry.fullAddress] = entry
+                            scanResult.value = oldDevs
+                        }
+                    }
+                    .catch { ex ->
+                        warn("Bluetooth scan failed: ${ex.message}")
+                        serviceRepository.setErrorMessage("Bluetooth scan failed: ${ex.message}")
+                    }
+                    .onCompletion { cause ->
+                        debug("Bluetooth scan completed, cause: $cause")
+                        _spinner.value = false
+                        scanJob = null
+
+                        // Check for scan failure conditions
+                        if (cause == null && scanResult.value?.isEmpty() == true) {
+                            // No devices found - could be normal or could indicate scan didn't work
+                            debug("No Bluetooth devices found during scan")
+                        }
+                    }
+                    .launchIn(this)
+            } catch (ex: Exception) {
+                warn("Failed to start Bluetooth scan: ${ex.message}")
+                serviceRepository.setErrorMessage("Failed to start scan: ${ex.message}")
                 _spinner.value = false
                 scanJob = null
-
-                // Check for scan failure conditions
-                if (cause == null && scanResult.value?.isEmpty() == true) {
-                    // No devices found - could be normal or could indicate scan didn't work
-                    debug("No Bluetooth devices found during scan")
-                }
             }
-            .launchIn(viewModelScope)
+        }
     }
 
     private fun changeDeviceAddress(address: String) {
