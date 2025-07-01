@@ -88,12 +88,29 @@ class BluetoothRepository @Inject constructor(
 
     private fun getBluetoothLeScanner(): BluetoothLeScanner? {
         return bluetoothAdapterLazy.get()
-            ?.takeIf { application.hasBluetoothPermission() }
+            ?.takeIf { application.hasBluetoothPermission() && it.isEnabled }
             ?.bluetoothLeScanner
     }
 
     @SuppressLint("MissingPermission")
     fun scan(): Flow<ScanResult> {
+        // Check if Bluetooth is available and enabled before scanning
+        val adapter = bluetoothAdapterLazy.get()
+        if (adapter == null) {
+            debug("Bluetooth adapter not available")
+            return emptyFlow()
+        }
+
+        if (!application.hasBluetoothPermission()) {
+            debug("Bluetooth permissions not granted")
+            return emptyFlow()
+        }
+
+        if (!adapter.isEnabled) {
+            debug("Bluetooth adapter not enabled")
+            return emptyFlow()
+        }
+
         val filter = ScanFilter.Builder()
             // Samsung doesn't seem to filter properly by service so this can't work
             // see https://stackoverflow.com/questions/57981986/altbeacon-android-beacon-library-not-working-after-device-has-screen-off-for-a-s/57995960#57995960
