@@ -2055,11 +2055,26 @@ class MeshService : Service(), Logging {
 
         override fun setDeviceAddress(deviceAddr: String?) = toRemoteExceptions {
             debug("Passing through device change to radio service: ${deviceAddr.anonymize}")
+
+            // Check if device address is actually changing
+            val isAddressChanging = when (deviceAddr) {
+                null, "" -> lastAddress.value != deviceAddr
+                lastAddress.value, NO_DEVICE_SELECTED -> false
+                else -> true
+            }
+
+            // If address is changing, clear in-memory data immediately to prevent stale UI display
+            if (isAddressChanging) {
+                debug("Device address changing, clearing in-memory data immediately")
+                discardNodeDB()
+            }
+
             updateLastAddress(deviceAddr)
             val res = radioInterfaceService.setDeviceAddress(deviceAddr)
-            if (res) {
+            if (res && !isAddressChanging) {
+                // Only discard again if we didn't already do it above
                 discardNodeDB()
-            } else {
+            } else if (!res) {
                 serviceBroadcasts.broadcastConnection()
             }
             res
