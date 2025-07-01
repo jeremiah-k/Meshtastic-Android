@@ -226,10 +226,9 @@ class BTScanModel @Inject constructor(
 
         val scanFlow = bluetoothRepository.scan()
 
-        // Check if scan flow is empty (failed to start)
         scanJob = scanFlow
             .onStart {
-                debug("Bluetooth scan started successfully")
+                debug("Bluetooth scan started")
             }
             .onEach { result ->
                 val fullAddress = radioInterfaceService.toInterfaceAddress(
@@ -250,18 +249,16 @@ class BTScanModel @Inject constructor(
             .catch { ex ->
                 warn("Bluetooth scan failed: ${ex.message}")
                 serviceRepository.setErrorMessage("Bluetooth scan failed: ${ex.message}")
-                // Reset state on error
-                _spinner.value = false
-                scanJob = null
             }
             .onCompletion { cause ->
                 debug("Bluetooth scan completed, cause: $cause")
                 _spinner.value = false
-                if (cause == null) {
-                    // Normal completion - check if we found any devices
-                    if (scanResult.value?.isEmpty() == true) {
-                        serviceRepository.setErrorMessage("No Bluetooth devices found")
-                    }
+                scanJob = null
+
+                // Check for scan failure conditions
+                if (cause == null && scanResult.value?.isEmpty() == true) {
+                    // No devices found - could be normal or could indicate scan didn't work
+                    debug("No Bluetooth devices found during scan")
                 }
             }
             .launchIn(viewModelScope)

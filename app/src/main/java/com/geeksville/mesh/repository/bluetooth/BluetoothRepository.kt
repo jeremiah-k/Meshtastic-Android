@@ -95,28 +95,28 @@ class BluetoothRepository @Inject constructor(
     }
 
     @SuppressLint("MissingPermission")
-    fun scan(): Flow<ScanResult> = flow {
+    fun scan(): Flow<ScanResult> {
         // Check if Bluetooth is available and enabled before scanning
         val adapter = bluetoothAdapterLazy.get()
         if (adapter == null) {
             debug("Bluetooth adapter not available")
-            throw IllegalStateException("Bluetooth adapter not available")
+            return emptyFlow()
         }
 
         if (!application.hasBluetoothPermission()) {
             debug("Bluetooth permissions not granted")
-            throw SecurityException("Bluetooth permissions not granted")
+            return emptyFlow()
         }
 
         if (!adapter.isEnabled) {
             debug("Bluetooth adapter not enabled")
-            throw IllegalStateException("Bluetooth adapter not enabled")
+            return emptyFlow()
         }
 
         val scanner = getBluetoothLeScanner()
         if (scanner == null) {
             debug("Bluetooth LE scanner not available")
-            throw IllegalStateException("Bluetooth LE scanner not available")
+            return emptyFlow()
         }
 
         val filter = ScanFilter.Builder()
@@ -130,11 +130,8 @@ class BluetoothRepository @Inject constructor(
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
 
-        // Emit scan results from the scanner flow
-        emitAll(
-            scanner.scan(listOf(filter), settings)
-                .filter { it.device.name?.matches(Regex(BLE_NAME_PATTERN)) == true }
-        )
+        return scanner.scan(listOf(filter), settings)
+            .filter { it.device.name?.matches(Regex(BLE_NAME_PATTERN)) == true }
     }
 
     @RequiresPermission("android.permission.BLUETOOTH_CONNECT")
