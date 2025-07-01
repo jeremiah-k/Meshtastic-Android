@@ -68,9 +68,8 @@ class BTScanModel @Inject constructor(
     val devices = MutableLiveData<MutableMap<String, DeviceListEntry>>(mutableMapOf())
     val errorText = MutableLiveData<String?>(null)
 
-    private val showMockInterface: StateFlow<Boolean>
-        get() =
-            MutableStateFlow(radioInterfaceService.isMockInterface()).asStateFlow()
+    private val showMockInterface: StateFlow<Boolean> =
+        MutableStateFlow(radioInterfaceService.isMockInterface()).asStateFlow()
 
     init {
         combine(

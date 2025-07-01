@@ -140,7 +140,9 @@ class RadioInterfaceService @Inject constructor(
     }
 
     fun isMockInterface(): Boolean {
-        return BuildConfig.DEBUG || (context as GeeksvilleApplication).isInTestLab
+        // Only use mock interface in test lab or when explicitly enabled via system property
+        return (context as GeeksvilleApplication).isInTestLab ||
+               System.getProperty("meshtastic.mock.enabled") == "true"
     }
 
     /** Return the device we are configured to use, or null for none
