@@ -42,20 +42,7 @@ internal fun BluetoothLeScanner.scan(
             cancel("onScanFailed() called with errorCode: $errorCode")
         }
     }
+    startScan(filters, scanSettings, callback)
 
-    try {
-        startScan(filters, scanSettings, callback)
-    } catch (ex: Exception) {
-        // Handle immediate scan start failures
-        close(ex)
-        return@callbackFlow
-    }
-
-    awaitClose {
-        try {
-            stopScan(callback)
-        } catch (ex: Exception) {
-            // Ignore cleanup errors - adapter might be disabled
-        }
-    }
+    awaitClose { stopScan(callback) }
 }

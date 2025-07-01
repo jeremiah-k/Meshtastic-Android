@@ -201,14 +201,13 @@ class BTScanModel @Inject constructor(
     }
 
     fun stopScan() {
-        val currentJob = scanJob
-        if (currentJob != null) {
+        if (scanJob != null) {
             debug("stopping scan")
             try {
-                currentJob.cancel()
-                scanJob = null
+                scanJob?.cancel()
             } catch (ex: Throwable) {
                 warn("Ignoring error stopping scan, probably BT adapter was disabled suddenly: ${ex.message}")
+            } finally {
                 scanJob = null
             }
         }
@@ -217,15 +216,9 @@ class BTScanModel @Inject constructor(
 
     @SuppressLint("MissingPermission")
     fun startScan() {
-        // Prevent concurrent scans - if already scanning, ignore request
-        if (scanJob != null) {
-            debug("Scan already in progress, ignoring request")
-            return
-        }
-
         debug("starting classic scan")
-        _spinner.value = true
 
+        _spinner.value = true
         scanJob = bluetoothRepository.scan()
             .onEach { result ->
                 val fullAddress = radioInterfaceService.toInterfaceAddress(
@@ -242,17 +235,9 @@ class BTScanModel @Inject constructor(
                     oldDevs[entry.fullAddress] = entry
                     scanResult.value = oldDevs
                 }
-            }
-            .catch { ex ->
-                warn("Bluetooth scan failed: ${ex.message}")
-                serviceRepository.setErrorMessage("Bluetooth scan failed: ${ex.message}")
-            }
-            .onCompletion { cause ->
-                debug("Bluetooth scan completed, cause: $cause")
-                _spinner.value = false
-                scanJob = null
-            }
-            .launchIn(viewModelScope)
+            }.catch { ex ->
+                serviceRepository.setErrorMessage("Unexpected Bluetooth scan failure: ${ex.message}")
+            }.launchIn(viewModelScope)
     }
 
     private fun changeDeviceAddress(address: String) {
