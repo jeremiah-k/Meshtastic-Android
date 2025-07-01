@@ -20,6 +20,7 @@ package com.geeksville.mesh.model
 import android.annotation.SuppressLint
 import android.app.Application
 import android.bluetooth.BluetoothDevice
+import android.bluetooth.le.ScanResult
 import android.content.Context
 import android.hardware.usb.UsbManager
 import android.os.RemoteException
@@ -225,11 +226,15 @@ class BTScanModel @Inject constructor(
         debug("starting classic scan")
         _spinner.value = true
 
-        // Launch scan with small delay to ensure Bluetooth stack is ready
+        // Launch scan with delay and retry logic to handle Bluetooth stack timing issues
         scanJob = viewModelScope.launch {
-            try {
-                // Small delay to ensure previous scan cleanup is complete
-                delay(100)
+            var retryCount = 0
+            val maxRetries = 2
+
+            while (retryCount <= maxRetries) {
+                try {
+                    // Longer delay to ensure Bluetooth stack is fully ready
+                    delay(if (retryCount == 0) 200L else 500L * retryCount)
 
                 val scanFlow = bluetoothRepository.scan()
 
@@ -254,26 +259,34 @@ class BTScanModel @Inject constructor(
                         }
                     }
                     .catch { ex ->
-                        warn("Bluetooth scan failed: ${ex.message}")
-                        serviceRepository.setErrorMessage("Bluetooth scan failed: ${ex.message}")
+                        warn("Bluetooth scan failed (attempt ${retryCount + 1}): ${ex.message}")
+                        if (retryCount >= maxRetries) {
+                            serviceRepository.setErrorMessage("Bluetooth scan failed after ${maxRetries + 1} attempts: ${ex.message}")
+                            throw ex // Re-throw to exit retry loop
+                        }
                     }
                     .onCompletion { cause ->
                         debug("Bluetooth scan completed, cause: $cause")
                         _spinner.value = false
                         scanJob = null
-
-                        // Check for scan failure conditions
-                        if (cause == null && scanResult.value?.isEmpty() == true) {
-                            // No devices found - could be normal or could indicate scan didn't work
-                            debug("No Bluetooth devices found during scan")
-                        }
                     }
                     .launchIn(this)
-            } catch (ex: Exception) {
-                warn("Failed to start Bluetooth scan: ${ex.message}")
-                serviceRepository.setErrorMessage("Failed to start scan: ${ex.message}")
-                _spinner.value = false
-                scanJob = null
+
+                    // Scan started successfully, exit retry loop
+                    break
+
+                } catch (ex: Exception) {
+                    retryCount++
+                    if (retryCount > maxRetries) {
+                        warn("Failed to start Bluetooth scan after $maxRetries retries: ${ex.message}")
+                        serviceRepository.setErrorMessage("Failed to start scan after $maxRetries retries: ${ex.message}")
+                        _spinner.value = false
+                        scanJob = null
+                        break
+                    } else {
+                        warn("Bluetooth scan attempt $retryCount failed, retrying: ${ex.message}")
+                    }
+                }
             }
         }
     }
