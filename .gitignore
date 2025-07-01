@@ -29,3 +29,7 @@ keystore.properties
 
 # VS code
 .vscode/settings.json
+
+node_modules/
+package-lock.json
+package.json
