@@ -23,6 +23,7 @@ import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import androidx.annotation.RequiresPermission
+import com.geeksville.mesh.android.Logging
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
@@ -33,16 +34,35 @@ internal fun BluetoothLeScanner.scan(
     filters: List<ScanFilter> = emptyList(),
     scanSettings: ScanSettings = ScanSettings.Builder().build(),
 ): Flow<ScanResult> = callbackFlow {
+    val logger = object : Logging {}
     val callback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
+            logger.debug("BluetoothLeScanner: onScanResult received")
             trySend(result)
         }
 
         override fun onScanFailed(errorCode: Int) {
+            logger.errormsg("BluetoothLeScanner: onScanFailed with errorCode: $errorCode")
             cancel("onScanFailed() called with errorCode: $errorCode")
         }
     }
-    startScan(filters, scanSettings, callback)
 
-    awaitClose { stopScan(callback) }
+    logger.debug("BluetoothLeScanner: starting scan with callback $callback")
+    try {
+        startScan(filters, scanSettings, callback)
+        logger.debug("BluetoothLeScanner: startScan() completed successfully")
+    } catch (ex: Exception) {
+        logger.errormsg("BluetoothLeScanner: startScan() failed: ${ex.message}")
+        throw ex
+    }
+
+    awaitClose {
+        logger.debug("BluetoothLeScanner: awaitClose called, stopping scan with callback $callback")
+        try {
+            stopScan(callback)
+            logger.debug("BluetoothLeScanner: stopScan() completed successfully")
+        } catch (ex: Exception) {
+            logger.warn("BluetoothLeScanner: stopScan() failed: ${ex.message}")
+        }
+    }
 }

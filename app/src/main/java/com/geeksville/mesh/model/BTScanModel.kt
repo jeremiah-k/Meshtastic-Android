@@ -168,8 +168,9 @@ class BTScanModel @Inject constructor(
 
     override fun onCleared() {
         super.onCleared()
+        debug("BTScanModel: onCleared() called")
         stopScan()
-        debug("BTScanModel cleared")
+        debug("BTScanModel: onCleared() completed")
     }
 
     fun setErrorText(text: String) {
@@ -197,25 +198,30 @@ class BTScanModel @Inject constructor(
 
     fun stopScan() {
         if (scanJob != null) {
-            debug("stopping scan")
+            debug("BTScanModel: stopping scan, scanJob=$scanJob")
             try {
                 scanJob?.cancel()
+                debug("BTScanModel: scan job cancelled successfully")
             } catch (ex: Throwable) {
-                warn("Ignoring error stopping scan, probably BT adapter was disabled suddenly: ${ex.message}")
+                warn("BTScanModel: error stopping scan: ${ex.message}")
             } finally {
                 scanJob = null
+                debug("BTScanModel: scanJob set to null")
             }
+        } else {
+            debug("BTScanModel: stopScan called but scanJob is already null")
         }
         _spinner.value = false
     }
 
     @SuppressLint("MissingPermission")
     fun startScan() {
-        debug("starting classic scan")
+        debug("BTScanModel: startScan() called")
 
         // Stop any existing scan first to prevent registration conflicts
         stopScan()
 
+        debug("BTScanModel: starting new scan")
         _spinner.value = true
         scanJob = bluetoothRepository.scan()
             .onEach { result ->
