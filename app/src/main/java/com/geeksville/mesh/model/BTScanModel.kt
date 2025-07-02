@@ -49,8 +49,6 @@ import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
 import javax.inject.Inject
@@ -70,14 +68,7 @@ class BTScanModel @Inject constructor(
     val devices = MutableLiveData<MutableMap<String, DeviceListEntry>>(mutableMapOf())
     val errorText = MutableLiveData<String?>(null)
 
-    private val showMockInterface: StateFlow<Boolean> =
-        radioInterfaceService.currentDeviceAddressFlow
-            .map { radioInterfaceService.isMockInterface() }
-            .stateIn(
-                viewModelScope,
-                SharingStarted.WhileSubscribed(SHARING_STARTED_TIMEOUT_MS),
-                radioInterfaceService.isMockInterface()
-            )
+    private val showMockInterface: StateFlow<Boolean> = MutableStateFlow(radioInterfaceService.isMockInterface()).asStateFlow()
 
     init {
         combine(
