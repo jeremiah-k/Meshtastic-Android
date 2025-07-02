@@ -38,6 +38,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.onStart
+import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -92,8 +94,18 @@ class BluetoothRepository @Inject constructor(
             ?.bluetoothLeScanner
     }
 
+    // Track active scan to prevent multiple simultaneous scans
+    @Volatile
+    private var isScanning = false
+
     @SuppressLint("MissingPermission")
     fun scan(): Flow<ScanResult> {
+        // Prevent multiple simultaneous scans
+        if (isScanning) {
+            debug("Scan already in progress, returning empty flow")
+            return emptyFlow()
+        }
+
         val filter = ScanFilter.Builder()
             // Samsung doesn't seem to filter properly by service so this can't work
             // see https://stackoverflow.com/questions/57981986/altbeacon-android-beacon-library-not-working-after-device-has-screen-off-for-a-s/57995960#57995960
@@ -110,6 +122,14 @@ class BluetoothRepository @Inject constructor(
             .build()
 
         return getBluetoothLeScanner()?.scan(listOf(filter), settings)
+            ?.onStart {
+                debug("Starting BLE scan")
+                isScanning = true
+            }
+            ?.onCompletion {
+                debug("BLE scan completed")
+                isScanning = false
+            }
             ?.filter { it.device.name?.matches(Regex(BLE_NAME_PATTERN)) == true } ?: emptyFlow()
     }
 

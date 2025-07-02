@@ -29,12 +29,26 @@ import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 
+// Global scan state tracking to prevent multiple simultaneous scans
+private var globalScanCallback: ScanCallback? = null
+
 @RequiresPermission("android.permission.BLUETOOTH_SCAN")
 internal fun BluetoothLeScanner.scan(
     filters: List<ScanFilter> = emptyList(),
     scanSettings: ScanSettings = ScanSettings.Builder().build(),
 ): Flow<ScanResult> = callbackFlow {
     val logger = object : Logging {}
+
+    // Stop any existing scan first to prevent registration conflicts
+    globalScanCallback?.let { existingCallback ->
+        logger.debug("BluetoothLeScanner: stopping existing scan before starting new one")
+        try {
+            stopScan(existingCallback)
+            globalScanCallback = null
+        } catch (ex: Exception) {
+            logger.warn("BluetoothLeScanner: failed to stop existing scan: ${ex.message}")
+        }
+    }
 
     val callback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
@@ -44,17 +58,20 @@ internal fun BluetoothLeScanner.scan(
 
         override fun onScanFailed(errorCode: Int) {
             logger.errormsg("BluetoothLeScanner: onScanFailed with errorCode: $errorCode")
-            // Don't cancel immediately, let the flow handle cleanup
+            globalScanCallback = null
             close(Exception("Scan failed with error code: $errorCode"))
         }
     }
 
+    globalScanCallback = callback
     logger.debug("BluetoothLeScanner: starting scan with callback $callback")
+
     try {
         startScan(filters, scanSettings, callback)
         logger.debug("BluetoothLeScanner: startScan() completed successfully")
     } catch (ex: Exception) {
         logger.errormsg("BluetoothLeScanner: startScan() failed: ${ex.message}")
+        globalScanCallback = null
         close(ex)
         return@callbackFlow
     }
@@ -63,6 +80,7 @@ internal fun BluetoothLeScanner.scan(
         logger.debug("BluetoothLeScanner: awaitClose called, stopping scan with callback $callback")
         try {
             stopScan(callback)
+            globalScanCallback = null
             logger.debug("BluetoothLeScanner: stopScan() completed successfully")
         } catch (ex: Exception) {
             logger.warn("BluetoothLeScanner: stopScan() failed: ${ex.message}")
