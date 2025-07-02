@@ -2017,8 +2017,11 @@ class MeshService : Service(), Logging {
     lateinit var sharedPreferences: SharedPreferences
 
     fun clearDatabases() = serviceScope.handledLaunch {
-        debug("Clearing nodeDB")
+        debug("Clearing all device data")
         radioConfigRepository.clearNodeDB()
+        radioConfigRepository.clearChannelSet()
+        radioConfigRepository.clearLocalConfig()
+        radioConfigRepository.clearLocalModuleConfig()
     }
 
     private fun updateLastAddress(deviceAddr: String?) {
