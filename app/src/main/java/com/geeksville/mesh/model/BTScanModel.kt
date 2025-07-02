@@ -53,6 +53,8 @@ import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 import javax.inject.Inject
 
 @HiltViewModel
@@ -223,35 +225,42 @@ class BTScanModel @Inject constructor(
         // Stop any existing scan first to prevent registration conflicts
         stopScan()
 
-        debug("BTScanModel: starting new scan")
-        _spinner.value = true
-        scanJob = bluetoothRepository.scan()
-            .onStart {
-                debug("BTScanModel: Flow onStart - scan collection started")
-            }
-            .onCompletion { cause ->
-                debug("BTScanModel: Flow onCompletion - scan collection ended, cause: $cause")
-            }
-            .onEach { result ->
-                val fullAddress = radioInterfaceService.toInterfaceAddress(
-                    InterfaceId.BLUETOOTH,
-                    result.device.address
-                )
-                // prevent log spam because we'll get lots of redundant scan results
-                val isBonded = result.device.bondState == BluetoothDevice.BOND_BONDED
-                val oldDevs = scanResult.value!!
-                val oldEntry = oldDevs[fullAddress]
-                // Don't spam the GUI with endless updates for non changing nodes
-                if (oldEntry == null || oldEntry.bonded != isBonded) {
-                    val entry = DeviceListEntry(result.device.name, fullAddress, isBonded)
-                    oldDevs[entry.fullAddress] = entry
-                    scanResult.value = oldDevs
+        // Add cooldown period to give Android Bluetooth stack time to recover
+        // This addresses system-level stale state issues per Jules AI recommendation
+        viewModelScope.launch {
+            debug("BTScanModel: waiting 2 seconds for Bluetooth stack cooldown")
+            delay(2000)
+
+            debug("BTScanModel: starting new scan after cooldown")
+            _spinner.value = true
+            scanJob = bluetoothRepository.scan()
+                .onStart {
+                    debug("BTScanModel: Flow onStart - scan collection started")
                 }
-            }.catch { ex ->
-                debug("BTScanModel: scan failed with exception: ${ex.message}")
-                serviceRepository.setErrorMessage("Bluetooth scan failed: ${ex.message}")
-                _spinner.value = false
-            }.launchIn(viewModelScope)
+                .onCompletion { cause ->
+                    debug("BTScanModel: Flow onCompletion - scan collection ended, cause: $cause")
+                }
+                .onEach { result ->
+                    val fullAddress = radioInterfaceService.toInterfaceAddress(
+                        InterfaceId.BLUETOOTH,
+                        result.device.address
+                    )
+                    // prevent log spam because we'll get lots of redundant scan results
+                    val isBonded = result.device.bondState == BluetoothDevice.BOND_BONDED
+                    val oldDevs = scanResult.value!!
+                    val oldEntry = oldDevs[fullAddress]
+                    // Don't spam the GUI with endless updates for non changing nodes
+                    if (oldEntry == null || oldEntry.bonded != isBonded) {
+                        val entry = DeviceListEntry(result.device.name, fullAddress, isBonded)
+                        oldDevs[entry.fullAddress] = entry
+                        scanResult.value = oldDevs
+                    }
+                }.catch { ex ->
+                    debug("BTScanModel: scan failed with exception: ${ex.message}")
+                    serviceRepository.setErrorMessage("Bluetooth scan failed: ${ex.message}")
+                    _spinner.value = false
+                }.launchIn(viewModelScope)
+        }
     }
 
     private fun changeDeviceAddress(address: String) {

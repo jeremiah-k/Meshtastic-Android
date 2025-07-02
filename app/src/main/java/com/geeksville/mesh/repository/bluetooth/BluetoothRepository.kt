@@ -121,15 +121,9 @@ class BluetoothRepository @Inject constructor(
 
         errormsg("BluetoothRepository: Scanner obtained successfully: ${scanner.hashCode()}")
 
-        val filter = ScanFilter.Builder()
-            // Samsung doesn't seem to filter properly by service so this can't work
-            // see https://stackoverflow.com/questions/57981986/altbeacon-android-beacon-library-not-working-after-device-has-screen-off-for-a-s/57995960#57995960
-            // and https://stackoverflow.com/a/45590493
-            // .setServiceUuid(ParcelUuid(BluetoothInterface.BTM_SERVICE_UUID))
-            .build()
-
+        // Use absolute minimum scan settings per Jules AI recommendation
         val settings = ScanSettings.Builder()
-            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY) // Changed for testing per Jules suggestion
+            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
 
         val scanCallback = object : ScanCallback() {
@@ -153,7 +147,8 @@ class BluetoothRepository @Inject constructor(
         isScanning = true
 
         try {
-            scanner.startScan(listOf(filter), settings, scanCallback)
+            // Use null filters to scan for all BLE devices per Jules AI recommendation
+            scanner.startScan(null, settings, scanCallback)
             errormsg("BluetoothRepository: BLE scan started successfully: scanner=${scanner.hashCode()}, callback=${scanCallback.hashCode()}")
         } catch (ex: Exception) {
             errormsg("BluetoothRepository: Failed to start BLE scan: ${ex.message}, scanner=${scanner.hashCode()}, callback=${scanCallback.hashCode()}")
