@@ -103,32 +103,39 @@ class BluetoothRepository @Inject constructor(
 
     @SuppressLint("MissingPermission")
     fun scan(): Flow<ScanResult> = callbackFlow {
-        errormsg("BluetoothRepository: scan() method called, isScanning=$isScanning")
+        debug("BluetoothRepository: scan() method called, isScanning=$isScanning")
 
         // Prevent multiple simultaneous scans
         if (isScanning) {
-            errormsg("BluetoothRepository: Scan already in progress, closing flow")
+            debug("BluetoothRepository: Scan already in progress, closing flow")
             close()
             return@callbackFlow
         }
 
         val scanner = getBluetoothLeScanner()
         if (scanner == null) {
-            errormsg("BluetoothRepository: BluetoothLeScanner not available")
+            debug("BluetoothRepository: BluetoothLeScanner not available")
             close()
             return@callbackFlow
         }
 
-        errormsg("BluetoothRepository: Scanner obtained successfully: ${scanner.hashCode()}")
+        val filter = ScanFilter.Builder()
+            // Samsung doesn't seem to filter properly by service so this can't work
+            // see https://stackoverflow.com/questions/57981986/altbeacon-android-beacon-library-not-working-after-device-has-screen-off-for-a-s/57995960#57995960
+            // and https://stackoverflow.com/a/45590493
+            // .setServiceUuid(ParcelUuid(BluetoothInterface.BTM_SERVICE_UUID))
+            .build()
 
-        // Use absolute minimum scan settings per Jules AI recommendation
         val settings = ScanSettings.Builder()
-            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY) // More reliable than LOW_POWER for discovery
+            .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
+            .setMatchMode(ScanSettings.MATCH_MODE_AGGRESSIVE)
+            .setNumOfMatches(ScanSettings.MATCH_NUM_ONE_ADVERTISEMENT)
+            .setReportDelay(0)
             .build()
 
         val scanCallback = object : ScanCallback() {
             override fun onScanResult(callbackType: Int, result: ScanResult) {
-                debug("BLE onScanResult: callbackType=$callbackType, device=${result.device.name}, callback=${this.hashCode()}")
                 // Filter for Meshtastic devices only
                 if (result.device.name?.matches(Regex(BLE_NAME_PATTERN)) == true) {
                     debug("Found Meshtastic device: ${result.device.name}")
@@ -137,21 +144,20 @@ class BluetoothRepository @Inject constructor(
             }
 
             override fun onScanFailed(errorCode: Int) {
-                errormsg("BLE onScanFailed: errorCode=$errorCode, callback=${this.hashCode()}, isScanning=$isScanning")
+                errormsg("BLE scan failed with error code: $errorCode")
                 isScanning = false
                 close(Exception("Scan failed with error code: $errorCode"))
             }
         }
 
-        errormsg("BluetoothRepository: Starting BLE scan: scanner=${scanner.hashCode()}, callback=${scanCallback.hashCode()}, isScanning=$isScanning")
+        debug("BluetoothRepository: Starting BLE scan")
         isScanning = true
 
         try {
-            // Use null filters to scan for all BLE devices per Jules AI recommendation
-            scanner.startScan(null, settings, scanCallback)
-            errormsg("BluetoothRepository: BLE scan started successfully: scanner=${scanner.hashCode()}, callback=${scanCallback.hashCode()}")
+            scanner.startScan(listOf(filter), settings, scanCallback)
+            debug("BluetoothRepository: BLE scan started successfully")
         } catch (ex: Exception) {
-            errormsg("BluetoothRepository: Failed to start BLE scan: ${ex.message}, scanner=${scanner.hashCode()}, callback=${scanCallback.hashCode()}")
+            errormsg("BluetoothRepository: Failed to start BLE scan: ${ex.message}")
             isScanning = false
             close(ex)
             return@callbackFlow
