@@ -228,8 +228,8 @@ class BTScanModel @Inject constructor(
         // Add cooldown period to give Android Bluetooth stack time to recover
         // This addresses system-level stale state issues per Jules AI recommendation
         viewModelScope.launch {
-            debug("BTScanModel: waiting 2 seconds for Bluetooth stack cooldown")
-            delay(2000)
+            debug("BTScanModel: waiting 10 seconds for Bluetooth stack cooldown (extended per system analysis)")
+            delay(10000)
 
             debug("BTScanModel: starting new scan after cooldown")
             _spinner.value = true
