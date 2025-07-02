@@ -36,6 +36,9 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import android.bluetooth.le.ScanCallback
+import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.launch
@@ -93,7 +96,40 @@ class BluetoothRepository @Inject constructor(
     }
 
     @SuppressLint("MissingPermission")
-    fun scan(): Flow<ScanResult> {
+    fun scan(): Flow<ScanResult> = callbackFlow {
+        val scanner = getBluetoothLeScanner()
+        if (scanner == null) {
+            warn("BluetoothLeScanner not available, cannot scan.")
+            close()
+            return@callbackFlow
+        }
+
+        val scanCallback = object : ScanCallback() {
+            override fun onScanResult(callbackType: Int, result: ScanResult) {
+                super.onScanResult(callbackType, result)
+                if (result.device.name?.matches(Regex(BLE_NAME_PATTERN)) == true) {
+                    trySend(result)
+                }
+            }
+
+            override fun onBatchScanResults(results: MutableList<ScanResult>) {
+                super.onBatchScanResults(results)
+                results.forEach { result ->
+                    if (result.device.name?.matches(Regex(BLE_NAME_PATTERN)) == true) {
+                        trySend(result)
+                    }
+                }
+            }
+
+            override fun onScanFailed(errorCode: Int) {
+                super.onScanFailed(errorCode)
+                errormsg("Bluetooth scan failed with error code: $errorCode")
+                // Optionally, you can send an error event through the flow or handle it differently
+                // For now, we just log the error and close the flow.
+                close(ScanFailedException(errorCode))
+            }
+        }
+
         val filter = ScanFilter.Builder()
             // Samsung doesn't seem to filter properly by service so this can't work
             // see https://stackoverflow.com/questions/57981986/altbeacon-android-beacon-library-not-working-after-device-has-screen-off-for-a-s/57995960#57995960
@@ -105,9 +141,27 @@ class BluetoothRepository @Inject constructor(
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
 
-        return getBluetoothLeScanner()?.scan(listOf(filter), settings)
-            ?.filter { it.device.name?.matches(Regex(BLE_NAME_PATTERN)) == true } ?: emptyFlow()
+        try {
+            debug("Starting BLE scan")
+            scanner.startScan(listOf(filter), settings, scanCallback)
+        } catch (e: Exception) {
+            errormsg("Exception starting BLE scan: ${e.message}", e)
+            close(e) // Close the flow with the exception
+            return@callbackFlow
+        }
+
+        awaitClose {
+            debug("Stopping BLE scan")
+            try {
+                scanner.stopScan(scanCallback)
+            } catch (e: Exception) {
+                // Can happen if BT is turned off
+                warn("Exception stopping BLE scan: ${e.message}")
+            }
+        }
     }
+
+    class ScanFailedException(val errorCode: Int) : Exception("Bluetooth scan failed with error code: $errorCode")
 
     @RequiresPermission("android.permission.BLUETOOTH_CONNECT")
     fun createBond(device: BluetoothDevice): Flow<Int> = device.createBond(application)

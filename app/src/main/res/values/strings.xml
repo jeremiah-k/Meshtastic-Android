@@ -709,4 +709,13 @@
     <string name="no_usb_devices">No USB Serial devices found.</string>
     <string name="scroll_to_bottom">Scroll to bottom</string>
     <string name="meshtastic">Meshtastic</string>
+
+    <!-- Bluetooth Scan Error Code Strings -->
+    <string name="scan_failed_already_started">Scan failed: Already started</string>
+    <string name="scan_failed_app_registration">Scan failed: App registration failed. Try toggling Bluetooth.</string>
+    <string name="scan_failed_internal_error">Scan failed: Internal error</string>
+    <string name="scan_failed_feature_unsupported">Scan failed: Feature unsupported</string>
+    <string name="scan_failed_out_of_hardware_resources">Scan failed: Out of hardware resources</string>
+    <string name="scan_failed_scanning_too_frequently">Scan failed: Scanning too frequently. Try again in 30 seconds.</string>
+    <string name="scan_failed_unknown_error_code">Scan failed with error code</string>
 </resources>

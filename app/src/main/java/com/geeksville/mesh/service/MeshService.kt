@@ -1556,6 +1556,10 @@ class MeshService : Service(), Logging {
     }
 
     private fun handleChannel(ch: ChannelProtos.Channel) {
+        if (connectionState != ConnectionState.CONNECTED) {
+            warn("Ignoring channel update because connectionState is $connectionState")
+            return
+        }
         debug("Received channel ${ch.index}")
         val packetToSave = MeshLog(
             uuid = UUID.randomUUID().toString(),
@@ -2058,8 +2062,20 @@ class MeshService : Service(), Logging {
             updateLastAddress(deviceAddr)
             val res = radioInterfaceService.setDeviceAddress(deviceAddr)
             if (res) {
-                discardNodeDB()
-            } else {
+                discardNodeDB() // This clears nodeDBbyNodeNum and sets haveNodeDB = false
+                myNodeInfo = null // Explicitly nullify myNodeInfo here
+                // After discardNodeDB, myNodeInfo in RadioConfigRepository will also update,
+                // and UIViewModel observing it should update the UI.
+                // The new node info will be populated when handleConfigComplete is called.
+            }
+            // Broadcast connection state regardless, as radioInterfaceService.setDeviceAddress
+            // will trigger onRadioConnectionState which calls onConnectionChanged,
+            // which in turn calls serviceBroadcasts.broadcastConnection()
+            // However, if 'res' is false, the device didn't _actually_ change in RadioInterfaceService,
+            // so a broadcast here ensures the UI reflects the current (unchanged) device state.
+            // If 'res' is true, a new connection sequence starts, which will also broadcast.
+            // Forcing a broadcast here if 'res' is false can be beneficial.
+            if (!res) {
                 serviceBroadcasts.broadcastConnection()
             }
             res

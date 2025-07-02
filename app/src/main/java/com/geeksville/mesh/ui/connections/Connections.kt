@@ -243,19 +243,27 @@ fun ConnectionsScreen(
         showScanDialog = true
     }
 
-    LaunchedEffect(connectionState, regionUnset) {
-        when (connectionState) {
-            MeshService.ConnectionState.CONNECTED -> {
-                if (regionUnset) R.string.must_set_region else R.string.connected_to
+    LaunchedEffect(connectionState, regionUnset, scanning, info) {
+        val newStatusText = if (scanning) {
+            // If scanModel.errorText already contains a scan-specific error, use it.
+            // Otherwise, show a generic "Scanning..." message.
+            // This assumes scanModel.errorText is cleared or updated when scanning starts/stops.
+            if (scanStatusText?.startsWith("Scan failed") == true || scanStatusText?.startsWith("Unexpected Bluetooth scan failure") == true) {
+                scanStatusText
+            } else {
+                context.getString(R.string.looking_for_meshtastic_devices)
             }
-
-            MeshService.ConnectionState.DISCONNECTED -> R.string.not_connected
-            MeshService.ConnectionState.DEVICE_SLEEP -> R.string.connected_sleeping
-        }.let {
-            val firmwareString =
-                info?.firmwareString ?: context.getString(R.string.unknown)
-            scanModel.setErrorText(context.getString(it, firmwareString))
+        } else {
+            when (connectionState) {
+                MeshService.ConnectionState.CONNECTED -> {
+                    if (regionUnset) context.getString(R.string.must_set_region)
+                    else context.getString(R.string.connected_to, info?.firmwareString ?: context.getString(R.string.unknown))
+                }
+                MeshService.ConnectionState.DISCONNECTED -> context.getString(R.string.not_connected)
+                MeshService.ConnectionState.DEVICE_SLEEP -> context.getString(R.string.connected_sleeping)
+            }
         }
+        newStatusText?.let { scanModel.setErrorText(it) }
     }
     var showSharedContact by remember { mutableStateOf<Node?>(null) }
     if (showSharedContact != null) {

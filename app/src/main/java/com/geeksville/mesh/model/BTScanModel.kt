@@ -232,7 +232,25 @@ class BTScanModel @Inject constructor(
                     scanResult.value = oldDevs
                 }
             }.catch { ex ->
-                serviceRepository.setErrorMessage("Unexpected Bluetooth scan failure: ${ex.message}")
+                val errorMessage = when (ex) {
+                    is BluetoothRepository.ScanFailedException -> {
+                        // Provide more specific error messages based on errorCode
+                        // You might want to define these as string resources
+                        when (ex.errorCode) {
+                            1 -> "Scan failed: Already started" // SCAN_FAILED_ALREADY_STARTED
+                            2 -> context.getString(R.string.scan_failed_app_registration) // SCAN_FAILED_APPLICATION_REGISTRATION_FAILED
+                            3 -> "Scan failed: Internal error" // SCAN_FAILED_INTERNAL_ERROR
+                            4 -> "Scan failed: Feature unsupported" // SCAN_FAILED_FEATURE_UNSUPPORTED
+                            5 -> "Scan failed: Out of hardware resources" // SCAN_FAILED_OUT_OF_HARDWARE_RESOURCES
+                            6 -> "Scan failed: Scanning too frequently" // SCANNING_TOO_FREQUENTLY
+                            else -> "Bluetooth scan failed: ${ex.message}"
+                        }
+                    }
+                    else -> "Unexpected Bluetooth scan failure: ${ex.message}"
+                }
+                errorText.postValue(errorMessage) // Use postValue if on a background thread, though launchIn should handle context switching
+                // serviceRepository.setErrorMessage(errorMessage) // Or use serviceRepository if that's preferred
+                _spinner.postValue(false) // Ensure spinner is turned off on error
             }.launchIn(viewModelScope)
     }
 
