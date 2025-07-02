@@ -103,19 +103,23 @@ class BluetoothRepository @Inject constructor(
 
     @SuppressLint("MissingPermission")
     fun scan(): Flow<ScanResult> = callbackFlow {
+        errormsg("BluetoothRepository: scan() method called, isScanning=$isScanning")
+
         // Prevent multiple simultaneous scans
         if (isScanning) {
-            debug("Scan already in progress, closing flow")
+            errormsg("BluetoothRepository: Scan already in progress, closing flow")
             close()
             return@callbackFlow
         }
 
         val scanner = getBluetoothLeScanner()
         if (scanner == null) {
-            debug("BluetoothLeScanner not available")
+            errormsg("BluetoothRepository: BluetoothLeScanner not available")
             close()
             return@callbackFlow
         }
+
+        errormsg("BluetoothRepository: Scanner obtained successfully: ${scanner.hashCode()}")
 
         val filter = ScanFilter.Builder()
             // Samsung doesn't seem to filter properly by service so this can't work
@@ -145,14 +149,14 @@ class BluetoothRepository @Inject constructor(
             }
         }
 
-        debug("Starting BLE scan: scanner=${scanner.hashCode()}, callback=${scanCallback.hashCode()}, isScanning=$isScanning")
+        errormsg("BluetoothRepository: Starting BLE scan: scanner=${scanner.hashCode()}, callback=${scanCallback.hashCode()}, isScanning=$isScanning")
         isScanning = true
 
         try {
             scanner.startScan(listOf(filter), settings, scanCallback)
-            debug("BLE scan started successfully: scanner=${scanner.hashCode()}, callback=${scanCallback.hashCode()}")
+            errormsg("BluetoothRepository: BLE scan started successfully: scanner=${scanner.hashCode()}, callback=${scanCallback.hashCode()}")
         } catch (ex: Exception) {
-            errormsg("Failed to start BLE scan: ${ex.message}, scanner=${scanner.hashCode()}, callback=${scanCallback.hashCode()}")
+            errormsg("BluetoothRepository: Failed to start BLE scan: ${ex.message}, scanner=${scanner.hashCode()}, callback=${scanCallback.hashCode()}")
             isScanning = false
             close(ex)
             return@callbackFlow
