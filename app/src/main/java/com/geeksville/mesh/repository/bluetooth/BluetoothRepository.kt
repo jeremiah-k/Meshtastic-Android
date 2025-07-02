@@ -125,15 +125,12 @@ class BluetoothRepository @Inject constructor(
             .build()
 
         val settings = ScanSettings.Builder()
-            .setScanMode(ScanSettings.SCAN_MODE_LOW_POWER)
-            .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
-            .setMatchMode(ScanSettings.MATCH_MODE_AGGRESSIVE)
-            .setNumOfMatches(ScanSettings.MATCH_NUM_ONE_ADVERTISEMENT)
-            .setReportDelay(0)
+            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY) // Changed for testing per Jules suggestion
             .build()
 
         val scanCallback = object : ScanCallback() {
             override fun onScanResult(callbackType: Int, result: ScanResult) {
+                debug("BLE onScanResult: callbackType=$callbackType, device=${result.device.name}, callback=${this.hashCode()}")
                 // Filter for Meshtastic devices only
                 if (result.device.name?.matches(Regex(BLE_NAME_PATTERN)) == true) {
                     debug("Found Meshtastic device: ${result.device.name}")
@@ -142,34 +139,36 @@ class BluetoothRepository @Inject constructor(
             }
 
             override fun onScanFailed(errorCode: Int) {
-                errormsg("BLE scan failed with error code: $errorCode")
+                errormsg("BLE onScanFailed: errorCode=$errorCode, callback=${this.hashCode()}, isScanning=$isScanning")
                 isScanning = false
                 close(Exception("Scan failed with error code: $errorCode"))
             }
         }
 
-        debug("Starting BLE scan with proper callback management")
+        debug("Starting BLE scan: scanner=${scanner.hashCode()}, callback=${scanCallback.hashCode()}, isScanning=$isScanning")
         isScanning = true
 
         try {
             scanner.startScan(listOf(filter), settings, scanCallback)
-            debug("BLE scan started successfully")
+            debug("BLE scan started successfully: scanner=${scanner.hashCode()}, callback=${scanCallback.hashCode()}")
         } catch (ex: Exception) {
-            errormsg("Failed to start BLE scan: ${ex.message}")
+            errormsg("Failed to start BLE scan: ${ex.message}, scanner=${scanner.hashCode()}, callback=${scanCallback.hashCode()}")
             isScanning = false
             close(ex)
             return@callbackFlow
         }
 
         awaitClose {
-            debug("Stopping BLE scan")
+            debug("awaitClose: Stopping BLE scan, scanner=${scanner.hashCode()}, callback=${scanCallback.hashCode()}, isScanning=$isScanning")
             try {
                 scanner.stopScan(scanCallback)
-                debug("BLE scan stopped successfully")
+                debug("awaitClose: BLE scan stopped successfully, scanner=${scanner.hashCode()}, callback=${scanCallback.hashCode()}")
             } catch (ex: Exception) {
-                warn("Failed to stop BLE scan: ${ex.message}")
+                warn("awaitClose: Failed to stop BLE scan: ${ex.message}, scanner=${scanner.hashCode()}, callback=${scanCallback.hashCode()}")
             } finally {
+                val wasScanning = isScanning
                 isScanning = false
+                debug("awaitClose: isScanning reset from $wasScanning to false")
             }
         }
     }

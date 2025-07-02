@@ -50,6 +50,8 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.onStart
+import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.flow.stateIn
 import javax.inject.Inject
 
@@ -224,6 +226,12 @@ class BTScanModel @Inject constructor(
         debug("BTScanModel: starting new scan")
         _spinner.value = true
         scanJob = bluetoothRepository.scan()
+            .onStart {
+                debug("BTScanModel: Flow onStart - scan collection started")
+            }
+            .onCompletion { cause ->
+                debug("BTScanModel: Flow onCompletion - scan collection ended, cause: $cause")
+            }
             .onEach { result ->
                 val fullAddress = radioInterfaceService.toInterfaceAddress(
                     InterfaceId.BLUETOOTH,
