@@ -102,7 +102,11 @@ class BluetoothRepository @Inject constructor(
             .build()
 
         val settings = ScanSettings.Builder()
-            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+            .setScanMode(ScanSettings.SCAN_MODE_LOW_POWER)
+            .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
+            .setMatchMode(ScanSettings.MATCH_MODE_AGGRESSIVE)
+            .setNumOfMatches(ScanSettings.MATCH_NUM_ONE_ADVERTISEMENT)
+            .setReportDelay(0)
             .build()
 
         return getBluetoothLeScanner()?.scan(listOf(filter), settings)

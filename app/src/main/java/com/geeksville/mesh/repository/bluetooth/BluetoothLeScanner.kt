@@ -36,9 +36,6 @@ internal fun BluetoothLeScanner.scan(
 ): Flow<ScanResult> = callbackFlow {
     val logger = object : Logging {}
 
-    // Add delay to prevent rapid scan registration attempts
-    kotlinx.coroutines.delay(100)
-
     val callback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             logger.debug("BluetoothLeScanner: onScanResult received")
