@@ -168,6 +168,7 @@ class BTScanModel @Inject constructor(
 
     override fun onCleared() {
         super.onCleared()
+        stopScan()
         debug("BTScanModel cleared")
     }
 
