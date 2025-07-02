@@ -213,6 +213,9 @@ class BTScanModel @Inject constructor(
     fun startScan() {
         debug("starting classic scan")
 
+        // Stop any existing scan first to prevent registration conflicts
+        stopScan()
+
         _spinner.value = true
         scanJob = bluetoothRepository.scan()
             .onEach { result ->
