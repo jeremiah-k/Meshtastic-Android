@@ -240,7 +240,9 @@ class BTScanModel @Inject constructor(
                     scanResult.value = oldDevs
                 }
             }.catch { ex ->
-                serviceRepository.setErrorMessage("Unexpected Bluetooth scan failure: ${ex.message}")
+                debug("BTScanModel: scan failed with exception: ${ex.message}")
+                serviceRepository.setErrorMessage("Bluetooth scan failed: ${ex.message}")
+                _spinner.value = false
             }.launchIn(viewModelScope)
     }
 

@@ -35,6 +35,10 @@ internal fun BluetoothLeScanner.scan(
     scanSettings: ScanSettings = ScanSettings.Builder().build(),
 ): Flow<ScanResult> = callbackFlow {
     val logger = object : Logging {}
+
+    // Add delay to prevent rapid scan registration attempts
+    kotlinx.coroutines.delay(100)
+
     val callback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             logger.debug("BluetoothLeScanner: onScanResult received")
@@ -43,7 +47,8 @@ internal fun BluetoothLeScanner.scan(
 
         override fun onScanFailed(errorCode: Int) {
             logger.errormsg("BluetoothLeScanner: onScanFailed with errorCode: $errorCode")
-            cancel("onScanFailed() called with errorCode: $errorCode")
+            // Don't cancel immediately, let the flow handle cleanup
+            close(Exception("Scan failed with error code: $errorCode"))
         }
     }
 
@@ -53,7 +58,8 @@ internal fun BluetoothLeScanner.scan(
         logger.debug("BluetoothLeScanner: startScan() completed successfully")
     } catch (ex: Exception) {
         logger.errormsg("BluetoothLeScanner: startScan() failed: ${ex.message}")
-        throw ex
+        close(ex)
+        return@callbackFlow
     }
 
     awaitClose {
