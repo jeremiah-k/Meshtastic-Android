@@ -22,6 +22,7 @@ import android.app.Application
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.le.BluetoothLeScanner
+import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
@@ -40,6 +41,8 @@ import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.onCompletion
+import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -99,11 +102,19 @@ class BluetoothRepository @Inject constructor(
     private var isScanning = false
 
     @SuppressLint("MissingPermission")
-    fun scan(): Flow<ScanResult> {
+    fun scan(): Flow<ScanResult> = callbackFlow {
         // Prevent multiple simultaneous scans
         if (isScanning) {
-            debug("Scan already in progress, returning empty flow")
-            return emptyFlow()
+            debug("Scan already in progress, closing flow")
+            close()
+            return@callbackFlow
+        }
+
+        val scanner = getBluetoothLeScanner()
+        if (scanner == null) {
+            debug("BluetoothLeScanner not available")
+            close()
+            return@callbackFlow
         }
 
         val filter = ScanFilter.Builder()
@@ -121,16 +132,46 @@ class BluetoothRepository @Inject constructor(
             .setReportDelay(0)
             .build()
 
-        return getBluetoothLeScanner()?.scan(listOf(filter), settings)
-            ?.onStart {
-                debug("Starting BLE scan")
-                isScanning = true
+        val scanCallback = object : ScanCallback() {
+            override fun onScanResult(callbackType: Int, result: ScanResult) {
+                // Filter for Meshtastic devices only
+                if (result.device.name?.matches(Regex(BLE_NAME_PATTERN)) == true) {
+                    debug("Found Meshtastic device: ${result.device.name}")
+                    trySend(result)
+                }
             }
-            ?.onCompletion {
-                debug("BLE scan completed")
+
+            override fun onScanFailed(errorCode: Int) {
+                errormsg("BLE scan failed with error code: $errorCode")
+                isScanning = false
+                close(Exception("Scan failed with error code: $errorCode"))
+            }
+        }
+
+        debug("Starting BLE scan with proper callback management")
+        isScanning = true
+
+        try {
+            scanner.startScan(listOf(filter), settings, scanCallback)
+            debug("BLE scan started successfully")
+        } catch (ex: Exception) {
+            errormsg("Failed to start BLE scan: ${ex.message}")
+            isScanning = false
+            close(ex)
+            return@callbackFlow
+        }
+
+        awaitClose {
+            debug("Stopping BLE scan")
+            try {
+                scanner.stopScan(scanCallback)
+                debug("BLE scan stopped successfully")
+            } catch (ex: Exception) {
+                warn("Failed to stop BLE scan: ${ex.message}")
+            } finally {
                 isScanning = false
             }
-            ?.filter { it.device.name?.matches(Regex(BLE_NAME_PATTERN)) == true } ?: emptyFlow()
+        }
     }
 
     @RequiresPermission("android.permission.BLUETOOTH_CONNECT")
