@@ -90,7 +90,10 @@ constructor(
             ) { ble, tcp, recent, usb, showMockInterface ->
                 devices.value =
                     mutableMapOf<String, DeviceListEntry>().apply {
-                        fun addDevice(entry: DeviceListEntry) {
+                        fun addDevice(entry: DeviceListEntry, preserveExisting: Boolean = false) {
+                            if (preserveExisting && this.containsKey(entry.fullAddress)) {
+                                return // Don't overwrite existing entry
+                            }
                             this[entry.fullAddress] = entry
                         }
 
@@ -132,8 +135,8 @@ constructor(
                             addDevice(DeviceListEntry(displayName, "t$address", true))
                         }
 
-                        // Include saved IP connections
-                        recent.forEach { addDevice(DeviceListEntry(it.name, it.address, true)) }
+                        // Include saved IP connections (preserve NSD names if they exist)
+                        recent.forEach { addDevice(DeviceListEntry(it.name, it.address, true), preserveExisting = true) }
 
                         usb.forEach { (_, d) ->
                             addDevice(
