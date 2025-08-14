@@ -107,6 +107,12 @@ constructor(
     Logging {
 
     companion object {
+        // BLE connection and stability constants
+        private const val RECONNECT_DELAY_MS = 1500L // Fixed delay for reconnection attempts
+        private const val SERVICE_REFRESH_DELAY_MS = 500L // Delay for service refresh on buggy BLE stacks
+        private const val ANDROID_BLE_WORKAROUND_DELAY_MS = 1000L // Delay for Android BLE stack bugs
+        private const val BLE_MTU_SIZE = 512 // Maximum MTU size for BLE connections
+
         // this service UUID is publicly visible for scanning
         val BTM_SERVICE_UUID: UUID = UUID.fromString("6ba1b218-15a8-461f-9fa8-5dcae273eafd")
 
@@ -133,7 +139,7 @@ constructor(
         get(): BluetoothGattService =
             device.getService(BTM_SERVICE_UUID) ?: throw RadioNotConnectedException("BLE service not found")
 
-    @Volatile private var reconnectAttempts = 0
+    // Revert to 2.6.24 behavior: no exponential backoff, no attempt tracking
 
     private lateinit var fromNum: BluetoothGattCharacteristic
 
@@ -144,7 +150,7 @@ constructor(
     private var isFirstSend = true
 
     // NRF52 targets do not need the nasty force refresh hack that ESP32 needs (because they keep their
-    // BLE handles stable.  So turn the hack off for these devices.  FIXME - find a better way to know that the board is
+    // BLE handles stable. So turn the hack off for these devices. FIXME - find a better way to know that the board is
     // NRF52 based
     // and Amazon fire devices seem to not need this hack either
     // Build.MANUFACTURER != "Amazon" &&
@@ -203,7 +209,16 @@ constructor(
     private fun scheduleReconnect(reason: String) {
         if (reconnectJob == null) {
             warn("Scheduling reconnect because $reason")
-            reconnectJob = service.serviceScope.handledLaunch { retryDueToException() }
+            reconnectJob =
+                service.serviceScope.handledLaunch {
+                    try {
+                        retryDueToException()
+                    } catch (ex: Exception) {
+                        errormsg("Exception during reconnect attempt: ${ex.message}")
+                        // Don't let reconnection failures crash the service
+                        service.onDisconnect(false)
+                    }
+                }
         } else {
             warn("Skipping reconnect for $reason")
         }
@@ -281,51 +296,58 @@ constructor(
         }
     }
 
-    private val maxReconnectionAttempts = 6
+    // / We only force service refresh the _first_ time we connect to the device.  Thereafter it is assumed the firmware
+    // didn't change
+    @Suppress("UnusedPrivateMember")
 
     /**
      * Some buggy BLE stacks can fail on initial connect, with either missing services or missing characteristics. If
      * that happens we disconnect and try again when the device reenumerates.
+     *
+     * This function reverts to the original reconnection logic, which uses a fixed 1500ms delay. An experimental
+     * exponential backoff system was introduced previously, but it caused connection stability issues. The fixed delay
+     * is more reliable for handling BLE device sleep/wake cycles.
+     *
+     * Common BLE error codes that require reconnection:
+     * - 133: GATT_ERROR (generic BLE stack error)
+     * - 8: GATT_CONN_TIMEOUT (connection timeout)
+     * - 19: GATT_CONN_TERMINATE_PEER_USER (peer disconnected)
+     * - 22: GATT_CONN_LMP_TIMEOUT (link supervision timeout)
+     * - 257: Mystery error that seems to happen on some Android devices
      */
-    private suspend fun retryDueToException() = try {
-        // / We gracefully handle safe being null because this can occur if someone has unpaired from our device -
-        // just abandon the reconnect attempt
-        val s = safe
-        if (s != null) {
-            val backoffMillis = (1000 * (1 shl reconnectAttempts.coerceAtMost(maxReconnectionAttempts))).toLong()
-            // Exponential backoff, capped at 64s
-            reconnectAttempts++
-            warn(
-                "Forcing disconnect and hopefully device will comeback" +
-                    " (disabling forced refresh). Reconnect attempt $reconnectAttempts," +
-                    " waiting ${backoffMillis}ms.",
-            )
+    private suspend fun retryDueToException() =
+        try {
+            // / We gracefully handle safe being null because this can occur if someone has unpaired from our device -
+            // just abandon the reconnect attempt
+            val s = safe
+            if (s != null) {
+                warn("Forcing disconnect and hopefully device will comeback (disabling forced refresh)")
 
-            // The following optimization is not currently correct - because the device might be sleeping and come
-            // back with different BLE handles
-            // hasForcedRefresh = true // We've already tossed any old service caches, no need to do it again
+                // The following optimization is not currently correct - because the device might be sleeping and come
+                // back with different BLE handles
+                // hasForcedRefresh = true // We've already tossed any old service caches, no need to do it again
 
-            // Make sure the old connection was killed
-            ignoreException { s.closeConnection() }
+                // Make sure the old connection was killed
+                ignoreException { s.closeConnection() }
 
-            service.onDisconnect(false) // assume we will fail
-            delay(backoffMillis) // Give some nasty time for buggy BLE stacks to shutdown
-            reconnectJob = null // Any new reconnect requests after this will be allowed to run
-            warn("Attempting reconnect")
-            if (safe != null) {
-                // check again, because we just slept, and someone might have closed our interface
-                startConnect()
+                service.onDisconnect(false) // assume we will fail
+            delay(RECONNECT_DELAY_MS) // Give some nasty time for buggy BLE stacks to shutdown (500ms was not enough)
+                reconnectJob = null // Any new reconnect requests after this will be allowed to run
+                warn("Attempting reconnect")
+                if (safe != null) {
+                    // check again, because we just slept, and someone might have closed our interface
+                    startConnect()
+                } else {
+                    warn("Not connecting, because safe==null, someone must have closed us")
+                }
             } else {
-                warn("Not connecting, because safe==null, someone must have closed us")
+                warn("Abandoning reconnect because safe==null, someone must have closed the device")
             }
-        } else {
-            warn("Abandoning reconnect because safe==null, someone must have closed the device")
+        } catch (ex: CancellationException) {
+            warn("retryDueToException was cancelled")
+        } finally {
+            reconnectJob = null
         }
-    } catch (ex: CancellationException) {
-        warn("retryDueToException was cancelled")
-    } finally {
-        reconnectJob = null
-    }
 
     // / We only try to set MTU once, because some buggy implementations fail
     @Volatile private var shouldSetMtu = true
@@ -348,7 +370,7 @@ constructor(
                         try {
                             debug("Discovered services!")
                             delay(
-                                1000,
+                                ANDROID_BLE_WORKAROUND_DELAY_MS,
                             ) // android BLE is buggy and needs a 1000ms sleep before calling getChracteristic, or you
                             // might get back null
 
@@ -387,7 +409,7 @@ constructor(
 
         connRes.getOrThrow()
 
-        reconnectAttempts = 0 // Reset backoff on successful connection
+        // Connection successful - revert to 2.6.30 behavior (no backoff tracking)
 
         service.serviceScope.handledLaunch {
             info("Connected to radio!")
@@ -402,7 +424,7 @@ constructor(
                 // https://punchthrough.com/attribute-caching-in-ble-advantages-and-pitfalls/
 
                 delay(
-                    500,
+                    SERVICE_REFRESH_DELAY_MS,
                 ) // From looking at the android C code it seems that we need to give some time for the refresh message
                 // to reach that worked _before_ we try to set mtu/get services
                 // 200ms was not enough on an Amazon Fire
@@ -410,7 +432,7 @@ constructor(
 
             // we begin by setting our MTU size as high as it can go (if we can)
             if (shouldSetMtu) {
-                safe?.asyncRequestMtu(512) { mtuRes ->
+                safe?.asyncRequestMtu(BLE_MTU_SIZE) { mtuRes ->
                     try {
                         mtuRes.getOrThrow()
                         debug("MTU change attempted")
