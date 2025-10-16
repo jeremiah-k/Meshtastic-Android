@@ -368,6 +368,12 @@ constructor(
             return
         }
         safe?.setNotify(fromNum, true) {
+            // Set READY state on first successful notification, confirming subscription is working
+            if (_transportState.value == TransportState.SUBSCRIBING) {
+                _transportState.value = TransportState.READY
+                Timber.d("Notification subscription confirmed, transport is READY")
+            }
+            
             // We might get multiple notifies before we get around to reading from the radio - so just set one flag
             fromNumChanged = true
             service.serviceScope.handledLaunch {
@@ -392,7 +398,7 @@ constructor(
             val s = safe
             if (s != null) {
                 val exponentialDelay =
-                    BASE_DELAY_MS * Math.pow(BACKOFF_MULTIPLIER, reconnectAttempts.toDouble())
+                    BASE_DELAY_MS * BACKOFF_MULTIPLIER.pow(reconnectAttempts.toDouble())
                 val jitter = (exponentialDelay * JITTER_FACTOR) * (2 * kotlin.random.Random.nextDouble() - 1)
                 val totalDelay = (exponentialDelay + jitter).coerceIn(BASE_DELAY_MS.toDouble(), MAX_DELAY_MS.toDouble()).toLong()
 
@@ -467,7 +473,7 @@ constructor(
                             // Now tell clients they can (finally use the api)
                             service.onConnect()
                             reconnectAttempts = 0 // Reset backoff on successful connection
-                            _transportState.value = TransportState.READY
+                            _transportState.value = TransportState.SUBSCRIBING
 
                             // Immediately broadcast any queued packets sitting on the device
                             doReadFromRadio(true)
