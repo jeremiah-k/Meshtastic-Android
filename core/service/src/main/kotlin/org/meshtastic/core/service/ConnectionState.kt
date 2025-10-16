@@ -29,5 +29,7 @@ enum class ConnectionState {
 
     ;
 
-    fun isConnected() = this != DISCONNECTED
+    fun isConnected() = this == CONNECTED
+
+    fun isSleeping() = this == DEVICE_SLEEP
 }

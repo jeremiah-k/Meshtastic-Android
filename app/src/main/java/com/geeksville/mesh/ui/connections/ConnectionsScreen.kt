@@ -102,6 +102,7 @@ fun ConnectionsScreen(
     val scanStatusText by scanModel.errorText.observeAsState("")
     val connectionState by
         connectionsViewModel.connectionState.collectAsStateWithLifecycle(ConnectionState.DISCONNECTED)
+    val transportState by connectionsViewModel.transportState.collectAsStateWithLifecycle("IDLE")
     val scanning by scanModel.spinner.collectAsStateWithLifecycle(false)
     val context = LocalContext.current
     val ourNode by connectionsViewModel.ourNodeInfo.collectAsStateWithLifecycle()
@@ -145,15 +146,20 @@ fun ConnectionsScreen(
         }
     }
 
-    LaunchedEffect(connectionState, regionUnset) {
-        when (connectionState) {
-            ConnectionState.CONNECTED -> {
-                if (regionUnset) R.string.must_set_region else R.string.connected
+    LaunchedEffect(regionUnset, transportState) {
+        val statusResId =
+            when (transportState) {
+                "READY" -> if (regionUnset) R.string.must_set_region else R.string.connected
+                "CONNECTING" -> R.string.connecting
+                "RECONNECTING" -> R.string.connected_sleeping // Re-using for reconnecting message
+                "DISCOVERING_SERVICES" -> R.string.discovering_services
+                "SUBSCRIBING" -> R.string.subscribing_to_chars
+                "DISCONNECTED",
+                "IDLE",
+                -> R.string.not_connected
+                else -> R.string.not_connected
             }
-
-            ConnectionState.DISCONNECTED -> R.string.not_connected
-            ConnectionState.DEVICE_SLEEP -> R.string.connected_sleeping
-        }.let { scanModel.setErrorText(context.getString(it)) }
+        scanModel.setErrorText(context.getString(statusResId))
     }
 
     Scaffold(
@@ -180,7 +186,7 @@ fun ConnectionsScreen(
                         .padding(16.dp),
                 ) {
                     AnimatedVisibility(
-                        visible = connectionState.isConnected(),
+                        visible = connectionState.isConnected() || connectionState.isSleeping(),
                         modifier = Modifier.padding(bottom = 16.dp),
                     ) {
                         Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {

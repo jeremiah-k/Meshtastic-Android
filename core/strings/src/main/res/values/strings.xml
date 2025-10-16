@@ -207,7 +207,10 @@
     <string name="connected">Connected</string>
     <string name="connected_to">Connected to radio (%s)</string>
     <string name="not_connected">Not connected</string>
-    <string name="connected_sleeping">Connected to radio, but it is sleeping</string>
+    <string name="connecting">Connecting…</string>
+    <string name="discovering_services">Discovering services…</string>
+    <string name="subscribing_to_chars">Subscribing to characteristics…</string>
+    <string name="connected_sleeping">Connected, sleeping</string>
     <string name="app_too_old">Application update required</string>
     <string name="must_update">You must update this application on the app store (or Github). It is too old to talk to this radio firmware.  Please read our <a href="https://meshtastic.org/docs/software/android/installation">docs</a> on this topic.</string>
     <string name="none">None (disable)</string>
