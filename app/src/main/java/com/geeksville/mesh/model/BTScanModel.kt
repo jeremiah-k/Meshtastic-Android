@@ -17,38 +17,44 @@
 
 package com.geeksville.mesh.model
 
+import android.annotation.SuppressLint
 import android.app.Application
+import android.bluetooth.BluetoothDevice
 import android.content.Context
 import android.hardware.usb.UsbManager
+import android.os.RemoteException
+import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import androidx.lifecycle.MutableLiveData
-import com.geeksville.mesh.android.BuildUtils
-import com.geeksville.mesh.android.Logging
-import org.meshtastic.core.service.ServiceRepository
-import com.geeksville.mesh.service.StatusMessagePatterns
-import com.geeksville.mesh.service.radio.NotConnectedException
-import com.geeksville.mesh.repository.radio.RadioInterfaceService
-import com.geeksville.mesh.repository.radio.ThreadedRadioInterface
 import com.geeksville.mesh.repository.bluetooth.BluetoothRepository
-import com.geeksville.mesh.repository.usb.UsbRepository
 import com.geeksville.mesh.repository.network.NetworkRepository
-import org.meshtastic.core.datastore.RecentAddressesDataSource
+import com.geeksville.mesh.repository.network.NetworkRepository.Companion.toAddressString
+import com.geeksville.mesh.repository.radio.InterfaceId
+import com.geeksville.mesh.repository.radio.RadioInterfaceService
+import com.geeksville.mesh.repository.usb.UsbRepository
+import com.geeksville.mesh.service.MeshService
+import com.geeksville.mesh.service.StatusMessagePatterns
+import com.hoho.android.usbserial.driver.UsbSerialDriver
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.filterNotNull
-import kotlinx.coroutines.flow.stateInWhileSubscribed
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import org.meshtastic.core.model.DeviceConfig
-import org.meshtastic.core.model.Node
-import org.meshtastic.core.model.PortNum
-import org.meshtastic.core.model.Position
-import org.meshtastic.core.model.isOnline
-import org.meshtastic.core.util.lastHeard
+import org.meshtastic.core.datastore.RecentAddressesDataSource
+import org.meshtastic.core.datastore.model.RecentAddress
+import org.meshtastic.core.model.util.anonymize
+import org.meshtastic.core.service.ServiceRepository
+import org.meshtastic.core.strings.R
+import org.meshtastic.core.ui.viewmodel.stateInWhileSubscribed
+import timber.log.Timber
 import javax.inject.Inject
 
 
@@ -186,7 +192,7 @@ constructor(
         serviceRepository.statusMessage.onEach { message ->
             // Only update errorText from statusMessage if it's not a node count message
             // This allows connection status to take priority
-            if (!message.startsWith(StatusMessagePatterns.NODE_COUNT_PREFIX)) {
+            if (!message.isNullOrEmpty() && !message.startsWith(StatusMessagePatterns.NODE_COUNT_PREFIX)) {
                 errorText.value = message
             }
         }.launchIn(viewModelScope)

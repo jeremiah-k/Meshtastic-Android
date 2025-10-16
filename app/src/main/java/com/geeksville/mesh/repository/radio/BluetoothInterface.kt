@@ -35,6 +35,7 @@ import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -402,7 +403,7 @@ constructor(
     }
 
     private suspend fun retryDueToException() {
-        val thisJob = coroutineContext[Job]
+        val thisJob = currentCoroutineContext()[Job]
         try {
             // We gracefully handle safe being null because this can occur if someone has unpaired from our device -
             // just abandon the reconnect attempt

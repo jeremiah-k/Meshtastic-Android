@@ -1304,6 +1304,7 @@ class MeshService : Service() {
         connectionStateHolder.setState(c)
         when (c) {
             ConnectionState.CONNECTED -> startConnect()
+            ConnectionState.CONNECTING -> { /* Do nothing, already connecting */ }
             ConnectionState.DEVICE_SLEEP -> startDeviceSleep()
             ConnectionState.DISCONNECTED -> startDisconnect()
         }
@@ -1315,7 +1316,7 @@ class MeshService : Service() {
         val notificationSummary =
             when (connectionStateHolder.getState()) {
                 ConnectionState.CONNECTED -> getString(R.string.connected_count).format(numOnlineNodes)
-
+                ConnectionState.CONNECTING -> getString(R.string.connecting)
                 ConnectionState.DISCONNECTED -> getString(R.string.disconnected)
                 ConnectionState.DEVICE_SLEEP -> getString(R.string.device_sleeping)
             }
@@ -1334,6 +1335,7 @@ class MeshService : Service() {
         val effectiveState =
             when (newState) {
                 ConnectionState.CONNECTED -> ConnectionState.CONNECTED
+                ConnectionState.CONNECTING -> ConnectionState.CONNECTING
                 ConnectionState.DEVICE_SLEEP ->
                     if (lsEnabled) {
                         ConnectionState.DEVICE_SLEEP
