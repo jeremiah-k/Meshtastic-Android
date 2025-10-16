@@ -322,7 +322,10 @@ constructor(
                     keepAliveJob = null
                     ConnectionState.DISCONNECTED
                 }
-                else -> _connectionState.value // Keep previous state during intermediate transitions
+                else -> {
+                    Timber.w("Unhandled TransportState: $newState, defaulting to DISCONNECTED")
+                    ConnectionState.DISCONNECTED // Provide a default state
+                }
             }
         broadcastConnectionChanged(newServiceState)
     }

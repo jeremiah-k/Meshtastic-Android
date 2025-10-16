@@ -201,15 +201,17 @@ constructor(
      * function forces a read of a characteristic to see if we are really connected.
      */
     override fun keepAlive() {
-        if (reconnectJob == null && safe != null) {
-            Timber.d("Bluetooth keep-alive, checking connection by reading fromNum")
-            safe?.asyncReadCharacteristic(fromNum) { result ->
-                if (result.isFailure) {
-                    Timber.w("Keep-alive read failed, connection is likely dead.")
-                    transportState.value = TransportState.DEGRADED
-                    scheduleReconnect("keep-alive failed")
-                } else {
-                    Timber.d("Keep-alive read successful.")
+        safe?.let { safeBluetooth ->
+            if (reconnectJob == null) {
+                Timber.d("Bluetooth keep-alive, checking connection by reading fromNum")
+                safeBluetooth.asyncReadCharacteristic(fromNum) { result ->
+                    if (result.isFailure) {
+                        Timber.w("Keep-alive read failed, connection is likely dead.")
+                        transportState.value = TransportState.DEGRADED
+                        scheduleReconnect("keep-alive failed")
+                    } else {
+                        Timber.d("Keep-alive read successful.")
+                    }
                 }
             }
         }
@@ -372,7 +374,7 @@ constructor(
                 val exponentialDelay =
                     (BASE_DELAY_MS * Math.pow(BACKOFF_MULTIPLIER, reconnectAttempts.toDouble())).toLong()
                 val jitter = ((exponentialDelay * JITTER_FACTOR) * (2 * Math.random() - 1)).toLong()
-                val totalDelay = (exponentialDelay + jitter).coerceAtMost(MAX_DELAY_MS)
+                val totalDelay = (exponentialDelay + jitter).coerceIn(BASE_DELAY_MS, MAX_DELAY_MS)
 
                 reconnectAttempts++
                 Timber.w(
@@ -385,7 +387,6 @@ constructor(
 
                 service.onDisconnect(false) // assume we will fail
                 delay(totalDelay)
-                reconnectJob = null // Any new reconnect requests after this will be allowed to run
                 Timber.w("Attempting reconnect")
                 if (safe != null) {
                     // check again, because we just slept, and someone might have closed our interface

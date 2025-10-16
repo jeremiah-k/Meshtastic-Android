@@ -208,6 +208,7 @@
     <string name="connected_to">Connected to radio (%s)</string>
     <string name="not_connected">Not connected</string>
     <string name="connecting">Connecting…</string>
+    <string name="reconnecting">Reconnecting…</string>
     <string name="discovering_services">Discovering services…</string>
     <string name="subscribing_to_chars">Subscribing to characteristics…</string>
     <string name="connected_sleeping">Connected, sleeping</string>

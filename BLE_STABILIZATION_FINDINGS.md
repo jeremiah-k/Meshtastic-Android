@@ -35,7 +35,7 @@ This document analyzes the current state of BLE stabilization fixes implemented 
 
 - **Constants**: Proper backoff parameters (lines 128-131):
   - `BASE_DELAY_MS = 1500L`
-  - `MAX_DELAY_MS = 20000L` 
+  - `MAX_DELAY_MS = 20000L`
   - `BACKOFF_MULTIPLIER = 2.0`
   - `JITTER_FACTOR = 0.2`
 - **Implementation**: Jittered exponential backoff with mutex protection (lines 366-395)

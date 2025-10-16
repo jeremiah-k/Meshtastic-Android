@@ -151,7 +151,7 @@ fun ConnectionsScreen(
             when (transportState) {
                 "READY" -> if (regionUnset) R.string.must_set_region else R.string.connected
                 "CONNECTING" -> R.string.connecting
-                "RECONNECTING" -> R.string.connected_sleeping // Re-using for reconnecting message
+                "RECONNECTING" -> R.string.reconnecting
                 "DISCOVERING_SERVICES" -> R.string.discovering_services
                 "SUBSCRIBING" -> R.string.subscribing_to_chars
                 "DISCONNECTED",
