@@ -392,9 +392,9 @@ constructor(
             val s = safe
             if (s != null) {
                 val exponentialDelay =
-                    (BASE_DELAY_MS * Math.pow(BACKOFF_MULTIPLIER, reconnectAttempts.toDouble())).toLong()
-                val jitter = ((exponentialDelay * JITTER_FACTOR) * (2 * kotlin.random.Random.nextDouble() - 1)).toLong()
-                val totalDelay = (exponentialDelay + jitter).coerceIn(BASE_DELAY_MS, MAX_DELAY_MS)
+                    BASE_DELAY_MS * Math.pow(BACKOFF_MULTIPLIER, reconnectAttempts.toDouble())
+                val jitter = (exponentialDelay * JITTER_FACTOR) * (2 * kotlin.random.Random.nextDouble() - 1)
+                val totalDelay = (exponentialDelay + jitter).coerceIn(BASE_DELAY_MS.toDouble(), MAX_DELAY_MS.toDouble()).toLong()
 
                 reconnectAttempts++
                 Timber.w(

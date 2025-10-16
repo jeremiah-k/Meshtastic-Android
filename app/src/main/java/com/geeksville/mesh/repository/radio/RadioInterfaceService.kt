@@ -326,10 +326,12 @@ constructor(
                 TransportState.READY -> ConnectionState.CONNECTED
                 TransportState.RECONNECTING -> ConnectionState.DEVICE_SLEEP
                 TransportState.DEGRADED -> ConnectionState.DEVICE_SLEEP
-                TransportState.DISCONNECTED,
-                TransportState.IDLE,
-                -> ConnectionState.DISCONNECTED
-                else -> ConnectionState.DISCONNECTED
+                TransportState.DISCONNECTED -> ConnectionState.DISCONNECTED
+                TransportState.IDLE -> ConnectionState.DISCONNECTED
+                TransportState.SCANNING -> ConnectionState.CONNECTING
+                TransportState.CONNECTING -> ConnectionState.CONNECTING
+                TransportState.DISCOVERING_SERVICES -> ConnectionState.CONNECTING
+                TransportState.SUBSCRIBING -> ConnectionState.CONNECTING
             }
         broadcastConnectionChanged(newServiceState)
     }
