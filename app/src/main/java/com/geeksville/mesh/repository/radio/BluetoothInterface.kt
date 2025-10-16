@@ -571,7 +571,7 @@ constructor(
 
             try {
                 if (::fromNum.isInitialized) {
-                    s?.setNotify(fromNum, false) {}
+                    s?.setNotifySync(fromNum, false)
                 }
                 s?.close()
             } catch (_: BLEConnectionClosing) {

@@ -26,6 +26,7 @@ import androidx.lifecycle.MutableLiveData
 import com.geeksville.mesh.android.BuildUtils
 import com.geeksville.mesh.android.Logging
 import com.geeksville.mesh.service.ServiceRepository
+import com.geeksville.mesh.service.StatusMessagePatterns
 import com.geeksville.mesh.service.radio.NotConnectedException
 import com.geeksville.mesh.repository.radio.RadioInterfaceService
 import com.geeksville.mesh.repository.radio.ThreadedRadioInterface
@@ -50,12 +51,7 @@ import org.meshtastic.core.model.isOnline
 import org.meshtastic.core.util.lastHeard
 import javax.inject.Inject
 
-/**
- * Constants for status message patterns
- */
-private object StatusMessagePatterns {
-    const val NODE_COUNT_PREFIX = "Nodes ("
-}
+
 
 /**
  * A sealed class is used here to represent the different types of devices that can be displayed in the list. This is

@@ -1526,7 +1526,7 @@ class MeshService : Service() {
         insertMeshLog(packetToSave)
 
         newNodes.add(info)
-        serviceRepository.setStatusMessage("Nodes (${newNodes.size})")
+        serviceRepository.setStatusMessage("${StatusMessagePatterns.NODE_COUNT_PREFIX}${newNodes.size})")
     }
 
     private var rawMyNodeInfo: MeshProtos.MyNodeInfo? = null
