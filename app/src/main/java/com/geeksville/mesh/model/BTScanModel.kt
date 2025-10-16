@@ -33,7 +33,7 @@ import com.geeksville.mesh.repository.radio.ThreadedRadioInterface
 import com.geeksville.mesh.repository.bluetooth.BluetoothRepository
 import com.geeksville.mesh.repository.usb.UsbRepository
 import com.geeksville.mesh.repository.network.NetworkRepository
-import com.geeksville.mesh.repository.data.RecentAddressesDataSource
+import org.meshtastic.core.datastore.RecentAddressesDataSource
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow

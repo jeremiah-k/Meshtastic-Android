@@ -76,8 +76,8 @@ This document analyzes the current state of BLE stabilization fixes implemented 
 
 ### Data Flow
 ```text
-BluetoothInterface (TransportState enum) 
-    ↓ observes
+BluetoothInterface (StateFlow<TransportState>)
+    ↓ is observed by
 RadioInterfaceService (StateFlow<TransportState>)
     ↓ converts to string
 ServiceRepository (StateFlow<String>)
