@@ -17,19 +17,30 @@
 
 package com.geeksville.mesh.model
 
+import android.app.Application
+import android.content.Context
+import android.hardware.usb.UsbManager
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.MutableLiveData
 import com.geeksville.mesh.android.BuildUtils
 import com.geeksville.mesh.android.Logging
 import com.geeksville.mesh.service.ServiceRepository
 import com.geeksville.mesh.service.radio.NotConnectedException
 import com.geeksville.mesh.repository.radio.RadioInterfaceService
 import com.geeksville.mesh.repository.radio.ThreadedRadioInterface
+import com.geeksville.mesh.repository.bluetooth.BluetoothRepository
+import com.geeksville.mesh.repository.usb.UsbRepository
+import com.geeksville.mesh.repository.network.NetworkRepository
+import com.geeksville.mesh.repository.data.RecentAddressesDataSource
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.stateInWhileSubscribed
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import org.meshtastic.core.model.DeviceConfig
 import org.meshtastic.core.model.Node
