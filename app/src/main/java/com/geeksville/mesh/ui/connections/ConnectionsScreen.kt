@@ -187,6 +187,7 @@ fun ConnectionsScreen(
                         .padding(16.dp),
                 ) {
                     AnimatedVisibility(
+                        // Show connected device info when fully connected or when device is sleeping/reconnecting
                         visible = connectionState.isConnected() || connectionState.isSleeping(),
                         modifier = Modifier.padding(bottom = 16.dp),
                     ) {

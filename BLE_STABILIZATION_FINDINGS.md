@@ -75,7 +75,7 @@ This document analyzes the current state of BLE stabilization fixes implemented 
 ## 📋 Architecture Analysis
 
 ### Data Flow
-```
+```text
 BluetoothInterface (TransportState enum) 
     ↓ observes
 RadioInterfaceService (StateFlow<TransportState>)
