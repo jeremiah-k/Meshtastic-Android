@@ -206,25 +206,15 @@ constructor(
             safe?.let { safeBluetooth ->
                 if (reconnectJob == null && ::fromNum.isInitialized) {
                     Timber.d("Bluetooth keep-alive, checking connection by reading fromNum")
-                    safeBluetooth.asyncReadCharacteristic(fromNum) { result ->
-                        try {
-                            if (result.isFailure) {
-                                Timber.w("Keep-alive read failed, connection is likely dead.")
-                                _transportState.value = TransportState.DEGRADED
-                                scheduleReconnect("keep-alive failed")
-                            } else {
-                                Timber.d("Keep-alive read successful.")
-                            }
-                        } catch (ex: Exception) {
-                            Timber.e(ex, "Exception in keep-alive callback")
-                            scheduleReconnect("keep-alive callback exception: ${ex.message}")
-                        }
-                    }
+                    safeBluetooth.readCharacteristic(fromNum, timeout = 5000L) // 5 second timeout
+                    Timber.d("Keep-alive read successful.")
                 }
             }
         } catch (ex: Exception) {
-            Timber.e(ex, "Exception in keep-alive")
-            scheduleReconnect("keep-alive exception: ${ex.message}")
+            if (ex is CancellationException) throw ex
+            Timber.w(ex, "Keep-alive read failed, connection is likely dead.")
+            _transportState.value = TransportState.DEGRADED
+            scheduleReconnect("keep-alive failed")
         }
     }
 
@@ -270,9 +260,10 @@ constructor(
                 // change the data and we want the data stored in the closure
                 val toRadio = getCharacteristic(uuid)
 
-                s.asyncWriteCharacteristic(toRadio, p) { r ->
+                // Use synchronous write with timeout for better reliability
+                service.serviceScope.handledLaunch {
                     try {
-                        r.getOrThrow()
+                        s.writeCharacteristic(toRadio, p, timeout = 10000L) // 10 second timeout for writes
                         Timber.d("write of ${p.size} bytes to $uuid completed")
 
                         if (isFirstSend) {
@@ -280,7 +271,8 @@ constructor(
                             doReadFromRadio(false)
                         }
                     } catch (ex: Exception) {
-                        scheduleReconnect("error during asyncWriteCharacteristic - disconnecting, ${ex.message}")
+                        if (ex is CancellationException) throw ex
+                        scheduleReconnect("error during writeCharacteristic - disconnecting, ${ex.message}")
                     }
                 }
             }
