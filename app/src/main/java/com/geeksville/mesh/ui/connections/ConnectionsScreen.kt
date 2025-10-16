@@ -186,7 +186,9 @@ fun ConnectionsScreen(
                         .padding(16.dp),
                 ) {
                     AnimatedVisibility(
-                        visible = connectionState.isConnected() || connectionState.isSleeping(),
+                        visible = connectionState.isConnected() ||
+                            connectionState.isSleeping() ||
+                            transportState == "RECONNECTING",
                         modifier = Modifier.padding(bottom = 16.dp),
                     ) {
                         Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {

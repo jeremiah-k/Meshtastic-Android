@@ -43,6 +43,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -295,36 +296,41 @@ constructor(
         _transportState.value = newState
         serviceRepository.setTransportState(newState.name)
 
+        // Keep-alive job should only run when state is READY
+        if (newState == TransportState.READY) {
+            if (keepAliveJob == null) {
+                keepAliveJob = serviceScope.launch {
+                    try {
+                        while (isActive) {
+                            delay(KEEPALIVE_INTERVAL_MILLIS)
+                            try {
+                                radioIf.keepAlive()
+                            } catch (e: IllegalStateException) {
+                                Timber.w(e, "keepAlive failed; stopping keepAlive job")
+                                break
+                            }
+                        }
+                    } finally {
+                        keepAliveJob = null
+                    }
+                }
+            }
+        } else {
+            keepAliveJob?.cancel()
+            keepAliveJob = null
+        }
+
         // Map granular transport state to legacy service-level ConnectionState
         val newServiceState =
             when (newState) {
-                TransportState.READY -> {
-                    if (keepAliveJob == null) {
-                        keepAliveJob =
-                            serviceScope.launch {
-                                while (true) {
-                                    delay(KEEPALIVE_INTERVAL_MILLIS)
-                                    radioIf.keepAlive()
-                                }
-                            }
-                    }
-                    ConnectionState.CONNECTED
-                }
-                TransportState.RECONNECTING -> {
-                    keepAliveJob?.cancel()
-                    keepAliveJob = null
-                    ConnectionState.DEVICE_SLEEP
-                }
+                TransportState.READY -> ConnectionState.CONNECTED
+                TransportState.RECONNECTING -> ConnectionState.DEVICE_SLEEP
                 TransportState.DISCONNECTED,
                 TransportState.IDLE,
-                -> {
-                    keepAliveJob?.cancel()
-                    keepAliveJob = null
-                    ConnectionState.DISCONNECTED
-                }
+                -> ConnectionState.DISCONNECTED
                 else -> {
-                    Timber.w("Unhandled TransportState: $newState, defaulting to DISCONNECTED")
-                    ConnectionState.DISCONNECTED // Provide a default state
+                    // Other states like CONNECTING, DEGRADED etc. are not fully connected
+                    ConnectionState.DISCONNECTED
                 }
             }
         broadcastConnectionChanged(newServiceState)

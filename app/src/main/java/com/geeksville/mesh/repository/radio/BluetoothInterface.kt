@@ -129,6 +129,7 @@ constructor(
         private const val MAX_DELAY_MS = 20000L
         private const val BACKOFF_MULTIPLIER = 2.0
         private const val JITTER_FACTOR = 0.2
+        private const val UI_STATE_DELAY_MS = 100L
 
         /**
          * this is created in onCreate() We do an ugly hack of keeping it in the singleton so we can share it for the
@@ -395,7 +396,7 @@ constructor(
             if (s != null) {
                 val exponentialDelay =
                     (BASE_DELAY_MS * Math.pow(BACKOFF_MULTIPLIER, reconnectAttempts.toDouble())).toLong()
-                val jitter = ((exponentialDelay * JITTER_FACTOR) * (2 * Math.random() - 1)).toLong()
+                val jitter = ((exponentialDelay * JITTER_FACTOR) * (2 * kotlin.random.Random.nextDouble() - 1)).toLong()
                 val totalDelay = (exponentialDelay + jitter).coerceIn(BASE_DELAY_MS, MAX_DELAY_MS)
 
                 reconnectAttempts++
@@ -469,6 +470,7 @@ constructor(
                             // Now tell clients they can (finally use the api)
                             service.onConnect()
                             reconnectAttempts = 0 // Reset backoff on successful connection
+                            delay(UI_STATE_DELAY_MS) // Allow UI to update before transitioning to READY
                             _transportState.value = TransportState.READY
 
                             // Immediately broadcast any queued packets sitting on the device
@@ -571,7 +573,15 @@ constructor(
         // see https://stackoverflow.com/questions/40156699/which-correct-flag-of-autoconnect-in-connectgatt-of-ble for
         // more info
         _transportState.value = TransportState.CONNECTING
-        safe!!.asyncConnect(true, cb = ::onConnect, lostConnectCb = { scheduleReconnect("connection dropped") })
+        safe!!.asyncConnect(
+            true,
+            cb = ::onConnect,
+            lostConnectCb = {
+                if (safe != null) {
+                    scheduleReconnect("connection dropped")
+                }
+            },
+        )
     }
 
     /** Get a chracteristic, but in a safe manner because some buggy BLE implementations might return null */
