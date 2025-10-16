@@ -373,13 +373,7 @@ constructor(
             safeBluetooth.setNotify(fromNum, true) {
                 // Notification received - subscription is working (logging/reconfirmation only)
                 Timber.d("Notification received, subscription confirmed working")
-                
-                // Set READY state only after receiving first notification, confirming subscription works
-                if (_transportState.value == TransportState.SUBSCRIBING) {
-                    _transportState.value = TransportState.READY
-                    Timber.d("First notification received, transport is READY")
-                }
-                
+
                 // We might get multiple notifies before we get around to reading from the radio - so just set one flag
                 fromNumChanged = true
                 service.serviceScope.handledLaunch {
@@ -394,6 +388,11 @@ constructor(
                         Timber.e(e, "Ending FromNum read, radio not connected")
                     }
                 }
+            }
+
+            if (_transportState.value == TransportState.SUBSCRIBING) {
+                _transportState.value = TransportState.READY
+                Timber.d("Notification subscription enabled, transport is READY")
             }
         } catch (ex: Exception) {
             Timber.e(ex, "Failed to subscribe to fromNum notifications")

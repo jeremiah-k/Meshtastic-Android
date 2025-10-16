@@ -252,18 +252,15 @@ constructor(
             bluetoothRepository
                 .scan()
                 .onEach { result ->
-                    val fullAddress =
-                        radioInterfaceService.toInterfaceAddress(InterfaceId.BLUETOOTH, result.device.address)
-                    // prevent log spam because we'll get lots of redundant scan results
-                    val oldDevs = scanResult.value!!
-                    val oldEntry = oldDevs[fullAddress]
-                    // Don't spam the GUI with endless updates for non changing nodes
-                    if (
-                        oldEntry == null || oldEntry.bonded != (result.device.bondState == BluetoothDevice.BOND_BONDED)
-                    ) {
-                        val entry = DeviceListEntry.Ble(result.device)
-                        oldDevs[entry.fullAddress] = entry
-                        scanResult.value = oldDevs
+                    val fullAddress = radioInterfaceService.toInterfaceAddress(InterfaceId.BLUETOOTH, result.device.address)
+                    val current = scanResult.value.orEmpty()
+                    val currentEntry = current[fullAddress]
+
+                    // Skip unchanged entries to avoid unnecessary UI work
+                    if (currentEntry == null || currentEntry.bonded != (result.device.bondState == BluetoothDevice.BOND_BONDED)) {
+                        val updatedMap = current.toMutableMap()
+                        updatedMap[fullAddress] = DeviceListEntry.Ble(result.device)
+                        scanResult.value = updatedMap
                     }
                 }
                 .catch { ex -> serviceRepository.setErrorMessage("Unexpected Bluetooth scan failure: ${ex.message}") }
