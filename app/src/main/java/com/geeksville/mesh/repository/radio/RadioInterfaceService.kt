@@ -297,27 +297,34 @@ constructor(
         serviceRepository.setTransportState(newState.name)
 
         // Keep-alive job should only run when state is READY
-        if (newState == TransportState.READY) {
-            if (keepAliveJob == null) {
-                keepAliveJob = serviceScope.launch {
-                    try {
-                        while (isActive) {
-                            delay(KEEPALIVE_INTERVAL_MILLIS)
-                            try {
-                                radioIf.keepAlive()
-                            } catch (@Suppress("TooGenericExceptionCaught") t: Throwable) {
-                                // Catch all exceptions to prevent coroutine from silently stopping
-                                Timber.w(t, "keepAlive failed; stopping keepAlive job")
-                                break
+        synchronized(this) {
+            if (newState == TransportState.READY) {
+                if (keepAliveJob == null) {
+                    keepAliveJob = serviceScope.launch {
+                        val thisJob = coroutineContext[Job]
+                        try {
+                            while (isActive) {
+                                delay(KEEPALIVE_INTERVAL_MILLIS)
+                                try {
+                                    radioIf.keepAlive()
+                                } catch (@Suppress("TooGenericExceptionCaught") t: Throwable) {
+                                    // Catch all exceptions to prevent coroutine from silently stopping
+                                    Timber.w(t, "keepAlive failed; stopping keepAlive job")
+                                    break
+                                }
+                            }
+                        } finally {
+                            synchronized(this@RadioInterfaceService) {
+                                if (keepAliveJob == thisJob) {
+                                    keepAliveJob = null
+                                }
                             }
                         }
-                    } finally {
-                        keepAliveJob = null
                     }
                 }
+            } else {
+                stopKeepAliveJob()
             }
-        } else {
-            stopKeepAliveJob()
         }
 
         // Map granular transport state to legacy service-level ConnectionState
@@ -368,8 +375,10 @@ constructor(
      * Stops the keep-alive job if it's currently running.
      */
     private fun stopKeepAliveJob() {
-        keepAliveJob?.cancel()
-        keepAliveJob = null
+        synchronized(this) {
+            keepAliveJob?.cancel()
+            keepAliveJob = null
+        }
     }
 
     /**

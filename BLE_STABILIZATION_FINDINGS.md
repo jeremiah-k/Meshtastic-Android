@@ -10,7 +10,7 @@ This document analyzes the current state of BLE stabilization fixes implemented 
 
 - **TransportState.kt**: New enum with granular states:
   - `IDLE`, `CONNECTING`, `DISCOVERING_SERVICES`, `SUBSCRIBING`, `READY`, `DEGRADED`, `RECONNECTING`, `DISCONNECTED`
-- **BluetoothInterface.kt**: Exposes `transportState: MutableStateFlow<TransportState>` (line 157)
+- **BluetoothInterface.kt**: Exposes immutable `transportState: StateFlow<TransportState>` backed by private `_transportState: MutableStateFlow` (line 157)
 - **RadioInterfaceService.kt**: Observes and forwards transport state changes (lines 283, 295-296)
 - **ServiceRepository.kt**: Bridges transport state to UI layer as string (lines 61-67)
 
@@ -24,10 +24,10 @@ This document analyzes the current state of BLE stabilization fixes implemented 
 ### 3. BLE Keep-Alive Implementation
 **Status: FULLY IMPLEMENTED**
 
-- **BluetoothInterface.keepAlive()**: Implemented at lines 203-216
+- **BluetoothInterface.keepAlive()**: Implemented with synchronized job management (lines 203-216)
   - Reads `fromNum` characteristic to verify connection liveness
   - Sets state to `DEGRADED` on failure and triggers reconnect
-- **RadioInterfaceService**: Schedules periodic keep-alive checks (lines 148-150)
+- **RadioInterfaceService**: Schedules periodic keep-alive checks with proper job synchronization (lines 148-150)
 - **Integration**: Keep-alive only runs when connection is established
 
 ### 4. Improved Reconnect Backoff Policy
@@ -38,8 +38,8 @@ This document analyzes the current state of BLE stabilization fixes implemented 
   - `MAX_DELAY_MS = 20000L`
   - `BACKOFF_MULTIPLIER = 2.0`
   - `JITTER_FACTOR = 0.2`
-- **Implementation**: Jittered exponential backoff with mutex protection (lines 366-395)
-- **Concurrency Prevention**: `@Synchronized` on `scheduleReconnect` and a null check on `reconnectJob` prevent concurrent reconnect attempts
+- **Implementation**: Jittered exponential backoff with proper job synchronization (lines 366-395)
+- **Concurrency Prevention**: `@Synchronized` on `scheduleReconnect` and job reference checking in `retryDueToException()` prevent concurrent reconnect attempts
 
 ### 5. UI/UX Enhancements
 **Status: FULLY IMPLEMENTED**
@@ -100,7 +100,7 @@ ConnectionsScreen (UI status messages)
 2. **Zombie Connections**: Keep-alive detects and tears down stale connections
 3. **Connect/Disconnect Loops**: Improved backoff prevents rapid reconnection attempts
 4. **Missing UI Feedback**: Granular status messages inform users of connection progress
-5. **Concurrent Reconnects**: Mutex prevents multiple simultaneous reconnect attempts
+5. **Concurrent Reconnects**: Synchronized methods and job reference checking prevent multiple simultaneous reconnect attempts
 
 ### Remaining Considerations
 1. **RSSI Polling**: Still active every 2.5s (may affect some OEMs)

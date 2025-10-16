@@ -290,7 +290,6 @@ constructor(
     }
 
     @Volatile private var reconnectJob: Job? = null
-    @Volatile private var subscribingFallbackJob: Job? = null
 
     /** We had some problem, schedule a reconnection attempt (if one isn't already queued) */
     @Synchronized
@@ -370,24 +369,16 @@ constructor(
             return
         }
         
-        // Start fallback timer to prevent getting stuck in SUBSCRIBING state
-        subscribingFallbackJob = service.serviceScope.handledLaunch {
-            delay(3000) // Wait 3 seconds for first notification
-            if (_transportState.value == TransportState.SUBSCRIBING) {
-                _transportState.value = TransportState.READY
-                Timber.d("Notification subscription fallback timer triggered, transport is READY")
-            }
+        // Set READY state immediately after successful setNotify call
+        if (_transportState.value == TransportState.SUBSCRIBING) {
+            _transportState.value = TransportState.READY
+            Timber.d("Notification subscription requested, transport is READY")
         }
         
+        // Set up notification subscription
         safe?.setNotify(fromNum, true) {
-            // Cancel fallback timer since we received a notification
-            subscribingFallbackJob?.cancel()
-            
-            // Set READY state on first successful notification, confirming subscription is working
-            if (_transportState.value == TransportState.SUBSCRIBING) {
-                _transportState.value = TransportState.READY
-                Timber.d("Notification subscription confirmed, transport is READY")
-            }
+            // Notification received - subscription is working (logging/reconfirmation only)
+            Timber.d("Notification received, subscription confirmed working")
             
             // We might get multiple notifies before we get around to reading from the radio - so just set one flag
             fromNumChanged = true
@@ -407,6 +398,7 @@ constructor(
     }
 
     private suspend fun retryDueToException() {
+        val thisJob = coroutineContext[Job]
         try {
             // We gracefully handle safe being null because this can occur if someone has unpaired from our device -
             // just abandon the reconnect attempt
@@ -444,7 +436,11 @@ constructor(
             Timber.w("retryDueToException was cancelled")
             _transportState.value = TransportState.DISCONNECTED
         } finally {
-            reconnectJob = null
+            synchronized(this) {
+                if (reconnectJob == thisJob) {
+                    reconnectJob = null
+                }
+            }
         }
     }
 
@@ -559,8 +555,7 @@ constructor(
     }
 
     override fun close() {
-        reconnectJob?.cancel() // Cancel any queued reconnect attempts
-        subscribingFallbackJob?.cancel() // Cancel subscribing fallback timer
+        synchronized(this) { reconnectJob?.cancel() } // Cancel any queued reconnect attempts
         // stopRssiPolling() is no longer needed, as flow management handles polling lifecycle
         _transportState.value = TransportState.DISCONNECTED
 
