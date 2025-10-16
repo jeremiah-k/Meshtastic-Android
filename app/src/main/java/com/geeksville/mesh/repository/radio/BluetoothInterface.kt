@@ -43,6 +43,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.stateIn
+import kotlin.math.pow
 
 import org.meshtastic.core.analytics.platform.PlatformAnalytics
 import org.meshtastic.core.model.util.anonymize
@@ -473,7 +474,6 @@ constructor(
                             // Now tell clients they can (finally use the api)
                             service.onConnect()
                             reconnectAttempts = 0 // Reset backoff on successful connection
-                            _transportState.value = TransportState.SUBSCRIBING
 
                             // Immediately broadcast any queued packets sitting on the device
                             doReadFromRadio(true)

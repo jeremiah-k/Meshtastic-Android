@@ -39,7 +39,7 @@ This document analyzes the current state of BLE stabilization fixes implemented 
   - `BACKOFF_MULTIPLIER = 2.0`
   - `JITTER_FACTOR = 0.2`
 - **Implementation**: Jittered exponential backoff with mutex protection (lines 366-395)
-- **Concurrency Prevention**: `reconnectMutex.withLock` prevents concurrent reconnect attempts
+- **Concurrency Prevention**: `@Synchronized` on `scheduleReconnect` and a null check on `reconnectJob` prevent concurrent reconnect attempts
 
 ### 5. UI/UX Enhancements
 **Status: FULLY IMPLEMENTED**

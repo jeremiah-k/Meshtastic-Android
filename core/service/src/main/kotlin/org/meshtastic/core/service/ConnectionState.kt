@@ -21,6 +21,9 @@ enum class ConnectionState {
     /** We are disconnected from the device, and we should be trying to reconnect. */
     DISCONNECTED,
 
+    /** We are actively trying to connect to the device. */
+    CONNECTING,
+
     /** We are connected to the device and communicating normally. */
     CONNECTED,
 
