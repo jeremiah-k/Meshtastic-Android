@@ -290,6 +290,7 @@ constructor(
     }
 
     @Volatile private var reconnectJob: Job? = null
+    @Volatile private var subscribingFallbackJob: Job? = null
 
     /** We had some problem, schedule a reconnection attempt (if one isn't already queued) */
     @Synchronized
@@ -368,7 +369,20 @@ constructor(
             Timber.w("fromNum not initialized, cannot start watching")
             return
         }
+        
+        // Start fallback timer to prevent getting stuck in SUBSCRIBING state
+        subscribingFallbackJob = service.serviceScope.handledLaunch {
+            delay(3000) // Wait 3 seconds for first notification
+            if (_transportState.value == TransportState.SUBSCRIBING) {
+                _transportState.value = TransportState.READY
+                Timber.d("Notification subscription fallback timer triggered, transport is READY")
+            }
+        }
+        
         safe?.setNotify(fromNum, true) {
+            // Cancel fallback timer since we received a notification
+            subscribingFallbackJob?.cancel()
+            
             // Set READY state on first successful notification, confirming subscription is working
             if (_transportState.value == TransportState.SUBSCRIBING) {
                 _transportState.value = TransportState.READY
@@ -546,6 +560,7 @@ constructor(
 
     override fun close() {
         reconnectJob?.cancel() // Cancel any queued reconnect attempts
+        subscribingFallbackJob?.cancel() // Cancel subscribing fallback timer
         // stopRssiPolling() is no longer needed, as flow management handles polling lifecycle
         _transportState.value = TransportState.DISCONNECTED
 
