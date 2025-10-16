@@ -154,7 +154,8 @@ constructor(
     private lateinit var fromNum: BluetoothGattCharacteristic
 
     /** A flow that emits the current, granular state of the BLE transport. */
-    val transportState = MutableStateFlow(TransportState.IDLE)
+    private val _transportState = MutableStateFlow(TransportState.IDLE)
+    val transportState: StateFlow<TransportState> = _transportState
 
     /**
      * RSSI flow, which polls the remote device for RSSI only when there are active subscribers. The polling stops
@@ -201,19 +202,29 @@ constructor(
      * function forces a read of a characteristic to see if we are really connected.
      */
     override fun keepAlive() {
-        safe?.let { safeBluetooth ->
-            if (reconnectJob == null) {
-                Timber.d("Bluetooth keep-alive, checking connection by reading fromNum")
-                safeBluetooth.asyncReadCharacteristic(fromNum) { result ->
-                    if (result.isFailure) {
-                        Timber.w("Keep-alive read failed, connection is likely dead.")
-                        transportState.value = TransportState.DEGRADED
-                        scheduleReconnect("keep-alive failed")
-                    } else {
-                        Timber.d("Keep-alive read successful.")
+        try {
+            safe?.let { safeBluetooth ->
+                if (reconnectJob == null && ::fromNum.isInitialized) {
+                    Timber.d("Bluetooth keep-alive, checking connection by reading fromNum")
+                    safeBluetooth.asyncReadCharacteristic(fromNum) { result ->
+                        try {
+                            if (result.isFailure) {
+                                Timber.w("Keep-alive read failed, connection is likely dead.")
+                                _transportState.value = TransportState.DEGRADED
+                                scheduleReconnect("keep-alive failed")
+                            } else {
+                                Timber.d("Keep-alive read successful.")
+                            }
+                        } catch (ex: Exception) {
+                            Timber.e(ex, "Exception in keep-alive callback")
+                            scheduleReconnect("keep-alive callback exception: ${ex.message}")
+                        }
                     }
                 }
             }
+        } catch (ex: Exception) {
+            Timber.e(ex, "Exception in keep-alive")
+            scheduleReconnect("keep-alive exception: ${ex.message}")
         }
     }
 
@@ -244,7 +255,7 @@ constructor(
             startConnect()
         } else {
             Timber.e("Bluetooth adapter not found, assuming running on the emulator!")
-            transportState.value = TransportState.DISCONNECTED
+            _transportState.value = TransportState.DISCONNECTED
         }
     }
 
@@ -282,11 +293,18 @@ constructor(
     private val reconnectMutex = Mutex()
 
     /** We had some problem, schedule a reconnection attempt (if one isn't already queued) */
+    @Synchronized
     private fun scheduleReconnect(reason: String) {
         // stopRssiPolling() is no longer needed, as flow management handles polling lifecycle
+        if (safe == null) {
+            Timber.w("Skipping reconnect because interface is closed: $reason")
+            _transportState.value = TransportState.DISCONNECTED
+            return
+        }
+
         if (reconnectJob == null) {
             Timber.w("Scheduling reconnect because $reason")
-            transportState.value = TransportState.RECONNECTING
+            _transportState.value = TransportState.RECONNECTING
             reconnectJob = service.serviceScope.handledLaunch { retryDueToException() }
         } else {
             Timber.w("Skipping reconnect for $reason")
@@ -347,6 +365,10 @@ constructor(
     @Volatile var fromNumChanged = false
 
     private fun startWatchingFromNum() {
+        if (!::fromNum.isInitialized) {
+            Timber.w("fromNum not initialized, cannot start watching")
+            return
+        }
         safe?.setNotify(fromNum, true) {
             // We might get multiple notifies before we get around to reading from the radio - so just set one flag
             fromNumChanged = true
@@ -393,12 +415,15 @@ constructor(
                     startConnect()
                 } else {
                     Timber.w("Not connecting, because safe==null, someone must have closed us")
+                    _transportState.value = TransportState.DISCONNECTED
                 }
             } else {
                 Timber.w("Abandoning reconnect because safe==null, someone must have closed the device")
+                _transportState.value = TransportState.DISCONNECTED
             }
         } catch (ex: CancellationException) {
             Timber.w("retryDueToException was cancelled")
+            _transportState.value = TransportState.DISCONNECTED
         } finally {
             reconnectJob = null
         }
@@ -417,7 +442,7 @@ constructor(
         if (s == null) {
             Timber.w("Interface is shutting down, so skipping discover")
         } else {
-            transportState.value = TransportState.DISCOVERING_SERVICES
+            _transportState.value = TransportState.DISCOVERING_SERVICES
             s.asyncDiscoverServices { discRes ->
                 try {
                     discRes.getOrThrow()
@@ -436,7 +461,7 @@ constructor(
                             } */
 
                             fromNum = getCharacteristic(BTM_FROMNUM_CHARACTER)
-                            transportState.value = TransportState.SUBSCRIBING
+                            _transportState.value = TransportState.SUBSCRIBING
 
                             // We treat the first send by a client as special
                             isFirstSend = true
@@ -444,7 +469,7 @@ constructor(
                             // Now tell clients they can (finally use the api)
                             service.onConnect()
                             reconnectAttempts = 0 // Reset backoff on successful connection
-                            transportState.value = TransportState.READY
+                            _transportState.value = TransportState.READY
 
                             // Immediately broadcast any queued packets sitting on the device
                             doReadFromRadio(true)
@@ -518,7 +543,7 @@ constructor(
     override fun close() {
         reconnectJob?.cancel() // Cancel any queued reconnect attempts
         // stopRssiPolling() is no longer needed, as flow management handles polling lifecycle
-        transportState.value = TransportState.DISCONNECTED
+        _transportState.value = TransportState.DISCONNECTED
 
         if (safe != null) {
             Timber.i("Closing BluetoothInterface")
@@ -545,7 +570,7 @@ constructor(
         // comes in range (even if we made this connect call long ago when we got powered on)
         // see https://stackoverflow.com/questions/40156699/which-correct-flag-of-autoconnect-in-connectgatt-of-ble for
         // more info
-        transportState.value = TransportState.CONNECTING
+        _transportState.value = TransportState.CONNECTING
         safe!!.asyncConnect(true, cb = ::onConnect, lostConnectCb = { scheduleReconnect("connection dropped") })
     }
 
