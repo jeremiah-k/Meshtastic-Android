@@ -25,7 +25,7 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.MutableLiveData
 import com.geeksville.mesh.android.BuildUtils
 import com.geeksville.mesh.android.Logging
-import com.geeksville.mesh.service.ServiceRepository
+import org.meshtastic.core.service.ServiceRepository
 import com.geeksville.mesh.service.StatusMessagePatterns
 import com.geeksville.mesh.service.radio.NotConnectedException
 import com.geeksville.mesh.repository.radio.RadioInterfaceService
