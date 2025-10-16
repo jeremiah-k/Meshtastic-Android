@@ -218,7 +218,7 @@ constructor(
         processLifecycle.coroutineScope.launch(dispatchers.default) { _connectionState.emit(newState) }
     }
 
-    private var keepAliveJob: Job? = null
+    @Volatile private var keepAliveJob: Job? = null
 
     // Send a packet/command out the radio link, this routine can block if it needs to
     private fun handleSendToRadio(p: ByteArray) {
@@ -305,8 +305,9 @@ constructor(
                             delay(KEEPALIVE_INTERVAL_MILLIS)
                             try {
                                 radioIf.keepAlive()
-                            } catch (e: IllegalStateException) {
-                                Timber.w(e, "keepAlive failed; stopping keepAlive job")
+                            } catch (@Suppress("TooGenericExceptionCaught") t: Throwable) {
+                                // Catch all exceptions to prevent coroutine from silently stopping
+                                Timber.w(t, "keepAlive failed; stopping keepAlive job")
                                 break
                             }
                         }
@@ -325,13 +326,11 @@ constructor(
             when (newState) {
                 TransportState.READY -> ConnectionState.CONNECTED
                 TransportState.RECONNECTING -> ConnectionState.DEVICE_SLEEP
+                TransportState.DEGRADED -> ConnectionState.DEVICE_SLEEP
                 TransportState.DISCONNECTED,
                 TransportState.IDLE,
                 -> ConnectionState.DISCONNECTED
-                else -> {
-                    // Other states like CONNECTING, DEGRADED etc. are not fully connected
-                    ConnectionState.DISCONNECTED
-                }
+                else -> ConnectionState.DISCONNECTED
             }
         broadcastConnectionChanged(newServiceState)
     }

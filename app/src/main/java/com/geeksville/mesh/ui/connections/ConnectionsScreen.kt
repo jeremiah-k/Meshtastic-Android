@@ -152,6 +152,7 @@ fun ConnectionsScreen(
                 "READY" -> if (regionUnset) R.string.must_set_region else R.string.connected
                 "CONNECTING" -> R.string.connecting
                 "RECONNECTING" -> R.string.reconnecting
+                "DEGRADED" -> R.string.reconnecting
                 "DISCOVERING_SERVICES" -> R.string.discovering_services
                 "SUBSCRIBING" -> R.string.subscribing_to_chars
                 "DISCONNECTED",
@@ -186,9 +187,7 @@ fun ConnectionsScreen(
                         .padding(16.dp),
                 ) {
                     AnimatedVisibility(
-                        visible = connectionState.isConnected() ||
-                            connectionState.isSleeping() ||
-                            transportState == "RECONNECTING",
+                        visible = connectionState.isConnected() || connectionState.isSleeping(),
                         modifier = Modifier.padding(bottom = 16.dp),
                     ) {
                         Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {

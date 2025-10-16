@@ -43,8 +43,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+
 import org.meshtastic.core.analytics.platform.PlatformAnalytics
 import org.meshtastic.core.model.util.anonymize
 import timber.log.Timber
@@ -129,7 +128,6 @@ constructor(
         private const val MAX_DELAY_MS = 20000L
         private const val BACKOFF_MULTIPLIER = 2.0
         private const val JITTER_FACTOR = 0.2
-        private const val UI_STATE_DELAY_MS = 100L
 
         /**
          * this is created in onCreate() We do an ugly hack of keeping it in the singleton so we can share it for the
@@ -291,7 +289,6 @@ constructor(
     }
 
     @Volatile private var reconnectJob: Job? = null
-    private val reconnectMutex = Mutex()
 
     /** We had some problem, schedule a reconnection attempt (if one isn't already queued) */
     @Synchronized
@@ -388,7 +385,7 @@ constructor(
         }
     }
 
-    private suspend fun retryDueToException() = reconnectMutex.withLock {
+    private suspend fun retryDueToException() {
         try {
             // We gracefully handle safe being null because this can occur if someone has unpaired from our device -
             // just abandon the reconnect attempt
@@ -470,7 +467,6 @@ constructor(
                             // Now tell clients they can (finally use the api)
                             service.onConnect()
                             reconnectAttempts = 0 // Reset backoff on successful connection
-                            delay(UI_STATE_DELAY_MS) // Allow UI to update before transitioning to READY
                             _transportState.value = TransportState.READY
 
                             // Immediately broadcast any queued packets sitting on the device
