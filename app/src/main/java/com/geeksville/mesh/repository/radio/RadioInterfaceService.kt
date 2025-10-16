@@ -317,8 +317,7 @@ constructor(
                 }
             }
         } else {
-            keepAliveJob?.cancel()
-            keepAliveJob = null
+            stopKeepAliveJob()
         }
 
         // Map granular transport state to legacy service-level ConnectionState
@@ -340,8 +339,7 @@ constructor(
         Timber.i("stopping interface $r")
         isStarted = false
         radioIf = interfaceFactory.nopInterface
-        keepAliveJob?.cancel()
-        keepAliveJob = null
+        stopKeepAliveJob()
         r.close()
 
         // cancel any old jobs and get ready for the new ones
@@ -362,6 +360,14 @@ constructor(
         _bluetoothRssi.value = null
         _transportState.value = TransportState.IDLE
         serviceRepository.setTransportState(TransportState.IDLE.name)
+    }
+
+    /**
+     * Stops the keep-alive job if it's currently running.
+     */
+    private fun stopKeepAliveJob() {
+        keepAliveJob?.cancel()
+        keepAliveJob = null
     }
 
     /**
