@@ -361,31 +361,43 @@ constructor(
             return
         }
         
-        // Set READY state immediately after successful setNotify call
-        if (_transportState.value == TransportState.SUBSCRIBING) {
-            _transportState.value = TransportState.READY
-            Timber.d("Notification subscription requested, transport is READY")
-        }
-        
         // Set up notification subscription
-        safe?.setNotify(fromNum, true) {
-            // Notification received - subscription is working (logging/reconfirmation only)
-            Timber.d("Notification received, subscription confirmed working")
-            
-            // We might get multiple notifies before we get around to reading from the radio - so just set one flag
-            fromNumChanged = true
-            service.serviceScope.handledLaunch {
-                try {
-                    if (fromNumChanged) {
-                        fromNumChanged = false
-                        Timber.d("fromNum changed, so we are reading new messages")
-                        doReadFromRadio(false)
+        val safeBluetooth = safe ?: run {
+            Timber.w("SafeBluetooth is null, cannot subscribe to fromNum notifications")
+            _transportState.value = TransportState.DISCONNECTED
+            return
+        }
+
+        try {
+            safeBluetooth.setNotify(fromNum, true) {
+                // Notification received - subscription is working (logging/reconfirmation only)
+                Timber.d("Notification received, subscription confirmed working")
+                
+                // We might get multiple notifies before we get around to reading from the radio - so just set one flag
+                fromNumChanged = true
+                service.serviceScope.handledLaunch {
+                    try {
+                        if (fromNumChanged) {
+                            fromNumChanged = false
+                            Timber.d("fromNum changed, so we are reading new messages")
+                            doReadFromRadio(false)
+                        }
+                    } catch (e: RadioNotConnectedException) {
+                        // Don't report autobugs for this, getting an exception here is expected behavior
+                        Timber.e(e, "Ending FromNum read, radio not connected")
                     }
-                } catch (e: RadioNotConnectedException) {
-                    // Don't report autobugs for this, getting an exception here is expected behavior
-                    Timber.e(e, "Ending FromNum read, radio not connected")
                 }
             }
+
+            // Set READY state after successful setNotify call
+            if (_transportState.value == TransportState.SUBSCRIBING) {
+                _transportState.value = TransportState.READY
+                Timber.d("Notification subscription requested, transport is READY")
+            }
+        } catch (ex: Exception) {
+            Timber.e(ex, "Failed to subscribe to fromNum notifications")
+            _transportState.value = TransportState.DEGRADED
+            scheduleReconnect("failed to subscribe to fromNum notifications: ${ex.message}")
         }
     }
 
