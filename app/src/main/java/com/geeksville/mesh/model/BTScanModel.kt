@@ -186,7 +186,13 @@ constructor(
             .stateInWhileSubscribed(initialValue = if (showMockInterface.value) listOf(mockDevice) else emptyList())
 
     init {
-        serviceRepository.statusMessage.onEach { errorText.value = it }.launchIn(viewModelScope)
+        serviceRepository.statusMessage.onEach { message ->
+            // Only update errorText from statusMessage if it's not a node count message
+            // This allows connection status to take priority
+            if (!message.startsWith("Nodes (")) {
+                errorText.value = message
+            }
+        }.launchIn(viewModelScope)
         Timber.d("BTScanModel created")
     }
 

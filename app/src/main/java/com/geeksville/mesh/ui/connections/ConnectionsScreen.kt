@@ -218,13 +218,23 @@ fun ConnectionsScreen(
                     }
 
                     var selectedDeviceType by remember { mutableStateOf(DeviceType.BLE) }
-                    LaunchedEffect(Unit) { DeviceType.fromAddress(selectedDevice)?.let { selectedDeviceType = it } }
+                    LaunchedEffect(Unit) { 
+                        // First try to restore from saved preference, then fallback to device address detection
+                        val savedType = try {
+                            DeviceType.valueOf(connectionsViewModel.uiPrefsInstance.selectedDeviceType)
+                        } catch (e: IllegalArgumentException) {
+                            null
+                        }
+                        selectedDeviceType = savedType ?: DeviceType.fromAddress(selectedDevice) ?: DeviceType.BLE
+                    }
 
                     ConnectionsSegmentedBar(
                         selectedDeviceType = selectedDeviceType,
                         modifier = Modifier.fillMaxWidth(),
                     ) {
                         selectedDeviceType = it
+                        // Save the selected device type to preferences
+                        connectionsViewModel.uiPrefsInstance.selectedDeviceType = it.name
                     }
 
                     Spacer(modifier = Modifier.height(4.dp))

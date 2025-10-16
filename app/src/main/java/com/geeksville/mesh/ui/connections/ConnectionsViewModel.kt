@@ -62,6 +62,9 @@ constructor(
     private val _hasShownNotPairedWarning = MutableStateFlow(uiPrefs.hasShownNotPairedWarning)
     val hasShownNotPairedWarning: StateFlow<Boolean> = _hasShownNotPairedWarning.asStateFlow()
 
+    // Expose uiPrefs for device type persistence
+    val uiPrefsInstance = uiPrefs
+
     fun suppressNoPairedWarning() {
         _hasShownNotPairedWarning.value = true
         uiPrefs.hasShownNotPairedWarning = true
