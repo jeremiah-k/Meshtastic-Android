@@ -102,6 +102,7 @@ fun ConnectionsScreen(
     val scanStatusText by scanModel.errorText.observeAsState("")
     val connectionState by
         connectionsViewModel.connectionState.collectAsStateWithLifecycle(ConnectionState.DISCONNECTED)
+    val transportState by connectionsViewModel.transportState.collectAsStateWithLifecycle("IDLE")
     val scanning by scanModel.spinner.collectAsStateWithLifecycle(false)
     val context = LocalContext.current
     val ourNode by connectionsViewModel.ourNodeInfo.collectAsStateWithLifecycle()
@@ -145,15 +146,21 @@ fun ConnectionsScreen(
         }
     }
 
-    LaunchedEffect(connectionState, regionUnset) {
-        when (connectionState) {
-            ConnectionState.CONNECTED -> {
-                if (regionUnset) R.string.must_set_region else R.string.connected
+    LaunchedEffect(regionUnset, transportState) {
+        val statusResId =
+            when (transportState) {
+                "READY" -> if (regionUnset) R.string.must_set_region else R.string.connected
+                "CONNECTING" -> R.string.connecting
+                "RECONNECTING" -> R.string.reconnecting
+                "DEGRADED" -> R.string.reconnecting
+                "DISCOVERING_SERVICES" -> R.string.discovering_services
+                "SUBSCRIBING" -> R.string.subscribing_to_chars
+                "DISCONNECTED",
+                "IDLE",
+                -> R.string.not_connected
+                else -> R.string.not_connected
             }
-
-            ConnectionState.DISCONNECTED -> R.string.not_connected
-            ConnectionState.DEVICE_SLEEP -> R.string.connected_sleeping
-        }.let { scanModel.setErrorText(context.getString(it)) }
+        scanModel.setErrorText(context.getString(statusResId))
     }
 
     Scaffold(
@@ -180,7 +187,8 @@ fun ConnectionsScreen(
                         .padding(16.dp),
                 ) {
                     AnimatedVisibility(
-                        visible = connectionState.isConnected(),
+                        // Show connected device info when fully connected or when device is sleeping/reconnecting
+                        visible = connectionState.isConnected() || connectionState.isSleeping(),
                         modifier = Modifier.padding(bottom = 16.dp),
                     ) {
                         Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -210,13 +218,23 @@ fun ConnectionsScreen(
                     }
 
                     var selectedDeviceType by remember { mutableStateOf(DeviceType.BLE) }
-                    LaunchedEffect(Unit) { DeviceType.fromAddress(selectedDevice)?.let { selectedDeviceType = it } }
+                    LaunchedEffect(Unit) { 
+                        // First try to restore from saved preference, then fallback to device address detection
+                        val savedType = try {
+                            DeviceType.valueOf(connectionsViewModel.uiPrefsInstance.selectedDeviceType)
+                        } catch (e: IllegalArgumentException) {
+                            null
+                        }
+                        selectedDeviceType = savedType ?: DeviceType.fromAddress(selectedDevice) ?: DeviceType.BLE
+                    }
 
                     ConnectionsSegmentedBar(
                         selectedDeviceType = selectedDeviceType,
                         modifier = Modifier.fillMaxWidth(),
                     ) {
                         selectedDeviceType = it
+                        // Save the selected device type to preferences
+                        connectionsViewModel.uiPrefsInstance.selectedDeviceType = it.name
                     }
 
                     Spacer(modifier = Modifier.height(4.dp))

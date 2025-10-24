@@ -93,8 +93,8 @@ fun BLEDevices(
             permissions = bluetoothPermissionsList,
             onPermissionsResult = {
                 if (it.values.all { granted -> granted } && bluetoothEnabled) {
-                    scanModel.startScan()
                     scanModel.refreshPermissions()
+                    scanModel.startScan()
                 } else {
                     // If permissions are not granted, we can show a message or handle it accordingly.
                 }

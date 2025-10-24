@@ -662,6 +662,30 @@ class SafeBluetooth(
     fun asyncWriteDescriptor(c: BluetoothGattDescriptor, cb: (Result<BluetoothGattDescriptor>) -> Unit) =
         queueWriteDescriptor(c, CallbackContinuation(cb))
 
+    fun writeDescriptor(c: BluetoothGattDescriptor): BluetoothGattDescriptor = makeSync { queueWriteDescriptor(c, it) }
+
+    // Synchronous version of setNotify for use in teardown scenarios
+    fun setNotifySync(c: BluetoothGattCharacteristic, enable: Boolean) {
+        Timber.d("starting setNotifySync(${c.uuid}, $enable)")
+        notifyHandlers[c.uuid] = {} // No-op callback for sync version
+        gatt!!.setCharacteristicNotification(c, enable)
+
+        val descriptor: BluetoothGattDescriptor =
+            c.getDescriptor(configurationDescriptorUUID)
+                ?: throw BLEException(
+                    "Notify descriptor not found for ${c.uuid}",
+                )
+        descriptor.value =
+            if (enable) {
+                BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+            } else {
+                BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
+            }
+        
+        writeDescriptor(descriptor)
+        Timber.d("Notify enable=$enable completed synchronously")
+    }
+
     // Added: Support reading remote RSSI
     private fun queueReadRemoteRssi(cont: Continuation<Int>, timeout: Long = 0) =
         queueWork("readRSSI", cont, timeout) { gatt?.readRemoteRssi() ?: false }

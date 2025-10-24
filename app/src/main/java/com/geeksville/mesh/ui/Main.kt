@@ -280,6 +280,7 @@ fun MainScreen(uIViewModel: UIViewModel = hiltViewModel(), scanModel: BTScanMode
                                         if (isConnectionsRoute) {
                                             when (connectionState) {
                                                 ConnectionState.CONNECTED -> stringResource(R.string.connected)
+                                                ConnectionState.CONNECTING -> stringResource(R.string.connecting)
                                                 ConnectionState.DEVICE_SLEEP -> stringResource(R.string.device_sleeping)
                                                 ConnectionState.DISCONNECTED -> stringResource(R.string.disconnected)
                                             }

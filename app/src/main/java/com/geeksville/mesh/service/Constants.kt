@@ -19,6 +19,13 @@ package com.geeksville.mesh.service
 
 const val prefix = "com.geeksville.mesh"
 
+/**
+ * Constants for status message patterns used across the application
+ */
+object StatusMessagePatterns {
+    const val NODE_COUNT_PREFIX = "Nodes ("
+}
+
 
 //
 // standard EXTRA bundle definitions

@@ -58,6 +58,14 @@ class ServiceRepository @Inject constructor() {
         _bluetoothRssi.value = rssi
     }
 
+    private val _transportState = MutableStateFlow("IDLE")
+    val transportState: StateFlow<String>
+        get() = _transportState
+
+    fun setTransportState(state: String) {
+        _transportState.value = state
+    }
+
     private val _clientNotification = MutableStateFlow<MeshProtos.ClientNotification?>(null)
     val clientNotification: StateFlow<MeshProtos.ClientNotification?>
         get() = _clientNotification

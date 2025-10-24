@@ -17,6 +17,15 @@
 
 package com.geeksville.mesh.repository.radio
 
+/**
+ * Handles the bluetooth link with a mesh radio device. Does not cache any device state, just does bluetooth comms
+ * etc...
+ *
+ * This service is not exposed outside of this process.
+ *
+ * Note - this class intentionally dumb. It doesn't understand protobuf framing etc... It is designed to be simple so it
+ * can be stubbed out with a simulated version as needed.
+ */
 import android.app.Application
 import android.provider.Settings
 import androidx.lifecycle.Lifecycle
@@ -34,7 +43,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -48,20 +59,12 @@ import org.meshtastic.core.analytics.platform.PlatformAnalytics
 import org.meshtastic.core.model.util.anonymize
 import org.meshtastic.core.prefs.radio.RadioPrefs
 import org.meshtastic.core.service.ConnectionState
+import org.meshtastic.core.service.ServiceRepository
 import org.meshtastic.proto.MeshProtos
 import timber.log.Timber
 import javax.inject.Inject
 import javax.inject.Singleton
 
-/**
- * Handles the bluetooth link with a mesh radio device. Does not cache any device state, just does bluetooth comms
- * etc...
- *
- * This service is not exposed outside of this process.
- *
- * Note - this class intentionally dumb. It doesn't understand protobuf framing etc... It is designed to be simple so it
- * can be stubbed out with a simulated version as needed.
- */
 @Suppress("LongParameterList")
 @Singleton
 class RadioInterfaceService
@@ -74,6 +77,7 @@ constructor(
     private val processLifecycle: Lifecycle,
     private val radioPrefs: RadioPrefs,
     private val interfaceFactory: InterfaceFactory,
+    private val serviceRepository: ServiceRepository,
     private val analytics: PlatformAnalytics,
 ) {
 
@@ -102,6 +106,9 @@ constructor(
     // Expose current bluetooth RSSI (null if not connected or not BLE)
     private val _bluetoothRssi = MutableStateFlow<Int?>(null)
     val bluetoothRssi: StateFlow<Int?> = _bluetoothRssi.asStateFlow()
+
+    private val _transportState = MutableStateFlow(TransportState.IDLE)
+    val transportState: StateFlow<TransportState> = _transportState.asStateFlow()
 
     /**
      * true if we have started our interface
@@ -134,6 +141,7 @@ constructor(
 
     companion object {
         private const val HEARTBEAT_INTERVAL_MILLIS = 30 * 1000L
+        private const val KEEPALIVE_INTERVAL_MILLIS = 15000L
     }
 
     private var lastHeartbeatMillis = 0L
@@ -210,6 +218,8 @@ constructor(
         processLifecycle.coroutineScope.launch(dispatchers.default) { _connectionState.emit(newState) }
     }
 
+    @Volatile private var keepAliveJob: Job? = null
+
     // Send a packet/command out the radio link, this routine can block if it needs to
     private fun handleSendToRadio(p: ByteArray) {
         radioIf.handleSendToRadio(p)
@@ -267,14 +277,70 @@ constructor(
 
                 radioIf = interfaceFactory.createInterface(address)
 
-                // If the new interface is bluetooth, collect its RSSI flow
+                // If the new interface is bluetooth, collect its RSSI and TransportState flows
                 if (radioIf is BluetoothInterface) {
-                    (radioIf as BluetoothInterface).rssiFlow.onEach { _bluetoothRssi.emit(it) }.launchIn(serviceScope)
+                    val bleInterface = radioIf as BluetoothInterface
+                    bleInterface.rssiFlow.onEach { _bluetoothRssi.emit(it) }.launchIn(serviceScope)
+                    bleInterface.transportState.onEach(::handleTransportStateChange).launchIn(serviceScope)
                 } else {
                     _bluetoothRssi.value = null
+                    _transportState.value = TransportState.IDLE
+                    serviceRepository.setTransportState(TransportState.IDLE.name)
                 }
             }
         }
+    }
+
+    private fun handleTransportStateChange(newState: TransportState) {
+        Timber.d("TransportState changed to $newState")
+        _transportState.value = newState
+        serviceRepository.setTransportState(newState.name)
+
+        // Keep-alive job should only run when state is READY
+        synchronized(this) {
+            if (newState == TransportState.READY) {
+                if (keepAliveJob == null) {
+                    keepAliveJob = serviceScope.launch {
+                        val thisJob = coroutineContext[Job]
+                        try {
+                            while (isActive) {
+                                delay(KEEPALIVE_INTERVAL_MILLIS)
+                                try {
+                                    radioIf.keepAlive()
+                                } catch (@Suppress("TooGenericExceptionCaught") t: Throwable) {
+                                    // Catch all exceptions to prevent coroutine from silently stopping
+                                    Timber.w(t, "keepAlive failed; stopping keepAlive job")
+                                    break
+                                }
+                            }
+                        } finally {
+                            synchronized(this@RadioInterfaceService) {
+                                if (keepAliveJob == thisJob) {
+                                    keepAliveJob = null
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                stopKeepAliveJob()
+            }
+        }
+
+        // Map granular transport state to legacy service-level ConnectionState
+        val newServiceState =
+            when (newState) {
+                TransportState.READY -> ConnectionState.CONNECTED
+                TransportState.RECONNECTING -> ConnectionState.DEVICE_SLEEP
+                TransportState.DEGRADED -> ConnectionState.DEVICE_SLEEP
+                TransportState.DISCONNECTED -> ConnectionState.DISCONNECTED
+                TransportState.IDLE -> ConnectionState.DISCONNECTED
+                TransportState.SCANNING -> ConnectionState.CONNECTING
+                TransportState.CONNECTING -> ConnectionState.CONNECTING
+                TransportState.DISCOVERING_SERVICES -> ConnectionState.CONNECTING
+                TransportState.SUBSCRIBING -> ConnectionState.CONNECTING
+            }
+        broadcastConnectionChanged(newServiceState)
     }
 
     private fun stopInterface() {
@@ -282,6 +348,7 @@ constructor(
         Timber.i("stopping interface $r")
         isStarted = false
         radioIf = interfaceFactory.nopInterface
+        stopKeepAliveJob()
         r.close()
 
         // cancel any old jobs and get ready for the new ones
@@ -300,6 +367,18 @@ constructor(
             onDisconnect(isPermanent = true) // Tell any clients we are now offline
         }
         _bluetoothRssi.value = null
+        _transportState.value = TransportState.IDLE
+        serviceRepository.setTransportState(TransportState.IDLE.name)
+    }
+
+    /**
+     * Stops the keep-alive job if it's currently running.
+     */
+    private fun stopKeepAliveJob() {
+        synchronized(this) {
+            keepAliveJob?.cancel()
+            keepAliveJob = null
+        }
     }
 
     /**

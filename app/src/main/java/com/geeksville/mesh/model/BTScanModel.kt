@@ -33,6 +33,7 @@ import com.geeksville.mesh.repository.radio.InterfaceId
 import com.geeksville.mesh.repository.radio.RadioInterfaceService
 import com.geeksville.mesh.repository.usb.UsbRepository
 import com.geeksville.mesh.service.MeshService
+import com.geeksville.mesh.service.StatusMessagePatterns
 import com.hoho.android.usbserial.driver.UsbSerialDriver
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
@@ -55,6 +56,8 @@ import org.meshtastic.core.strings.R
 import org.meshtastic.core.ui.viewmodel.stateInWhileSubscribed
 import timber.log.Timber
 import javax.inject.Inject
+
+
 
 /**
  * A sealed class is used here to represent the different types of devices that can be displayed in the list. This is
@@ -186,7 +189,13 @@ constructor(
             .stateInWhileSubscribed(initialValue = if (showMockInterface.value) listOf(mockDevice) else emptyList())
 
     init {
-        serviceRepository.statusMessage.onEach { errorText.value = it }.launchIn(viewModelScope)
+        serviceRepository.statusMessage.onEach { message ->
+            // Only update errorText from statusMessage if it's not a node count message
+            // This allows connection status to take priority
+            if (!message.isNullOrEmpty() && !message.startsWith(StatusMessagePatterns.NODE_COUNT_PREFIX)) {
+                errorText.value = message
+            }
+        }.launchIn(viewModelScope)
         Timber.d("BTScanModel created")
     }
 
@@ -243,18 +252,15 @@ constructor(
             bluetoothRepository
                 .scan()
                 .onEach { result ->
-                    val fullAddress =
-                        radioInterfaceService.toInterfaceAddress(InterfaceId.BLUETOOTH, result.device.address)
-                    // prevent log spam because we'll get lots of redundant scan results
-                    val oldDevs = scanResult.value!!
-                    val oldEntry = oldDevs[fullAddress]
-                    // Don't spam the GUI with endless updates for non changing nodes
-                    if (
-                        oldEntry == null || oldEntry.bonded != (result.device.bondState == BluetoothDevice.BOND_BONDED)
-                    ) {
-                        val entry = DeviceListEntry.Ble(result.device)
-                        oldDevs[entry.fullAddress] = entry
-                        scanResult.value = oldDevs
+                    val fullAddress = radioInterfaceService.toInterfaceAddress(InterfaceId.BLUETOOTH, result.device.address)
+                    val current = scanResult.value.orEmpty()
+                    val currentEntry = current[fullAddress]
+
+                    // Skip unchanged entries to avoid unnecessary UI work
+                    if (currentEntry == null || currentEntry.bonded != (result.device.bondState == BluetoothDevice.BOND_BONDED)) {
+                        val updatedMap = current.toMutableMap()
+                        updatedMap[fullAddress] = DeviceListEntry.Ble(result.device)
+                        scanResult.value = updatedMap
                     }
                 }
                 .catch { ex -> serviceRepository.setErrorMessage("Unexpected Bluetooth scan failure: ${ex.message}") }
