@@ -108,7 +108,7 @@ class MeshServiceNotificationsImpl @Inject constructor(@ApplicationContext priva
             NotificationType(
                 "my_broadcasts",
                 Res.string.meshtastic_broadcast_notifications,
-                NotificationManager.IMPORTANCE_DEFAULT,
+                NotificationManager.IMPORTANCE_HIGH,
             )
 
         object Alert :
@@ -358,6 +358,7 @@ class MeshServiceNotificationsImpl @Inject constructor(@ApplicationContext priva
                 .addMessage(message, System.currentTimeMillis(), person)
 
         builder
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setCategory(Notification.CATEGORY_MESSAGE)
             .setAutoCancel(true)
             .setStyle(style)
