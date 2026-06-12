@@ -152,6 +152,11 @@ class BleRadioTransport(
     @Volatile private var isFullyConnected = false
     private var connectionJob: Job? = null
 
+    // Guards against duplicate callbacks when multiple writes fail against the same stale session.
+    // Reset at the start of each attemptConnection(). Set under writeMutex (or hit by a single
+    // winning caller); read without lock since stale reads are benign (only affect dedup timing).
+    @Volatile private var sessionFailed = false
+
     // Never give up while the user has this device selected. Higher layers (SharedRadioInterfaceService)
     // own the explicit-disconnect lifecycle and will close() us when the user picks a different device or
     // toggles the connection off; until then, retry forever with the policy's exponential-backoff cap (60 s).
@@ -246,6 +251,7 @@ class BleRadioTransport(
     @Suppress("CyclomaticComplexMethod")
     private suspend fun attemptConnection(): BleReconnectPolicy.Outcome {
         connectionStartTime = nowMillis
+        sessionFailed = false
         Logger.i { "[$address] BLE connection attempt started" }
 
         val device = findDevice()
@@ -440,6 +446,8 @@ class BleRadioTransport(
                             "[$address] Wrote packet #$packetsSent " +
                                 "to toRadio (${p.size} bytes, total TX: $bytesSent bytes)"
                         }
+                    } catch (e: CancellationException) {
+                        throw e
                     } catch (e: Exception) {
                         Logger.w(e) {
                             "[$address] Failed to write packet to toRadioCharacteristic after " +
@@ -493,8 +501,35 @@ class BleRadioTransport(
     }
 
     private fun handleFailure(throwable: Throwable) {
+        // CancellationException signals intentional scope cancellation (close() called).
+        // Never surface it as a user-facing disconnect error.
+        if (throwable is CancellationException) return
+
+        // Deduplicate: only the first failure per connection attempt triggers session teardown.
+        // Heartbeat writes that arrive after the first failure must not spam callbacks.
+        if (sessionFailed) return
+        sessionFailed = true
+
+        // Tear down stale session state immediately so future writes fail-fast without retrying
+        // against a dead GATT handle.
+        radioService = null
+        isFullyConnected = false
+
         val (isPermanent, msg) = throwable.toDisconnectReason()
         callback.onDisconnect(isPermanent, errorMessage = msg)
+
+        Logger.w(throwable) { "[$address] Session failure — forcing cleanup for reconnect" }
+
+        // Force GATT disconnect on the detached cleanupScope (matching the pattern used by
+        // the existing exceptionHandler at lines 124-135). This causes Kable's connectionState
+        // to emit Disconnected, unblocking attemptConnection so BleReconnectPolicy iterates.
+        cleanupScope.launch {
+            try {
+                bleConnection.disconnect()
+            } catch (e: Exception) {
+                Logger.w(e) { "[$address] Failed to disconnect after session failure" }
+            }
+        }
     }
 
     /** Formats a one-line session statistics summary for logging. */

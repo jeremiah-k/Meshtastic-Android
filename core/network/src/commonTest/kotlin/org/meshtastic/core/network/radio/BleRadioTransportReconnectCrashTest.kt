@@ -17,6 +17,7 @@
 package org.meshtastic.core.network.radio
 
 import dev.mokkery.MockMode
+import dev.mokkery.answering.calls
 import dev.mokkery.answering.returns
 import dev.mokkery.every
 import dev.mokkery.matcher.any
@@ -28,6 +29,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.meshtastic.core.ble.BleConnection
 import org.meshtastic.core.ble.BleConnectionFactory
@@ -43,6 +45,7 @@ import org.meshtastic.core.testing.FakeBleScanner
 import org.meshtastic.core.testing.FakeBluetoothRepository
 import kotlin.test.BeforeTest
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 import kotlin.time.Duration
 
@@ -281,6 +284,154 @@ class BleRadioTransportReconnectCrashTest {
             connection.connectAndAwaitCalls >= 2,
             "Reconnect loop must call connectAndAwait again after a remote disconnect " +
                 "(actual calls: ${connection.connectAndAwaitCalls})",
+        )
+
+        bleTransport.close()
+    }
+
+    // ─── Session-failure recovery (Wave 2) ────────────────────────────────────────────────────────
+
+    @Test
+    fun `write failure while connected clears state and triggers reconnect`() = runTest {
+        val device = FakeBleDevice(address = address, name = "Test Radio")
+        bluetoothRepository.bond(device)
+
+        val bleTransport =
+            BleRadioTransport(
+                scope = this,
+                scanner = scanner,
+                bluetoothRepository = bluetoothRepository,
+                connectionFactory = connectionFactory,
+                callback = service,
+                address = address,
+            )
+        bleTransport.start()
+        advanceTimeBy(4_000L) // connect + handshake
+        assertTrue(connection.connectAndAwaitCalls == 1, "First connect must happen")
+
+        // Inject write failure while BLE state remains Connected
+        connection.service.writeException = IllegalStateException("session closed")
+
+        // Trigger a write (simulating a heartbeat or user packet)
+        bleTransport.handleSendToRadio(byteArrayOf(1, 2, 3))
+        advanceUntilIdle()
+
+        // After failure: disconnect must be called (GATT cleanup)
+        assertTrue(connection.disconnectCalls >= 1, "disconnect() must be called after write failure")
+
+        // Reconnect policy should iterate — wait for settle (3s) + connect
+        advanceTimeBy(10_000L)
+        assertTrue(
+            connection.connectAndAwaitCalls >= 2,
+            "Reconnect loop must call connectAndAwait again after session failure " +
+                "(actual calls: ${connection.connectAndAwaitCalls})",
+        )
+
+        bleTransport.close()
+    }
+
+    @Test
+    fun `CancellationException from write does not trigger callback`() = runTest {
+        val device = FakeBleDevice(address = address, name = "Test Radio")
+        bluetoothRepository.bond(device)
+
+        every { service.onDisconnect(any(), any()) } returns Unit
+
+        val bleTransport =
+            BleRadioTransport(
+                scope = this,
+                scanner = scanner,
+                bluetoothRepository = bluetoothRepository,
+                connectionFactory = connectionFactory,
+                callback = service,
+                address = address,
+            )
+        bleTransport.start()
+        advanceTimeBy(4_000L)
+
+        connection.service.writeException = CancellationException("cancelled")
+
+        bleTransport.handleSendToRadio(byteArrayOf(1))
+        advanceUntilIdle()
+
+        // CancellationException must NOT result in a user-facing disconnect callback
+        dev.mokkery.verify(mode = dev.mokkery.verify.VerifyMode.not) { service.onDisconnect(any(), any()) }
+
+        bleTransport.close()
+    }
+
+    @Test
+    fun `repeated writes after session failure do not spam onDisconnect`() = runTest {
+        val device = FakeBleDevice(address = address, name = "Test Radio")
+        bluetoothRepository.bond(device)
+
+        var onDisconnectCalls = 0
+        every { service.onDisconnect(any(), any()) } calls { onDisconnectCalls++ }
+
+        val bleTransport =
+            BleRadioTransport(
+                scope = this,
+                scanner = scanner,
+                bluetoothRepository = bluetoothRepository,
+                connectionFactory = connectionFactory,
+                callback = service,
+                address = address,
+            )
+        bleTransport.start()
+        advanceTimeBy(4_000L)
+
+        // First write failure — should trigger onDisconnect once
+        connection.service.writeException = IllegalStateException("session closed")
+        bleTransport.handleSendToRadio(byteArrayOf(1))
+        // Advance enough for retryBleOperation to exhaust 3 retries (~750ms max) + handleFailure +
+        // disconnect, but NOT enough to reach the 3 s reconnect settle delay.
+        advanceTimeBy(2_000L)
+
+        // Second write failure against same session — must NOT trigger another callback
+        bleTransport.handleSendToRadio(byteArrayOf(2))
+        advanceTimeBy(1_000L)
+
+        assertEquals(1, onDisconnectCalls, "onDisconnect must be called exactly once for the session failure")
+
+        bleTransport.close()
+    }
+
+    @Test
+    fun `stale radioService is cleared after session failure`() = runTest {
+        val device = FakeBleDevice(address = address, name = "Test Radio")
+        bluetoothRepository.bond(device)
+
+        val bleTransport =
+            BleRadioTransport(
+                scope = this,
+                scanner = scanner,
+                bluetoothRepository = bluetoothRepository,
+                connectionFactory = connectionFactory,
+                callback = service,
+                address = address,
+            )
+        bleTransport.start()
+        advanceTimeBy(4_000L)
+
+        val writesBefore = connection.service.writes.size
+
+        // First write failure clears radioService
+        connection.service.writeException = IllegalStateException("session closed")
+        bleTransport.handleSendToRadio(byteArrayOf(1, 2, 3))
+        // Advance enough for retryBleOperation to exhaust 3 retries (~750ms max) + handleFailure +
+        // disconnect, but NOT enough to reach the 3 s reconnect settle delay.
+        advanceTimeBy(2_000L)
+
+        // Second write — radioService should be null, so no write is attempted
+        connection.service.writeException = null // clear the exception hook
+        bleTransport.handleSendToRadio(byteArrayOf(4, 5, 6))
+        advanceTimeBy(1_000L)
+
+        // No new writes should have been recorded (radioService was null → write skipped)
+        assertEquals(
+            writesBefore,
+            connection.service.writes.size,
+            "No new write should be recorded after radioService was cleared",
         )
 
         bleTransport.close()
