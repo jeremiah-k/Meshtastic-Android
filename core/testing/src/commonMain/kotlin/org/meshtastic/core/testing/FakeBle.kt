@@ -193,18 +193,45 @@ class FakeBleService : BleService {
 
     val writes = mutableListOf<FakeBleWrite>()
 
+    /** When non-null, [write] throws this exception instead of recording. Reset to null after throw. */
+    var writeException: Exception? = null
+
+    /** When non-null, [read] throws this exception instead of returning data. Reset to null after throw. */
+    var readException: Exception? = null
+
+    /** When non-null, [observe] returns a flow that emits one empty [ByteArray] then throws. Reset to null after. */
+    var observeException: Exception? = null
+
     override fun hasCharacteristic(characteristic: BleCharacteristic): Boolean =
         availableCharacteristics.contains(characteristic.uuid)
 
-    override fun observe(characteristic: BleCharacteristic): Flow<ByteArray> =
-        notificationFlows.getOrPut(characteristic.uuid) { MutableSharedFlow(extraBufferCapacity = 16) }
+    override fun observe(characteristic: BleCharacteristic): Flow<ByteArray> {
+        val ex = observeException
+        if (ex != null) {
+            observeException = null
+            return flow {
+                emit(ByteArray(0))
+                throw ex
+            }
+        }
+        return notificationFlows.getOrPut(characteristic.uuid) { MutableSharedFlow(extraBufferCapacity = 16) }
+    }
 
-    override suspend fun read(characteristic: BleCharacteristic): ByteArray =
-        readQueues[characteristic.uuid]?.removeFirstOrNull() ?: ByteArray(0)
+    override suspend fun read(characteristic: BleCharacteristic): ByteArray {
+        readException?.let {
+            readException = null
+            throw it
+        }
+        return readQueues[characteristic.uuid]?.removeFirstOrNull() ?: ByteArray(0)
+    }
 
     override fun preferredWriteType(characteristic: BleCharacteristic): BleWriteType = BleWriteType.WITH_RESPONSE
 
     override suspend fun write(characteristic: BleCharacteristic, data: ByteArray, writeType: BleWriteType) {
+        writeException?.let { ex ->
+            writeException = null
+            throw ex
+        }
         availableCharacteristics += characteristic.uuid
         writes += FakeBleWrite(characteristic = characteristic, data = data.copyOf(), writeType = writeType)
     }

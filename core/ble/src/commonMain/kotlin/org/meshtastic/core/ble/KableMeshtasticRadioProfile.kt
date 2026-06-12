@@ -17,6 +17,8 @@
 package org.meshtastic.core.ble
 
 import co.touchlab.kermit.Logger
+import com.juul.kable.GattStatusException
+import com.juul.kable.NotConnectedException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.channels.BufferOverflow
@@ -55,6 +57,27 @@ class KableMeshtasticRadioProfile(private val service: BleService) : MeshtasticR
 
     companion object {
         private val TRANSIENT_RETRY_DELAY = 500.milliseconds
+
+        /** GATT status codes that indicate the BLE session is irrecoverably broken. */
+        @Suppress("MagicNumber")
+        private val FATAL_GATT_STATUSES =
+            setOf(
+                133, // GATT_ERROR — generic connection failure
+                8, // GATT_CONN_TIMEOUT — link-layer timeout
+                129, // GATT_FAILURE — unrecoverable operation failure
+            )
+    }
+
+    /**
+     * Returns `true` if [e] represents a session-fatal BLE exception that should terminate the [fromRadio] flow so the
+     * transport layer can detect the broken session and trigger recovery.
+     *
+     * Transient conditions (busy GATT, missing permissions, etc.) return `false` and are retried.
+     */
+    private fun isFatalBleException(e: Exception): Boolean = when (e) {
+        is NotConnectedException -> true
+        is GattStatusException -> e.status in FATAL_GATT_STATUSES
+        else -> false
     }
 
     private val subscriptionReady = CompletableDeferred<Unit>()
@@ -94,6 +117,9 @@ class KableMeshtasticRadioProfile(private val service: BleService) : MeshtasticR
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
+                    // Session-fatal BLE exceptions must propagate so the transport layer detects the
+                    // broken session via its .catch handler and triggers reconnection.
+                    if (isFatalBleException(e)) throw e
                     Logger.w(e) { "FROMRADIO read error, pausing before next drain trigger" }
                     keepReading = false
                     delay(TRANSIENT_RETRY_DELAY)
