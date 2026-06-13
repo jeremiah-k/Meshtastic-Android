@@ -344,12 +344,12 @@ class SharedRadioInterfaceService(
     }
 
     /**
-     * Detects zombie connections where the BLE stack didn't reported a disconnect.
+     * Detects zombie connections where the BLE stack didn't report a disconnect.
      *
      * If we believe we're connected but haven't received any data from the radio within [LIVENESS_TIMEOUT_MILLIS], the
      * connection is likely dead. Signal a non-permanent disconnect so the reconnect machinery can take over.
      *
-     * @param now Injected clock value for testability. Defaults to [nowMillis] in production.
+     * Uses [clockMillis] for the current time so tests can inject a deterministic clock.
      */
     internal fun checkLiveness() {
         if (_connectionState.value != ConnectionState.Connected) return
