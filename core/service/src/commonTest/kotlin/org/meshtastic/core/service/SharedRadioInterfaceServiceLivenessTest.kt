@@ -25,6 +25,7 @@ import dev.mokkery.answering.returns
 import dev.mokkery.every
 import dev.mokkery.matcher.any
 import dev.mokkery.mock
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -40,6 +41,7 @@ import org.meshtastic.core.model.ConnectionState
 import org.meshtastic.core.model.DeviceType
 import org.meshtastic.core.network.repository.NetworkRepository
 import org.meshtastic.core.repository.PlatformAnalytics
+import org.meshtastic.core.repository.RadioTransport
 import org.meshtastic.core.repository.RadioTransportFactory
 import org.meshtastic.core.testing.FakeBluetoothRepository
 import org.meshtastic.core.testing.FakeRadioPrefs
@@ -109,6 +111,42 @@ class SharedRadioInterfaceServiceLivenessTest {
 
     private val processLifecycleOwner = TestLifecycleOwner()
 
+    /**
+     * Test-only [RadioTransport] whose [close] suspends on a [CompletableDeferred] gate.
+     *
+     * The liveness restart path calls `stopTransportLocked` → `currentTransport.close()` inside a launched coroutine.
+     * With the default [FakeRadioTransport], `close()` returns without suspending, so under
+     * [UnconfinedTestDispatcher] the entire restart completes synchronously during `checkLiveness()` and a second
+     * `checkLiveness()` never observes an in-flight restart. By awaiting a gate inside `close()`, this fake holds the
+     * restart genuinely suspended mid-flight, letting a test deterministically exercise the in-flight overlap window
+     * and prove the second check does not stack another restart/close.
+     *
+     * The gate is shared across instances; once completed by the test, any pending or subsequent `close()` resumes
+     * immediately.
+     */
+    private class GatedFakeRadioTransport(
+        private val closeGate: CompletableDeferred<Unit>,
+    ) : RadioTransport {
+        var closeCalled = false
+            private set
+        var closeCount = 0
+            private set
+        var closeCompletedCount = 0
+            private set
+
+        // Liveness restart skips the polite-disconnect frame (sendPoliteDisconnect = false), so no
+        // outbound data is expected; satisfy the contract with a no-op.
+        override fun handleSendToRadio(p: ByteArray) = Unit
+
+        override suspend fun close() {
+            closeCalled = true
+            closeCount++
+            // Suspend here until the test releases the gate, holding the restart in-flight.
+            closeGate.await()
+            closeCompletedCount++
+        }
+    }
+
     /** Controllable clock — tests advance this manually so all time comparisons are deterministic. */
     private var clock: Long = 0L
 
@@ -120,8 +158,14 @@ class SharedRadioInterfaceServiceLivenessTest {
      * Creates a [SharedRadioInterfaceService] with a controllable clock and a factory that returns a fresh
      * [FakeRadioTransport] per createTransport() call. After construction, calls [connect] then explicitly [onConnect]
      * to bring the service to Connected state (FakeRadioTransport does not call onConnect itself).
+     *
+     * Pass [transportProvider] to swap in a custom test double (e.g. a suspending-close fake) instead of the default
+     * [FakeRadioTransport]; the default records each created transport in [createdTransports].
      */
-    private fun createConnectedService(address: String): SharedRadioInterfaceService {
+    private fun createConnectedService(
+        address: String,
+        transportProvider: () -> RadioTransport = { FakeRadioTransport().also { createdTransports.add(it) } },
+    ): SharedRadioInterfaceService {
         every { networkRepository.networkAvailable } returns MutableStateFlow(true)
         every { networkRepository.resolvedList } returns MutableSharedFlow()
         every { analytics.isPlatformServicesAvailable } returns false
@@ -131,7 +175,7 @@ class SharedRadioInterfaceServiceLivenessTest {
         every { transportFactory.toInterfaceAddress(any(), any()) } returns address
         every { transportFactory.createTransport(any(), any()) } calls
             {
-                FakeRadioTransport().also { createdTransports.add(it) }
+                transportProvider()
             }
 
         radioPrefs.setDevAddr(address)
@@ -228,31 +272,69 @@ class SharedRadioInterfaceServiceLivenessTest {
 
     @Test
     fun `BLE in-flight liveness restart prevents overlapping restart via isRestarting`() = runTest(testDispatcher) {
-        // This test verifies the end-state (no stacking) rather than strictly isolating the
-        // isRestarting CAS guard. With UnconfinedTestDispatcher, the restart coroutine runs
-        // eagerly — the second checkLiveness() returns early because connectionState is
-        // DeviceSleep (not Connected), not because isRestarting blocks it.
+        // Deterministic in-flight overlap: a GatedFakeRadioTransport holds the first restart
+        // genuinely suspended inside stopTransportLocked → close() (awaiting closeGate). This
+        // removes reliance on UnconfinedTestDispatcher scheduling so the overlap window is real.
         //
-        // Key assertion: exactly 2 transports created (1 initial + 1 restart), proving no stacking.
-        // To truly test the CAS in isolation, use a suspending restart via CompletableDeferred
-        // or a custom dispatcher that delays mid-restart.
-        clock = 0L
-        val service = createConnectedService("xAA:BB:CC:DD:EE:FF")
+        // The first checkLiveness() flips state to DeviceSleep and CAS-sets isRestarting before
+        // launching the restart coroutine, which then suspends in close(). The second
+        // checkLiveness() is issued while that restart is still suspended and must NOT begin
+        // another close/create cycle.
+        val gatedTransports = mutableListOf<GatedFakeRadioTransport>()
+        val closeGate = CompletableDeferred<Unit>()
+        val transportProvider: () -> RadioTransport = {
+            GatedFakeRadioTransport(closeGate).also { gatedTransports.add(it) }
+        }
 
+        clock = 0L
+        val service = createConnectedService("xAA:BB:CC:DD:EE:FF", transportProvider)
+        assertEquals(1, gatedTransports.size, "Initial connect should create one transport")
+        val initialTransport = gatedTransports.first()
+
+        // Past the 60s threshold → first checkLiveness triggers a restart whose close() suspends
+        // on closeGate. Under UnconfinedTestDispatcher the launched restart runs eagerly up to the
+        // suspension point, so by the time checkLiveness() returns the restart is in-flight.
         clock = 65_000L
         service.checkLiveness()
-        // Do NOT advance — call again immediately while the first restart may be in-flight
+
+        // Issue a second checkLiveness() while the first restart is still suspended in close().
+        // Do NOT advanceUntilIdle here — the overlap must happen with the first restart in-flight.
         clock = 65_001L
         service.checkLiveness()
+
+        // While the first restart is suspended: exactly one transport created so far, and close()
+        // was entered exactly once and has NOT completed. The second check started no new cycle.
+        assertEquals(
+            1,
+            gatedTransports.size,
+            "Second check must not create a transport while the first restart is in-flight",
+        )
+        assertTrue(initialTransport.closeCalled, "First transport close must have been entered by the restart")
+        assertEquals(1, initialTransport.closeCount, "close() entered exactly once (no stacking of close calls)")
+        assertEquals(
+            0,
+            initialTransport.closeCompletedCount,
+            "close() must still be suspended (restart held in-flight) before releasing the gate",
+        )
+
+        // Release the gate: the suspended restart resumes, completes stopTransportLocked, and
+        // startTransportLocked creates the single fresh transport. isRestarting is reset in the
+        // finally block.
+        closeGate.complete(Unit)
         advanceUntilIdle()
 
         // Exactly 2 transports: 1 initial + 1 restart. A stacking bug would produce 3+.
         assertEquals(
             2,
-            createdTransports.size,
-            "Exactly 2 transports (1 initial + 1 restart). Stacking would produce 3+.",
+            gatedTransports.size,
+            "Exactly one fresh transport created after the restart resumes (1 initial + 1 restart)",
         )
-        assertEquals(1, createdTransports.first().closeCount, "First transport closed exactly once")
+        assertEquals(
+            1,
+            initialTransport.closeCount,
+            "First transport still closed exactly once after restart completes",
+        )
+        assertEquals(1, initialTransport.closeCompletedCount, "First transport close completed exactly once")
     }
 
     // ─── Non-BLE: Liveness does not mutate state ───────────────────────────────────────────────

@@ -209,14 +209,24 @@ class FakeBleService : BleService {
      */
     var observeException: Exception? = null
 
+    /** Characteristic-specific observe failures that occur when the returned flow is collected. */
+    val observeExceptionsByCharacteristic: MutableMap<Uuid, Exception> = mutableMapOf()
+
+    /** Characteristic-specific observe failures that occur before [BleService.observe]'s onSubscription callback. */
+    val observeBeforeSubscriptionExceptionByCharacteristic: MutableMap<Uuid, Exception> = mutableMapOf()
+
+    /** Characteristics whose 2-arg [observe] never invokes onSubscription. Notifications can still be emitted. */
+    val observeNeverSubscribeCharacteristics: MutableSet<Uuid> = mutableSetOf()
+
     override fun hasCharacteristic(characteristic: BleCharacteristic): Boolean =
         availableCharacteristics.contains(characteristic.uuid)
 
     override fun observe(characteristic: BleCharacteristic): Flow<ByteArray> {
-        val ex = observeException
-        if (ex != null) {
-            observeException = null
-            return flow { throw ex }
+        val failure =
+            observeExceptionsByCharacteristic.remove(characteristic.uuid)
+                ?: observeException?.also { observeException = null }
+        if (failure != null) {
+            return flow { throw failure }
         }
         return notificationFlows.getOrPut(characteristic.uuid) { MutableSharedFlow(extraBufferCapacity = 16) }
     }
@@ -224,17 +234,35 @@ class FakeBleService : BleService {
     /**
      * Overrides the 2-arg observe to prevent false subscriptionReady when testing pre-readiness failures.
      *
-     * The default BleService implementation calls `observe(characteristic).onStart { onSubscription() }`, which invokes
-     * [onSubscription] BEFORE the observeException flow throws. This override throws BEFORE invoking [onSubscription],
-     * correctly simulating "observe failed before CCCD/subscription readiness."
+     * The default BleService implementation calls `observe(characteristic).onStart { onSubscription() }`, which would
+     * invoke [onSubscription] BEFORE any pre-collection failure flow throws. This override throws BEFORE invoking
+     * [onSubscription], correctly simulating "observe failed before CCCD/subscription readiness."
+     *
+     * Pre-readiness failures are sourced (in priority order) from:
+     *  - [observeBeforeSubscriptionExceptionByCharacteristic] (2-arg-specific, one-shot per uuid)
+     *  - [observeExceptionsByCharacteristic] (shared with 1-arg observe, one-shot per uuid; defensively treated as a
+     *    pre-subscription failure here so the bare onStart wrap cannot swallow it after [onSubscription] runs)
+     *  - [observeException] (global, one-shot)
+     *
+     * For characteristics in [observeNeverSubscribeCharacteristics], [onSubscription] is never invoked but
+     * notifications are still exposed — the returned flow is the bare SharedFlow with no [onStart] wrap, so
+     * [emitNotification] still reaches active collectors.
      */
     override fun observe(characteristic: BleCharacteristic, onSubscription: suspend () -> Unit): Flow<ByteArray> {
-        val ex = observeException
-        if (ex != null) {
-            observeException = null
-            return flow { throw ex } // onSubscription is NOT invoked
+        val failure =
+            observeBeforeSubscriptionExceptionByCharacteristic.remove(characteristic.uuid)
+                ?: observeExceptionsByCharacteristic.remove(characteristic.uuid)
+                ?: observeException?.also { observeException = null }
+        if (failure != null) {
+            // onSubscription is NOT invoked — simulates failure before CCCD/subscription readiness.
+            return flow { throw failure }
         }
-        return observe(characteristic).onStart { onSubscription() }
+        val base = observe(characteristic)
+        return if (characteristic.uuid in observeNeverSubscribeCharacteristics) {
+            base
+        } else {
+            base.onStart { onSubscription() }
+        }
     }
 
     override suspend fun read(characteristic: BleCharacteristic): ByteArray {

@@ -16,6 +16,7 @@
  */
 package org.meshtastic.core.network.radio
 
+import com.juul.kable.GattStatusException
 import com.juul.kable.NotConnectedException
 import dev.mokkery.MockMode
 import dev.mokkery.answering.calls
@@ -47,6 +48,7 @@ import org.meshtastic.core.testing.FakeBleConnectionFactory
 import org.meshtastic.core.testing.FakeBleDevice
 import org.meshtastic.core.testing.FakeBleScanner
 import org.meshtastic.core.testing.FakeBluetoothRepository
+import org.meshtastic.core.testing.FakeBleService
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -723,7 +725,157 @@ class BleRadioTransportReconnectCrashTest {
         bleTransport.close()
     }
 
+    // ─── FROMNUM subscription readiness setup failures ───────────────────────────────────────────
+
+    @Test
+    fun `FROMNUM NotConnected before readiness aborts setup and retries`() =
+        fromNumPreReadinessFailureAbortsSetupAndRetries(
+            failure = NotConnectedException("FROMNUM observe failed before CCCD"),
+        )
+
+    @Test
+    fun `FROMNUM GATT 133 before readiness aborts setup and retries`() =
+        fromNumPreReadinessFailureAbortsSetupAndRetries(
+            failure = GattStatusException(status = 133, message = "GATT error"),
+        )
+
+    private fun fromNumPreReadinessFailureAbortsSetupAndRetries(failure: Exception) = runTest {
+        val device = FakeBleDevice(address = address, name = "Test Radio")
+        bluetoothRepository.bond(device)
+
+        connection.service.addCharacteristic(FROMNUM_CHARACTERISTIC)
+        connection.service.observeBeforeSubscriptionExceptionByCharacteristic[FROMNUM_CHARACTERISTIC] = failure
+
+        var onConnectCalls = 0
+        every { service.onConnect() } calls { onConnectCalls++ }
+        every { service.onDisconnect(any(), any()) } returns Unit
+
+        val bleTransport =
+            BleRadioTransport(
+                scope = this,
+                scanner = scanner,
+                bluetoothRepository = bluetoothRepository,
+                connectionFactory = connectionFactory,
+                callback = service,
+                address = address,
+            )
+        bleTransport.start()
+
+        // Initial settle (3s) + setup failure. Assert before retry can succeed, proving the failed
+        // pre-readiness attempt did not falsely mark subscription readiness or call onConnect().
+        advanceTimeBy(4_000L)
+
+        assertTrue(connection.disconnectCalls >= 1, "disconnect() must be called after FROMNUM observe failure")
+        assertEquals(0, onConnectCalls, "Failed pre-readiness setup must not call onConnect")
+
+        advanceTimeBy(10_000L)
+        assertTrue(
+            connection.connectAndAwaitCalls >= 2,
+            "Reconnect loop must retry after FROMNUM pre-readiness failure " +
+                "(actual calls: ${connection.connectAndAwaitCalls})",
+        )
+
+        bleTransport.close()
+    }
+
+    @Test
+    fun `FROMNUM subscription readiness timeout aborts setup clears stale service and retries`() = runTest {
+        val device = FakeBleDevice(address = address, name = "Test Radio")
+        bluetoothRepository.bond(device)
+
+        connection.service.addCharacteristic(FROMNUM_CHARACTERISTIC)
+        connection.service.observeNeverSubscribeCharacteristics += FROMNUM_CHARACTERISTIC
+
+        var onConnectCalls = 0
+        every { service.onConnect() } calls { onConnectCalls++ }
+        every { service.onDisconnect(any(), any()) } returns Unit
+
+        val bleTransport =
+            BleRadioTransport(
+                scope = this,
+                scanner = scanner,
+                bluetoothRepository = bluetoothRepository,
+                connectionFactory = connectionFactory,
+                callback = service,
+                address = address,
+            )
+        bleTransport.start()
+
+        // Settle (3s) + SUBSCRIPTION_READY_TIMEOUT (5s) + margin. FROMNUM observe never invokes
+        // onSubscription, so setup must abort instead of continuing with a half-initialized service.
+        advanceTimeBy(9_000L)
+
+        assertTrue(connection.disconnectCalls >= 1, "disconnect() must be called after subscription timeout")
+        assertEquals(0, onConnectCalls, "Subscription timeout must not call onConnect")
+
+        val writesBefore = connection.service.writes.size
+        bleTransport.handleSendToRadio(byteArrayOf(7, 8, 9))
+        assertEquals(
+            writesBefore,
+            connection.service.writes.size,
+            "Timed-out setup must clear radioService so writes do not use a half-initialized service",
+        )
+
+        advanceTimeBy(10_000L)
+        assertTrue(
+            connection.connectAndAwaitCalls >= 2,
+            "Reconnect loop must retry after subscription readiness timeout " +
+                "(actual calls: ${connection.connectAndAwaitCalls})",
+        )
+
+        bleTransport.close()
+    }
+
     // ─── Connected-gate timeout cleanup ──────────────────────────────────────────────────────────
+
+    @Test
+    fun `Connected-gate timeout cleans up stale service and retries without disconnect spam`() = runTest {
+        val staleConnection = NeverConnectedStateBleConnection()
+        val staleFactory =
+            object : BleConnectionFactory {
+                override fun create(scope: CoroutineScope, tag: String): BleConnection = staleConnection
+            }
+        val device = FakeBleDevice(address = address, name = "Test Radio")
+        bluetoothRepository.bond(device)
+
+        var onDisconnectCalls = 0
+        every { service.onDisconnect(any(), any()) } calls { onDisconnectCalls++ }
+
+        val bleTransport =
+            BleRadioTransport(
+                scope = this,
+                scanner = scanner,
+                bluetoothRepository = bluetoothRepository,
+                connectionFactory = staleFactory,
+                callback = service,
+                address = address,
+            )
+        bleTransport.start()
+
+        // Settle (3s) + CONNECTED_GATE_TIMEOUT (5s) + margin. connectAndAwait returns Connected,
+        // profile setup succeeds, but connectionState never emits Connected, so the gate times out.
+        advanceTimeBy(9_000L)
+
+        assertTrue(staleConnection.disconnectCalls >= 1, "Connected-gate timeout must force GATT disconnect")
+        assertTrue(onDisconnectCalls <= 1, "Connected-gate timeout must not spam onDisconnect callbacks")
+
+        val writesBefore = staleConnection.service.writes.size
+        bleTransport.handleSendToRadio(byteArrayOf(4, 5, 6))
+        assertEquals(
+            writesBefore,
+            staleConnection.service.writes.size,
+            "Connected-gate timeout must clear radioService so writes do not use stale profile state",
+        )
+
+        advanceTimeBy(10_000L)
+        assertTrue(
+            staleConnection.connectAndAwaitCalls >= 2,
+            "Reconnect loop must retry after Connected-gate timeout " +
+                "(actual calls: ${staleConnection.connectAndAwaitCalls})",
+        )
+
+        bleTransport.close()
+    }
 
     /**
      * Validates the normal Connected-gate path: when connectAndAwait returns Connected and the connectionState
@@ -800,6 +952,57 @@ private class CancellingProfileBleConnection : BleConnection {
         timeout: Duration,
         setup: suspend CoroutineScope.(BleService) -> T,
     ): T = throw CancellationException("Simulated scope cancellation during service discovery")
+
+    override fun maximumWriteValueLength(writeType: BleWriteType): Int? = null
+}
+
+/**
+ * A [BleConnection] whose [connectAndAwait] reports success while [connectionState] never emits
+ * [BleConnectionState.Connected]. This exercises the Connected-gate timeout cleanup path after profile setup succeeds.
+ */
+private class NeverConnectedStateBleConnection : BleConnection {
+
+    private val _deviceFlow = MutableStateFlow<BleDevice?>(null)
+    override val deviceFlow: StateFlow<BleDevice?> = _deviceFlow.asStateFlow()
+
+    private val _connectionState = MutableStateFlow<BleConnectionState>(BleConnectionState.Disconnected())
+    override val connectionState: StateFlow<BleConnectionState> = _connectionState.asStateFlow()
+
+    override val device: BleDevice?
+        get() = _deviceFlow.value
+
+    val service = FakeBleService().apply {
+        addCharacteristic(FROMNUM_CHARACTERISTIC)
+    }
+
+    var connectAndAwaitCalls = 0
+        private set
+
+    var disconnectCalls = 0
+        private set
+
+    override suspend fun connect(device: BleDevice) {
+        _deviceFlow.value = device
+        _connectionState.value = BleConnectionState.Connecting
+    }
+
+    override suspend fun connectAndAwait(device: BleDevice, timeout: Duration): BleConnectionState {
+        connectAndAwaitCalls++
+        connect(device)
+        return BleConnectionState.Connected
+    }
+
+    override suspend fun disconnect() {
+        disconnectCalls++
+        _connectionState.value = BleConnectionState.Disconnected()
+        _deviceFlow.value = null
+    }
+
+    override suspend fun <T> profile(
+        serviceUuid: kotlin.uuid.Uuid,
+        timeout: Duration,
+        setup: suspend CoroutineScope.(BleService) -> T,
+    ): T = CoroutineScope(kotlinx.coroutines.Dispatchers.Unconfined).setup(service)
 
     override fun maximumWriteValueLength(writeType: BleWriteType): Int? = null
 }
