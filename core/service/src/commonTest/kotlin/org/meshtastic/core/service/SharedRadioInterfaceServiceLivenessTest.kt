@@ -115,22 +115,22 @@ class SharedRadioInterfaceServiceLivenessTest {
      * Test-only [RadioTransport] whose [close] suspends on a [CompletableDeferred] gate.
      *
      * The liveness restart path calls `stopTransportLocked` → `currentTransport.close()` inside a launched coroutine.
-     * With the default [FakeRadioTransport], `close()` returns without suspending, so under
-     * [UnconfinedTestDispatcher] the entire restart completes synchronously during `checkLiveness()` and a second
-     * `checkLiveness()` never observes an in-flight restart. By awaiting a gate inside `close()`, this fake holds the
-     * restart genuinely suspended mid-flight, letting a test deterministically exercise the in-flight overlap window
-     * and prove the second check does not stack another restart/close.
+     * With the default [FakeRadioTransport], `close()` returns without suspending, so under [UnconfinedTestDispatcher]
+     * the entire restart completes synchronously during `checkLiveness()` and a second `checkLiveness()` never observes
+     * an in-flight restart. By awaiting a gate inside `close()`, this fake holds the restart genuinely suspended
+     * mid-flight, letting a test deterministically exercise the in-flight overlap window and prove the second check
+     * does not stack another restart/close.
      *
      * The gate is shared across instances; once completed by the test, any pending or subsequent `close()` resumes
      * immediately.
      */
-    private class GatedFakeRadioTransport(
-        private val closeGate: CompletableDeferred<Unit>,
-    ) : RadioTransport {
+    private class GatedFakeRadioTransport(private val closeGate: CompletableDeferred<Unit>) : RadioTransport {
         var closeCalled = false
             private set
+
         var closeCount = 0
             private set
+
         var closeCompletedCount = 0
             private set
 
@@ -173,10 +173,7 @@ class SharedRadioInterfaceServiceLivenessTest {
         every { transportFactory.isMockTransport() } returns false
         every { transportFactory.isAddressValid(any()) } returns true
         every { transportFactory.toInterfaceAddress(any(), any()) } returns address
-        every { transportFactory.createTransport(any(), any()) } calls
-            {
-                transportProvider()
-            }
+        every { transportFactory.createTransport(any(), any()) } calls { transportProvider() }
 
         radioPrefs.setDevAddr(address)
 

@@ -239,10 +239,10 @@ class FakeBleService : BleService {
      * [onSubscription], correctly simulating "observe failed before CCCD/subscription readiness."
      *
      * Pre-readiness failures are sourced (in priority order) from:
-     *  - [observeBeforeSubscriptionExceptionByCharacteristic] (2-arg-specific, one-shot per uuid)
-     *  - [observeExceptionsByCharacteristic] (shared with 1-arg observe, one-shot per uuid; defensively treated as a
-     *    pre-subscription failure here so the bare onStart wrap cannot swallow it after [onSubscription] runs)
-     *  - [observeException] (global, one-shot)
+     * - [observeBeforeSubscriptionExceptionByCharacteristic] (2-arg-specific, one-shot per uuid)
+     * - [observeExceptionsByCharacteristic] (shared with 1-arg observe, one-shot per uuid; defensively treated as a
+     *   pre-subscription failure here so the bare onStart wrap cannot swallow it after [onSubscription] runs)
+     * - [observeException] (global, one-shot)
      *
      * For characteristics in [observeNeverSubscribeCharacteristics], [onSubscription] is never invoked but
      * notifications are still exposed — the returned flow is the bare SharedFlow with no [onStart] wrap, so

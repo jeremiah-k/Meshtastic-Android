@@ -47,8 +47,8 @@ import org.meshtastic.core.testing.FakeBleConnection
 import org.meshtastic.core.testing.FakeBleConnectionFactory
 import org.meshtastic.core.testing.FakeBleDevice
 import org.meshtastic.core.testing.FakeBleScanner
-import org.meshtastic.core.testing.FakeBluetoothRepository
 import org.meshtastic.core.testing.FakeBleService
+import org.meshtastic.core.testing.FakeBluetoothRepository
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -971,9 +971,7 @@ private class NeverConnectedStateBleConnection : BleConnection {
     override val device: BleDevice?
         get() = _deviceFlow.value
 
-    val service = FakeBleService().apply {
-        addCharacteristic(FROMNUM_CHARACTERISTIC)
-    }
+    val service = FakeBleService().apply { addCharacteristic(FROMNUM_CHARACTERISTIC) }
 
     var connectAndAwaitCalls = 0
         private set

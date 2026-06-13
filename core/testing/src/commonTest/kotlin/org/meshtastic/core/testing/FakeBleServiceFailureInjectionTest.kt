@@ -123,9 +123,7 @@ class FakeBleServiceFailureInjectionTest {
         var subscribed = false
         var received: ByteArray? = null
 
-        val collector = launch {
-            service.observe(char) { subscribed = true }.collect { received = it }
-        }
+        val collector = launch { service.observe(char) { subscribed = true }.collect { received = it } }
         testScheduler.advanceUntilIdle()
         service.emitNotification(char.uuid, byteArrayOf(1, 2, 3))
         testScheduler.advanceUntilIdle()
