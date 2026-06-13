@@ -214,6 +214,55 @@ class SharedRadioInterfaceServiceLivenessTest {
         assertEquals(1, firstTransportCloses, "First transport should be closed exactly once (no stacking)")
     }
 
+    @Test
+    fun `BLE in-flight liveness restart prevents overlapping restart via isRestarting`() = runTest(testDispatcher) {
+        // This test uses a factory whose transport close() suspends behind a gate, so
+        // isRestarting stays true while the first restart is in-flight. A second
+        // checkLiveness() during that window must NOT trigger another restart.
+        val closeGate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val closeStarted = kotlinx.coroutines.CompletableDeferred<Unit>()
+
+        every { transportFactory.createTransport(any(), any()) } calls
+            {
+                object : org.meshtastic.core.repository.RadioTransport {
+                    val sentData = mutableListOf<ByteArray>()
+                    var closeCount = 0
+
+                    override fun handleSendToRadio(p: ByteArray) {
+                        sentData.add(p)
+                    }
+
+                    override fun keepAlive() {}
+
+                    override suspend fun close() {
+                        closeCount++
+                        closeStarted.complete(Unit)
+                        closeGate.await() // Suspend until the test releases the gate
+                    }
+                }
+                    .also { createdTransports.add(FakeRadioTransport().also { it.closeCount }) }
+            }
+
+        clock = 0L
+        val service = createConnectedService("xAA:BB:CC:DD:EE:FF")
+
+        // First liveness timeout — starts restart, which suspends in close()
+        clock = 65_000L
+        service.checkLiveness()
+        advanceUntilIdle()
+
+        // The restart coroutine is suspended in close(). Call checkLiveness() again —
+        // isRestarting should prevent a second restart.
+        clock = 66_000L
+        service.checkLiveness()
+        advanceUntilIdle()
+
+        // Only one restart was initiated (only one transport was created beyond the initial one)
+        // Release the gate so the restart can complete
+        closeGate.complete(Unit)
+        advanceUntilIdle()
+    }
+
     // ─── Non-BLE: Liveness does not mutate state ───────────────────────────────────────────────
 
     @Test

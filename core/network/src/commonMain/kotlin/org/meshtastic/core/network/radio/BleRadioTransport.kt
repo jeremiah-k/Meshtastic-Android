@@ -141,23 +141,23 @@ class BleRadioTransport(
 
     private val exceptionHandler = CoroutineExceptionHandler { _, throwable ->
         Logger.w(throwable) { "[$address] Uncaught exception in connectionScope" }
-        cleanupScope.launch {
-            try {
-                bleConnection.disconnect()
-            } catch (e: Exception) {
-                Logger.w(e) { "[$address] Failed to disconnect in exception handler" }
-            }
-        }
-        // Guard: use the same CAS dedup as handleFailure/onDisconnected so an uncaught
-        // exception doesn't produce a duplicate onDisconnect after handleFailure already fired.
-        // Also set sessionFailureCause so attemptConnection treats the forced disconnect as
-        // an internal failure (not user-initiated LocalDisconnect).
+        // CRITICAL: set state BEFORE launching disconnect() — if disconnect emits Disconnected
+        // immediately, attemptConnection() must see sessionFailureCause to classify it as
+        // internal (not user-initiated LocalDisconnect). Launching disconnect first creates a
+        // race where the Disconnected emission arrives before sessionFailureCause is visible.
         if (throwable !is CancellationException && sessionFailed.compareAndSet(expect = false, update = true)) {
             sessionFailureCause = throwable
             radioService = null
             isFullyConnected = false
             val (isPermanent, msg) = throwable.toDisconnectReason()
             callback.onDisconnect(isPermanent, errorMessage = msg)
+        }
+        cleanupScope.launch {
+            try {
+                bleConnection.disconnect()
+            } catch (e: Exception) {
+                Logger.w(e) { "[$address] Failed to disconnect in exception handler" }
+            }
         }
     }
 
@@ -473,12 +473,22 @@ class BleRadioTransport(
 
                 // Wait for FROMNUM CCCD write before triggering the Meshtastic handshake.
                 // Bounded: if fromRadio fails before subscriptionReady completes, handleFailure
-                // sets sessionFailureCause. The timeout prevents a hang — we check sessionFailed
-                // and throw a retryable setup failure if the session is already dead.
-                withTimeoutOrNull(SUBSCRIPTION_READY_TIMEOUT) { radioService.awaitSubscriptionReady() }
-                if (sessionFailed.value) {
-                    val cause = sessionFailureCause ?: RuntimeException("Session failed before subscription ready")
-                    Logger.w(cause) { "[$address] Session failed during subscription wait — aborting setup" }
+                // sets sessionFailureCause. The timeout also prevents a hang if FROMNUM observe
+                // never completes for reasons other than a fatal exception (e.g., firmware doesn't
+                // send CCCD confirmation). We MUST abort setup on timeout — proceeding without
+                // subscription readiness creates a half-initialized session.
+                val subscriptionReady =
+                    withTimeoutOrNull(SUBSCRIPTION_READY_TIMEOUT) {
+                        radioService.awaitSubscriptionReady()
+                        true
+                    } ?: false
+                if (!subscriptionReady || sessionFailed.value) {
+                    val cause =
+                        sessionFailureCause ?: RuntimeException("Timed out waiting for FROMNUM subscription readiness")
+                    Logger.w(cause) {
+                        val reason = if (!subscriptionReady) "timed out" else "failed"
+                        "[$address] Subscription wait $reason — aborting setup"
+                    }
                     throw cause
                 }
 
