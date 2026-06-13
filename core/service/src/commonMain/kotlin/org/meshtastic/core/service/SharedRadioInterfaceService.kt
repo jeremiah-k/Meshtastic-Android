@@ -346,16 +346,23 @@ class SharedRadioInterfaceService(
                 "Liveness check failed: no data received for ${silenceMs}ms " +
                     "(threshold: ${LIVENESS_TIMEOUT_MILLIS}ms). Treating as disconnect."
             }
-            onDisconnect(isPermanent = false, errorMessage = "Connection timeout — no data received")
 
             // Only BLE transports suffer from silent zombie sessions (no disconnect signal from stack).
             // TCP/serial/mock can legitimately idle >60s without inbound data.
-            if (runningTransportId != InterfaceId.BLUETOOTH) return
+            if (runningTransportId != InterfaceId.BLUETOOTH) {
+                // Non-BLE: emit the disconnect notification (no restart mechanism for these transports).
+                onDisconnect(isPermanent = false, errorMessage = "Connection timeout — no data received")
+                return
+            }
 
             // Force transport restart to recover from silent zombie sessions where the BLE stack
             // did not report a disconnect. Uses the same processLifecycle scope and transportMutex
             // pattern as setDeviceAddress() to guarantee clean teardown/restart sequencing.
+            // The onDisconnect notification is emitted INSIDE the compareAndSet guard so that a
+            // double liveness-timeout (timer not cancelled between fires) does not produce
+            // duplicate disconnect notifications for a single restart cycle.
             if (isRestarting.compareAndSet(expect = false, update = true)) {
+                onDisconnect(isPermanent = false, errorMessage = "Connection timeout — no data received")
                 processLifecycle.coroutineScope.launch {
                     try {
                         transportMutex.withLock {

@@ -363,12 +363,19 @@ class BleRadioTransport(
 
     private fun onDisconnected() {
         radioService = null
+        // If handleFailure already fired the disconnect callback for this session, don't fire a
+        // duplicate here. The forced disconnect() from handleFailure causes Kable to emit
+        // Disconnected, which routes here — without this guard the UI would see two onDisconnect
+        // calls (one with the real error message from handleFailure, one generic from here).
+        val alreadyHandled = sessionFailed
         // Set the guard so a concurrent handleFailure (from fromRadio/logRadio .catch) does
         // not fire a second callback during the same session-loss event.
         sessionFailed = true
         Logger.i { "[$address] BLE disconnected - ${formatSessionStats()}" }
-        // Signal immediately so the UI reflects the disconnect while reconnect continues.
-        callback.onDisconnect(isPermanent = false)
+        if (!alreadyHandled) {
+            // Signal immediately so the UI reflects the disconnect while reconnect continues.
+            callback.onDisconnect(isPermanent = false)
+        }
     }
 
     private suspend fun discoverServicesAndSetupCharacteristics() {

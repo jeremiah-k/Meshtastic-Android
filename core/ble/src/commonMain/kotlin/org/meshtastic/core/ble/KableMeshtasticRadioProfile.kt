@@ -97,8 +97,11 @@ class KableMeshtasticRadioProfile(private val service: BleService) : MeshtasticR
                 } catch (e: Exception) {
                     // Session-fatal BLE exceptions must propagate so the transport layer detects the
                     // broken session via its .catch handler and triggers reconnection.
-                    if (e.isSessionFatalBleException()) throw e
-                    Logger.w(e) { "FROMRADIO read error, pausing before next drain trigger" }
+                    if (e.isSessionFatalBleException()) {
+                        Logger.w(e) { "FROMRADIO read hit session-fatal BLE exception — propagating for reconnect" }
+                        throw e
+                    }
+                    Logger.w(e) { "FROMRADIO read error (transient), pausing before next drain trigger" }
                     keepReading = false
                     delay(TRANSIENT_RETRY_DELAY)
                 }
@@ -111,7 +114,10 @@ class KableMeshtasticRadioProfile(private val service: BleService) : MeshtasticR
         emitAll(
             service.observe(logRadioChar).catch { e ->
                 if (e is CancellationException) throw e
-                if (e.isSessionFatalBleException()) throw e
+                if (e.isSessionFatalBleException()) {
+                    Logger.w(e) { "logRadio observation hit session-fatal BLE exception — propagating for reconnect" }
+                    throw e
+                }
                 // logRadio is optional — log at debug for diagnostics but don't surface to callers.
                 Logger.d(e) { "logRadio observation failure suppressed" }
             },

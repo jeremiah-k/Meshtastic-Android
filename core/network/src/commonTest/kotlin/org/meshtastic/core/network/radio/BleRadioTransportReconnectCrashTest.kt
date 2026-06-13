@@ -39,6 +39,7 @@ import org.meshtastic.core.ble.BleDevice
 import org.meshtastic.core.ble.BleService
 import org.meshtastic.core.ble.BleWriteType
 import org.meshtastic.core.ble.DisconnectReason
+import org.meshtastic.core.ble.MeshtasticBleConstants.FROMNUM_CHARACTERISTIC
 import org.meshtastic.core.ble.MeshtasticBleConstants.SERVICE_UUID
 import org.meshtastic.core.testing.FakeBleConnection
 import org.meshtastic.core.testing.FakeBleConnectionFactory
@@ -609,6 +610,101 @@ class BleRadioTransportReconnectCrashTest {
 
         // Still no disconnect should have been called
         dev.mokkery.verify(mode = dev.mokkery.verify.VerifyMode.not) { service.onDisconnect(any(), any()) }
+
+        bleTransport.close()
+    }
+
+    // ─── Read-path session-failure recovery (fromRadio fatal) ──────────────────────────────────────
+
+    /**
+     * Validates that a session-fatal exception in the fromRadio READ path (not just the write path) triggers
+     * handleFailure → forced disconnect → reconnect.
+     *
+     * Existing tests only exercise the WRITE path. The read-path recovery is the primary mechanism for detecting zombie
+     * sessions where fromRadio throws GATT 133/19/8/129 during a poll.
+     */
+    @Test
+    fun `fromRadio read failure triggers handleFailure and reconnect`() = runTest {
+        val device = FakeBleDevice(address = address, name = "Test Radio")
+        bluetoothRepository.bond(device)
+
+        val bleTransport =
+            BleRadioTransport(
+                scope = this,
+                scanner = scanner,
+                bluetoothRepository = bluetoothRepository,
+                connectionFactory = connectionFactory,
+                callback = service,
+                address = address,
+            )
+        bleTransport.start()
+        advanceTimeBy(4_000L) // connect + handshake
+        assertTrue(connection.connectAndAwaitCalls == 1, "First connect must happen")
+
+        // Inject a read failure that will fire on the next drain cycle
+        connection.service.readException = NotConnectedException("read session closed")
+
+        // Trigger a drain by emitting a FROMNUM notification — this causes the profile to poll
+        // fromRadioChar, which throws NotConnectedException (a session-fatal BLE exception).
+        connection.service.emitNotification(FROMNUM_CHARACTERISTIC.uuid, byteArrayOf(1))
+        advanceUntilIdle()
+
+        // handleFailure must have forced a GATT disconnect
+        assertTrue(connection.disconnectCalls >= 1, "disconnect() must be called after fromRadio read failure")
+
+        // Reconnect policy should iterate
+        advanceTimeBy(10_000L)
+        assertTrue(
+            connection.connectAndAwaitCalls >= 2,
+            "Reconnect loop must iterate after fromRadio read failure " +
+                "(actual calls: ${connection.connectAndAwaitCalls})",
+        )
+
+        bleTransport.close()
+    }
+
+    /**
+     * Validates the sessionFailed dedup guard when read-path and write-path failures race.
+     *
+     * The guard at the top of handleFailure exists precisely for this scenario: fromRadio's .catch handler and a
+     * concurrent write failure both call handleFailure against the same dead session. Only the first caller should fire
+     * onDisconnect.
+     */
+    @Test
+    fun `concurrent fromRadio and write failure fires onDisconnect exactly once`() = runTest {
+        val device = FakeBleDevice(address = address, name = "Test Radio")
+        bluetoothRepository.bond(device)
+
+        var onDisconnectCalls = 0
+        every { service.onDisconnect(any(), any()) } calls { onDisconnectCalls++ }
+
+        val bleTransport =
+            BleRadioTransport(
+                scope = this,
+                scanner = scanner,
+                bluetoothRepository = bluetoothRepository,
+                connectionFactory = connectionFactory,
+                callback = service,
+                address = address,
+            )
+        bleTransport.start()
+        advanceTimeBy(4_000L)
+
+        // Inject BOTH read and write failures against the same session
+        connection.service.readException = NotConnectedException("read failure")
+        connection.service.writeException = NotConnectedException("write failure")
+
+        // Trigger both paths nearly simultaneously
+        connection.service.emitNotification(FROMNUM_CHARACTERISTIC.uuid, byteArrayOf(1))
+        bleTransport.handleSendToRadio(byteArrayOf(42))
+        advanceUntilIdle()
+
+        assertEquals(
+            1,
+            onDisconnectCalls,
+            "onDisconnect must fire exactly once despite concurrent read+write failures " +
+                "(actual: $onDisconnectCalls)",
+        )
 
         bleTransport.close()
     }

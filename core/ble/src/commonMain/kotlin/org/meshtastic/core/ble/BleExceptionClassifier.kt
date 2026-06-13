@@ -71,9 +71,19 @@ fun Throwable.classifyBleException(): BleExceptionInfo? = when (this) {
 @Suppress("MagicNumber")
 private val FATAL_GATT_STATUSES =
     setOf(
-        133, // GATT_ERROR — generic connection failure
-        8, // GATT_CONN_TIMEOUT — link-layer timeout
-        129, // GATT_FAILURE — unrecoverable operation failure
+        // 0x08 — link-layer supervision timeout (peer out of range or asleep)
+        8, // GATT_CONN_TIMEOUT
+        // 0x13 — peer-initiated disconnect (firmware reboot, user power-cycle, nRF52 link drop).
+        // The most common Meshtastic disconnect signal; without it fromRadio would spin-retry a dead link.
+        19, // GATT_CONN_TERMINATE_PEER_USER
+        // 0x16 — link manager protocol timeout (radio firmware/hardware hang)
+        22, // GATT_CONN_LMP_TIMEOUT
+        // 0x3E — connection establishment failed (discovered during connect handshake)
+        62, // GATT_CONN_FAIL_ESTABLISH
+        // 0x85 — generic connection failure; commonly fires at runtime against a stale GATT handle
+        133, // GATT_ERROR
+        // 0x81 — unrecoverable operation failure
+        129, // GATT_FAILURE
     )
 
 /**
