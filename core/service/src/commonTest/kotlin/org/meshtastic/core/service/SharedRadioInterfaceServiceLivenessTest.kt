@@ -75,6 +75,11 @@ class SharedRadioInterfaceServiceLivenessTest {
 
     @AfterTest
     fun tearDown() {
+        // CRITICAL: Destroy the lifecycle to cancel processLifecycle.coroutineScope and all
+        // leaked collectors (devAddr, bluetoothRepository.state, networkRepository.networkAvailable).
+        // Without this, those infinite flow collectors keep the forked test JVM alive after tests
+        // complete, causing Gradle to hang at subsequent :core:*:allTests tasks.
+        processLifecycleOwner.destroy()
         Dispatchers.resetMain()
     }
 
@@ -89,6 +94,10 @@ class SharedRadioInterfaceServiceLivenessTest {
 
         init {
             registry.currentState = Lifecycle.State.RESUMED
+        }
+
+        fun destroy() {
+            registry.currentState = Lifecycle.State.DESTROYED
         }
 
         override val lifecycle: Lifecycle
