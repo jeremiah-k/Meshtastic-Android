@@ -171,6 +171,9 @@ class FakeBleConnection :
         if (serviceUuid in missingServices) {
             throw NoSuchElementException("Service $serviceUuid not found")
         }
+        // Reuse the caller's Job and scheduler so collectors launched by setup() are cancelled with
+        // the caller (matches KableBleConnection.profile's connectionScope contract). Do NOT use
+        // coroutineScope { setup(service) } — it would hang on the infinite fromRadio/logRadio collectors.
         return CoroutineScope(currentCoroutineContext()).setup(service)
     }
 

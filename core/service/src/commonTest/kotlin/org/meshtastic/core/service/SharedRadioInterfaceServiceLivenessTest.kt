@@ -80,6 +80,9 @@ class SharedRadioInterfaceServiceLivenessTest {
     fun tearDown() {
         // Release any suspended close gate so a held in-flight restart can complete; otherwise
         // disconnect() below would block forever on the gated transport's close().
+        // NOTE: relies on UnconfinedTestDispatcher resuming the gated close() inline when
+        // complete(Unit) is called — if testDispatcher is ever changed to StandardTestDispatcher,
+        // add testDispatcher.scheduler.runCurrent() here before runBlocking to avoid a mutex deadlock.
         activeCloseGate?.complete(Unit)
         activeCloseGate = null
         // CRITICAL: Stop every service's heartbeat loop and transport. Destroying the process
@@ -232,9 +235,9 @@ class SharedRadioInterfaceServiceLivenessTest {
 
         clock = 65_000L
         service.checkLiveness()
-        // runCurrent lets the launched restart run up to its first suspension; advanceTimeBy(1s)
-        // covers the polite-disconnect delay (500ms) inside stopTransportLocked so the restart
-        // completes without draining the (still-active) heartbeat loop.
+        // Under UnconfinedTestDispatcher the liveness restart (sendPoliteDisconnect = false) runs
+        // inline during checkLiveness(). runCurrent/advanceTimeBy are belt-and-suspenders; the
+        // real 500ms polite-disconnect delay is covered by the trailing service.disconnect() below.
         testDispatcher.scheduler.runCurrent()
         advanceTimeBy(1_000L)
 
@@ -258,8 +261,8 @@ class SharedRadioInterfaceServiceLivenessTest {
 
         clock = 65_000L
         service.checkLiveness()
-        // Let the liveness restart run to completion (500ms polite-disconnect + restart), then
-        // explicitly stop the heartbeat loop before re-entering tearDown.
+        // The restart completes inline under UnconfinedTestDispatcher; runCurrent/advanceTimeBy
+        // are belt-and-suspenders. The trailing disconnect() covers its own 500ms polite delay.
         testDispatcher.scheduler.runCurrent()
         advanceTimeBy(1_000L)
 

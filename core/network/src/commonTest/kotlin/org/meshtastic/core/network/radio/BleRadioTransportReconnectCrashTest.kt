@@ -341,9 +341,9 @@ class BleRadioTransportReconnectCrashTest {
 
             // Trigger a write (simulating a heartbeat or user packet)
             bleTransport.handleSendToRadio(byteArrayOf(1, 2, 3))
-            // Drain the immediate failure path without advancing through the reconnect loop's
-            // delayed retry — the subsequent advanceTimeBy covers the retry.
-            testScheduler.runCurrent()
+            // Advance through retryBleOperation's 3 retries (~750ms backoff) so the write failure
+            // reaches handleFailure and forces disconnect. Stay under the 3s reconnect settle delay.
+            advanceTimeBy(1_000L)
 
             // After failure: disconnect must be called (GATT cleanup)
             assertTrue(connection.disconnectCalls >= 1, "disconnect() must be called after write failure")
@@ -505,9 +505,9 @@ class BleRadioTransportReconnectCrashTest {
             // Inject a write failure — this should NOT be treated as intentional
             connection.service.writeException = NotConnectedException("session closed")
             bleTransport.handleSendToRadio(byteArrayOf(1, 2, 3))
-            // Drain the immediate failure path; the reconnect loop's delayed retry is advanced
-            // explicitly below.
-            testScheduler.runCurrent()
+            // Advance through retryBleOperation's 3 retries (~750ms backoff) so the write failure
+            // reaches handleFailure and forces disconnect.
+            advanceTimeBy(1_000L)
 
             // disconnect must have been called (forced cleanup)
             assertTrue(connection.disconnectCalls >= 1, "disconnect() must be called after write failure")
@@ -788,8 +788,9 @@ class BleRadioTransportReconnectCrashTest {
             // Trigger both paths nearly simultaneously
             connection.service.emitNotification(FROMNUM_CHARACTERISTIC, byteArrayOf(1))
             bleTransport.handleSendToRadio(byteArrayOf(42))
-            // Drain both failure paths; handleFailure's CAS guard should leave exactly one onDisconnect.
-            testScheduler.runCurrent()
+            // Advance through the write-path retryBleOperation (~750ms) so BOTH the read and write
+            // failure paths reach handleFailure, truly exercising the CAS dedup guard.
+            advanceTimeBy(1_000L)
 
             assertEquals(
                 1,
