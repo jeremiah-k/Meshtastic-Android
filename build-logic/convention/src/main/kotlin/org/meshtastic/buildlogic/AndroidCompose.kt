@@ -62,7 +62,9 @@ internal fun Project.configureAndroidCompose(commonExtension: CommonExtension) {
     dependencies {
         "debugImplementation"(libs.library("compose-multiplatform-ui-tooling"))
         "implementation"(libs.library("compose-multiplatform-runtime"))
-        "debugRuntimeOnly"(libs.library("androidx-compose-runtime-tracing"))
+        // androidx.compose.runtime:runtime-tracing intentionally omitted — it instruments every
+        // Compose node per frame and was the primary cause of debug-build UI stutter (tab switches,
+        // scrolling). Re-add via debugRuntimeOnly if you need Chrome trace events for profiling.
 
         "implementation"(libs.library("compose-multiplatform-resources"))
 
