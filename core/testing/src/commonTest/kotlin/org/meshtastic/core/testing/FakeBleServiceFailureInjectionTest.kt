@@ -29,10 +29,12 @@ class FakeBleServiceFailureInjectionTest {
     private val service = FakeBleService()
 
     @Test
-    fun writeExceptionIsThrownAndReset() = runTest {
+    fun writeExceptionIsPersistent() = runTest {
         service.writeException = Exception("write-fail")
         assertFailsWith<Exception> { service.write(char, ByteArray(0)) }
-        service.write(char, ByteArray(1)) // no exception after reset
+        // writeException is persistent — tests must explicitly clear it
+        service.writeException = null
+        service.write(char, ByteArray(1))
         assertTrue(service.writes.size == 1)
     }
 
