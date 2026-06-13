@@ -20,7 +20,6 @@ package org.meshtastic.feature.firmware.ota.dfu
 
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.test.runTest
@@ -650,7 +649,7 @@ class SecureDfuTransportTest {
             serviceUuid: kotlin.uuid.Uuid,
             timeout: Duration,
             setup: suspend CoroutineScope.(BleService) -> T,
-        ): T = CoroutineScope(currentCoroutineContext()).setup(autoService)
+        ): T = CoroutineScope(kotlinx.coroutines.Dispatchers.Unconfined).setup(autoService)
 
         override fun maximumWriteValueLength(writeType: BleWriteType): Int? =
             delegate.maximumWriteValueLength(writeType)

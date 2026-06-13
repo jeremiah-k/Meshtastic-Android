@@ -68,11 +68,16 @@ class SharedRadioInterfaceServiceLivenessTest {
     private val testDispatcher = UnconfinedTestDispatcher()
     private val dispatchers = CoroutineDispatchers(io = testDispatcher, main = testDispatcher, default = testDispatcher)
 
+    private lateinit var processLifecycleOwner: TestLifecycleOwner
+
     @BeforeTest
     fun setUp() {
         // processLifecycle.coroutineScope uses Dispatchers.Main.immediate internally;
         // JVM tests must install a Main dispatcher or get IllegalStateException.
         Dispatchers.setMain(testDispatcher)
+        // Create the lifecycle owner AFTER setMain so Robolectric's main thread is ready.
+        // Field initializers run before @BeforeTest, which is too early for Robolectric.
+        processLifecycleOwner = TestLifecycleOwner()
     }
 
     @AfterTest
@@ -122,8 +127,6 @@ class SharedRadioInterfaceServiceLivenessTest {
         override val lifecycle: Lifecycle
             get() = registry
     }
-
-    private val processLifecycleOwner = TestLifecycleOwner()
 
     /**
      * Test-only [RadioTransport] whose [close] suspends on a [CompletableDeferred] gate.
