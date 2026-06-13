@@ -78,6 +78,12 @@ class SharedRadioInterfaceService(
     private val radioPrefs: RadioPrefs,
     private val transportFactory: RadioTransportFactory,
     private val analytics: PlatformAnalytics,
+    /**
+     * Injectable clock for deterministic testing. Defaults to [nowMillis] in production. Used by [onConnect],
+     * [handleFromRadio], [checkLiveness], and [keepAlive] so all four share one coherent time source — mixing real
+     * wall-clock with injected test time produces negative silence durations and false test results.
+     */
+    private val clockMillis: () -> Long = { nowMillis },
 ) : RadioInterfaceService {
 
     override val supportedDeviceTypes: List<DeviceType>
@@ -136,6 +142,9 @@ class SharedRadioInterfaceService(
     private var lastHeartbeatMillis = 0L
 
     @Volatile private var lastDataReceivedMillis = 0L
+
+    /** The current time from the injected clock. */
+    private fun now(): Long = clockMillis()
 
     companion object {
         private const val HEARTBEAT_INTERVAL_MILLIS = 30 * 1000L
@@ -320,7 +329,7 @@ class SharedRadioInterfaceService(
 
     private fun startHeartbeat() {
         heartbeatJob?.cancel()
-        lastDataReceivedMillis = nowMillis
+        lastDataReceivedMillis = now()
         heartbeatJob =
             serviceScope.launch {
                 while (true) {
@@ -339,10 +348,10 @@ class SharedRadioInterfaceService(
      *
      * @param now Injected clock value for testability. Defaults to [nowMillis] in production.
      */
-    internal fun checkLiveness(now: Long = nowMillis) {
+    internal fun checkLiveness() {
         if (_connectionState.value != ConnectionState.Connected) return
 
-        val silenceMs = now - lastDataReceivedMillis
+        val silenceMs = now() - lastDataReceivedMillis
         if (silenceMs > LIVENESS_TIMEOUT_MILLIS) {
             Logger.w {
                 "Liveness check failed: no data received for ${silenceMs}ms " +
@@ -383,7 +392,7 @@ class SharedRadioInterfaceService(
         }
     }
 
-    fun keepAlive(now: Long = nowMillis) {
+    fun keepAlive(now: Long = now()) {
         if (now - lastHeartbeatMillis > HEARTBEAT_INTERVAL_MILLIS) {
             radioTransport?.keepAlive()
             lastHeartbeatMillis = now
@@ -415,7 +424,7 @@ class SharedRadioInterfaceService(
     @Suppress("TooGenericExceptionCaught")
     override fun handleFromRadio(bytes: ByteArray) {
         try {
-            lastDataReceivedMillis = nowMillis
+            lastDataReceivedMillis = now()
             // trySend synchronously onto the unbounded Channel so packet order matches arrival
             // order. The previous `launch { emit() }` pattern dispatched each packet onto a
             // fresh coroutine, letting the scheduler reorder them — which broke the firmware
@@ -443,7 +452,7 @@ class SharedRadioInterfaceService(
         // launching a coroutine. The async launch pattern introduced a window where a concurrent
         // onDisconnect launch could execute AFTER an onConnect launch, leaving the service stuck
         // in Connected while the transport was actually disconnected.
-        lastDataReceivedMillis = nowMillis
+        lastDataReceivedMillis = now()
         if (_connectionState.value != ConnectionState.Connected) {
             Logger.d { "Broadcasting connection state change to Connected" }
             _connectionState.value = ConnectionState.Connected

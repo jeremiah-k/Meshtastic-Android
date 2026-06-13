@@ -80,6 +80,15 @@ private val SCAN_TIMEOUT = 5.seconds
 private val GATT_CLEANUP_TIMEOUT = 5.seconds
 
 /**
+ * Bounded wait for the connectionState StateFlow to reflect Connected after connectAndAwait returns.
+ *
+ * In normal operation the observer coroutine lags by milliseconds. If a fatal session failure fires before Connected is
+ * observed and the StateFlow was already at a stale Disconnected value (no re-emit), this timeout prevents
+ * [attemptConnection] from hanging indefinitely.
+ */
+private val CONNECTED_GATE_TIMEOUT = 5.seconds
+
+/**
  * Delay after onConnect before downgrading BLE connection priority to Balanced.
  *
  * The initial config drain (fromRadio burst) typically completes within 2–5 seconds on most devices, but slower radios
@@ -311,18 +320,19 @@ class BleRadioTransport(
         //
         // RACE GUARD: A fatal fromRadio/logRadio failure can land AFTER the sessionFailureCause
         // check above but BEFORE connectionState reaches Connected. handleFailure() forces
-        // bleConnection.disconnect(), which emits Disconnected — so .first { Connected } would
-        // hang forever. We race the Connected wait against a sessionFailureCause poll: if a
-        // failure arrives first, we return a retryable Failed outcome immediately.
+        // bleConnection.disconnect(), which should emit Disconnected — but if the StateFlow was
+        // already at a stale Disconnected value, it may NOT re-emit (StateFlow suppresses
+        // duplicate values). A bounded timeout ensures we cannot hang: if Connected doesn't
+        // arrive within CONNECTED_GATE_TIMEOUT, we check sessionFailureCause and return a
+        // retryable Failed outcome.
         val connectedReached =
-            bleConnection.connectionState.first { it is BleConnectionState.Connected || sessionFailureCause != null }
-        if (connectedReached !is BleConnectionState.Connected) {
-            Logger.w(sessionFailureCause) {
-                "[$address] Session failed before Connected gate — returning failed outcome"
+            withTimeoutOrNull(CONNECTED_GATE_TIMEOUT) {
+                bleConnection.connectionState.first { it is BleConnectionState.Connected }
             }
-            return BleReconnectPolicy.Outcome.Failed(
-                sessionFailureCause ?: RuntimeException("Session failed before Connected gate"),
-            )
+        if (connectedReached == null) {
+            val failure = sessionFailureCause ?: RuntimeException("Timed out waiting for Connected state gate")
+            Logger.w(failure) { "[$address] Session failed before Connected gate — returning failed outcome" }
+            return BleReconnectPolicy.Outcome.Failed(failure)
         }
 
         // Suspend until the next Disconnected emission. We deliberately do NOT wrap this in a
@@ -497,31 +507,40 @@ class BleRadioTransport(
      * @param p The packet to send.
      */
     override fun handleSendToRadio(p: ByteArray) {
-        val currentService = radioService
-        if (currentService != null) {
-            connectionScope.launch {
-                writeMutex.withLock {
-                    try {
-                        retryBleOperation(tag = address) { currentService.sendToRadio(p) }
-                        packetsSent++
-                        bytesSent += p.size
-                        Logger.v {
-                            "[$address] Wrote packet #$packetsSent " +
-                                "to toRadio (${p.size} bytes, total TX: $bytesSent bytes)"
+        // Fast-path check: skip coroutine launch entirely if no transport is active.
+        if (radioService == null) {
+            Logger.w { "[$address] toRadio characteristic unavailable, can't send data" }
+            return
+        }
+        connectionScope.launch {
+            writeMutex.withLock {
+                // Re-read radioService UNDER the lock — handleFailure may have nulled it
+                // between the outer check and lock acquisition. Without this, a queued send
+                // can retry writes against a stale/dead profile.
+                val currentService =
+                    radioService
+                        ?: run {
+                            Logger.w { "[$address] toRadio characteristic cleared during write queue" }
+                            return@withLock
                         }
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (e: Exception) {
-                        Logger.w(e) {
-                            "[$address] Failed to write packet to toRadioCharacteristic after " +
-                                "$packetsSent successful writes"
-                        }
-                        handleFailure(e)
+                try {
+                    retryBleOperation(tag = address) { currentService.sendToRadio(p) }
+                    packetsSent++
+                    bytesSent += p.size
+                    Logger.v {
+                        "[$address] Wrote packet #$packetsSent " +
+                            "to toRadio (${p.size} bytes, total TX: $bytesSent bytes)"
                     }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Logger.w(e) {
+                        "[$address] Failed to write packet to toRadioCharacteristic after " +
+                            "$packetsSent successful writes"
+                    }
+                    handleFailure(e)
                 }
             }
-        } else {
-            Logger.w { "[$address] toRadio characteristic unavailable, can't send data" }
         }
     }
 

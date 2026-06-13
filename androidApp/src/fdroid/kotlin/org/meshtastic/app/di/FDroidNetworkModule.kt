@@ -28,8 +28,11 @@ class FDroidNetworkModule {
     /**
      * F-Droid builds intentionally avoid network calls to the Meshtastic API.
      *
-     * Returning empty results allows the repository layer to fall through to the bundled JSON assets without incurring
-     * the cost of exception creation and stack-trace filling on every refresh attempt.
+     * Returning empty results (a valid [NetworkFirmwareReleases] with default empty lists) avoids exception creation
+     * and stack-trace filling on every refresh. Empty API responses do NOT trigger bundled-JSON fallback —
+     * [FirmwareReleaseRepositoryImpl]'s `singleFlightRefresh()` inserts returned lists directly (no-op for empty), and
+     * bundled JSON seeding is driven by `ensureSeeded()` only when the local DB/cache is empty, not as a consequence of
+     * empty network results.
      */
     @Single
     fun provideApiService(): ApiService = object : ApiService {
