@@ -28,8 +28,8 @@ class FDroidNetworkModule {
     /**
      * F-Droid builds intentionally avoid network calls to the Meshtastic API.
      *
-     * Returning empty results allows the repository layer to fall through to the bundled JSON assets
-     * without incurring the cost of exception creation and stack-trace filling on every refresh attempt.
+     * Returning empty results allows the repository layer to fall through to the bundled JSON assets without incurring
+     * the cost of exception creation and stack-trace filling on every refresh attempt.
      */
     @Single
     fun provideApiService(): ApiService = object : ApiService {
