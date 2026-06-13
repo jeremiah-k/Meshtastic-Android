@@ -27,11 +27,11 @@ import dev.mokkery.mock
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.test.advanceTimeBy
-import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.meshtastic.core.ble.BleConnection
 import org.meshtastic.core.ble.BleConnectionFactory
@@ -105,16 +105,20 @@ class BleRadioTransportReconnectCrashTest {
                 callback = service,
                 address = address,
             )
-        bleTransport.start()
+        try {
+            bleTransport.start()
 
-        // Allow the connection loop to reach the connected state.
-        advanceTimeBy(4_000L)
+            // Allow the connection loop to reach the connected state.
+            advanceTimeBy(4_000L)
 
-        bleTransport.close()
+            bleTransport.close()
 
-        // disconnect() must be called: once by the connection loop teardown + once by close() itself.
-        // We only assert it was called at least once — the exact count depends on timing.
-        assertTrue(connection.disconnectCalls >= 1, "Expected disconnect() to be called at least once")
+            // disconnect() must be called: once by the connection loop teardown + once by close() itself.
+            // We only assert it was called at least once — the exact count depends on timing.
+            assertTrue(connection.disconnectCalls >= 1, "Expected disconnect() to be called at least once")
+        } finally {
+            bleTransport.close()
+        }
     }
 
     // ─── disconnect called on connection failure ──────────────────────────────────────────────────
@@ -143,14 +147,18 @@ class BleRadioTransportReconnectCrashTest {
                 callback = service,
                 address = address,
             )
-        bleTransport.start()
+        try {
+            bleTransport.start()
 
-        advanceTimeBy(30_000L)
+            advanceTimeBy(30_000L)
 
-        bleTransport.close()
+            bleTransport.close()
 
-        // Each failed connectAndAwait round-trips through the reconnect loop; close() always disconnects.
-        assertTrue(connection.disconnectCalls >= 1, "disconnect() not called after connection failure")
+            // Each failed connectAndAwait round-trips through the reconnect loop; close() always disconnects.
+            assertTrue(connection.disconnectCalls >= 1, "disconnect() not called after connection failure")
+        } finally {
+            bleTransport.close()
+        }
     }
 
     // ─── transient onDisconnect after failure threshold ──────────────────────────────────────────
@@ -180,18 +188,22 @@ class BleRadioTransportReconnectCrashTest {
                 callback = service,
                 address = address,
             )
-        bleTransport.start()
+        try {
+            bleTransport.start()
 
-        advanceTimeBy(24_001L)
+            advanceTimeBy(24_001L)
 
-        // Transient disconnect must have been signalled.
-        dev.mokkery.verify { service.onDisconnect(isPermanent = false, errorMessage = any()) }
-        // Permanent disconnect must NEVER be called by the transport on its own.
-        dev.mokkery.verify(mode = dev.mokkery.verify.VerifyMode.not) {
-            service.onDisconnect(isPermanent = true, errorMessage = any())
+            // Transient disconnect must have been signalled.
+            dev.mokkery.verify { service.onDisconnect(isPermanent = false, errorMessage = any()) }
+            // Permanent disconnect must NEVER be called by the transport on its own.
+            dev.mokkery.verify(mode = dev.mokkery.verify.VerifyMode.not) {
+                service.onDisconnect(isPermanent = true, errorMessage = any())
+            }
+
+            bleTransport.close()
+        } finally {
+            bleTransport.close()
         }
-
-        bleTransport.close()
     }
 
     // ─── CancellationException is not silently swallowed ─────────────────────────────────────────
@@ -225,17 +237,21 @@ class BleRadioTransportReconnectCrashTest {
                 callback = service,
                 address = address,
             )
-        bleTransport.start()
+        try {
+            bleTransport.start()
 
-        // Allow one connection attempt to reach profile() and be cancelled.
-        advanceTimeBy(4_000L)
+            // Allow one connection attempt to reach profile() and be cancelled.
+            advanceTimeBy(4_000L)
 
-        bleTransport.close()
+            bleTransport.close()
 
-        assertTrue(
-            throwingConnection.disconnectCalls >= 1,
-            "disconnect() must be called after CancellationException in profile() — GATT leak fix",
-        )
+            assertTrue(
+                throwingConnection.disconnectCalls >= 1,
+                "disconnect() must be called after CancellationException in profile() — GATT leak fix",
+            )
+        } finally {
+            bleTransport.close()
+        }
     }
 
     // ─── Reconnect after a stable connection drops ───────────────────────────────────────────────
@@ -270,29 +286,33 @@ class BleRadioTransportReconnectCrashTest {
                 callback = service,
                 address = address,
             )
-        bleTransport.start()
+        try {
+            bleTransport.start()
 
-        // Settle delay (3 s) + connect + handshake.
-        advanceTimeBy(4_000L)
-        assertTrue(connection.connectAndAwaitCalls == 1, "First connect must happen during initial start window")
+            // Settle delay (3 s) + connect + handshake.
+            advanceTimeBy(4_000L)
+            assertTrue(connection.connectAndAwaitCalls == 1, "First connect must happen during initial start window")
 
-        // Stay connected long enough to be considered stable (> minStableConnection = 5 s).
-        advanceTimeBy(10_000L)
+            // Stay connected long enough to be considered stable (> minStableConnection = 5 s).
+            advanceTimeBy(10_000L)
 
-        // Simulate the firmware dying mid-session — the same path a node power-cycle takes.
-        connection.simulateRemoteDisconnect(reason = DisconnectReason.Timeout)
+            // Simulate the firmware dying mid-session — the same path a node power-cycle takes.
+            connection.simulateRemoteDisconnect(reason = DisconnectReason.Timeout)
 
-        // Settle delay (3 s) before the next attempt + re-connect window. Generous to absorb
-        // the policy retry backoff (5 s on first failure) plus another 3 s settle delay.
-        advanceTimeBy(30_000L)
+            // Settle delay (3 s) before the next attempt + re-connect window. Generous to absorb
+            // the policy retry backoff (5 s on first failure) plus another 3 s settle delay.
+            advanceTimeBy(30_000L)
 
-        assertTrue(
-            connection.connectAndAwaitCalls >= 2,
-            "Reconnect loop must call connectAndAwait again after a remote disconnect " +
-                "(actual calls: ${connection.connectAndAwaitCalls})",
-        )
+            assertTrue(
+                connection.connectAndAwaitCalls >= 2,
+                "Reconnect loop must call connectAndAwait again after a remote disconnect " +
+                    "(actual calls: ${connection.connectAndAwaitCalls})",
+            )
 
-        bleTransport.close()
+            bleTransport.close()
+        } finally {
+            bleTransport.close()
+        }
     }
 
     // ─── Session-failure recovery (Wave 2) ────────────────────────────────────────────────────────
@@ -311,29 +331,35 @@ class BleRadioTransportReconnectCrashTest {
                 callback = service,
                 address = address,
             )
-        bleTransport.start()
-        advanceTimeBy(4_000L) // connect + handshake
-        assertTrue(connection.connectAndAwaitCalls == 1, "First connect must happen")
+        try {
+            bleTransport.start()
+            advanceTimeBy(4_000L) // connect + handshake
+            assertTrue(connection.connectAndAwaitCalls == 1, "First connect must happen")
 
-        // Inject write failure while BLE state remains Connected
-        connection.service.writeException = NotConnectedException("session closed")
+            // Inject write failure while BLE state remains Connected
+            connection.service.writeException = NotConnectedException("session closed")
 
-        // Trigger a write (simulating a heartbeat or user packet)
-        bleTransport.handleSendToRadio(byteArrayOf(1, 2, 3))
-        advanceUntilIdle()
+            // Trigger a write (simulating a heartbeat or user packet)
+            bleTransport.handleSendToRadio(byteArrayOf(1, 2, 3))
+            // Drain the immediate failure path without advancing through the reconnect loop's
+            // delayed retry — the subsequent advanceTimeBy covers the retry.
+            testScheduler.runCurrent()
 
-        // After failure: disconnect must be called (GATT cleanup)
-        assertTrue(connection.disconnectCalls >= 1, "disconnect() must be called after write failure")
+            // After failure: disconnect must be called (GATT cleanup)
+            assertTrue(connection.disconnectCalls >= 1, "disconnect() must be called after write failure")
 
-        // Reconnect policy should iterate — wait for settle (3s) + connect
-        advanceTimeBy(10_000L)
-        assertTrue(
-            connection.connectAndAwaitCalls >= 2,
-            "Reconnect loop must call connectAndAwait again after session failure " +
-                "(actual calls: ${connection.connectAndAwaitCalls})",
-        )
+            // Reconnect policy should iterate — wait for settle (3s) + connect
+            advanceTimeBy(10_000L)
+            assertTrue(
+                connection.connectAndAwaitCalls >= 2,
+                "Reconnect loop must call connectAndAwait again after session failure " +
+                    "(actual calls: ${connection.connectAndAwaitCalls})",
+            )
 
-        bleTransport.close()
+            bleTransport.close()
+        } finally {
+            bleTransport.close()
+        }
     }
 
     @Test
@@ -352,18 +378,23 @@ class BleRadioTransportReconnectCrashTest {
                 callback = service,
                 address = address,
             )
-        bleTransport.start()
-        advanceTimeBy(4_000L)
+        try {
+            bleTransport.start()
+            advanceTimeBy(4_000L)
 
-        connection.service.writeException = CancellationException("cancelled")
+            connection.service.writeException = CancellationException("cancelled")
 
-        bleTransport.handleSendToRadio(byteArrayOf(1))
-        advanceUntilIdle()
+            bleTransport.handleSendToRadio(byteArrayOf(1))
+            // Drain the cancelled write coroutine; no retry is triggered for CancellationException.
+            testScheduler.runCurrent()
 
-        // CancellationException must NOT result in a user-facing disconnect callback
-        dev.mokkery.verify(mode = dev.mokkery.verify.VerifyMode.not) { service.onDisconnect(any(), any()) }
+            // CancellationException must NOT result in a user-facing disconnect callback
+            dev.mokkery.verify(mode = dev.mokkery.verify.VerifyMode.not) { service.onDisconnect(any(), any()) }
 
-        bleTransport.close()
+            bleTransport.close()
+        } finally {
+            bleTransport.close()
+        }
     }
 
     @Test
@@ -383,23 +414,27 @@ class BleRadioTransportReconnectCrashTest {
                 callback = service,
                 address = address,
             )
-        bleTransport.start()
-        advanceTimeBy(4_000L)
+        try {
+            bleTransport.start()
+            advanceTimeBy(4_000L)
 
-        // First write failure — should trigger onDisconnect once
-        connection.service.writeException = NotConnectedException("session closed")
-        bleTransport.handleSendToRadio(byteArrayOf(1))
-        // Advance enough for retryBleOperation to exhaust 3 retries (~750ms max) + handleFailure +
-        // disconnect, but NOT enough to reach the 3 s reconnect settle delay.
-        advanceTimeBy(2_000L)
+            // First write failure — should trigger onDisconnect once
+            connection.service.writeException = NotConnectedException("session closed")
+            bleTransport.handleSendToRadio(byteArrayOf(1))
+            // Advance enough for retryBleOperation to exhaust 3 retries (~750ms max) + handleFailure +
+            // disconnect, but NOT enough to reach the 3 s reconnect settle delay.
+            advanceTimeBy(2_000L)
 
-        // Second write failure against same session — must NOT trigger another callback
-        bleTransport.handleSendToRadio(byteArrayOf(2))
-        advanceTimeBy(1_000L)
+            // Second write failure against same session — must NOT trigger another callback
+            bleTransport.handleSendToRadio(byteArrayOf(2))
+            advanceTimeBy(1_000L)
 
-        assertEquals(1, onDisconnectCalls, "onDisconnect must be called exactly once for the session failure")
+            assertEquals(1, onDisconnectCalls, "onDisconnect must be called exactly once for the session failure")
 
-        bleTransport.close()
+            bleTransport.close()
+        } finally {
+            bleTransport.close()
+        }
     }
 
     @Test
@@ -416,31 +451,35 @@ class BleRadioTransportReconnectCrashTest {
                 callback = service,
                 address = address,
             )
-        bleTransport.start()
-        advanceTimeBy(4_000L)
+        try {
+            bleTransport.start()
+            advanceTimeBy(4_000L)
 
-        val writesBefore = connection.service.writes.size
+            val writesBefore = connection.service.writes.size
 
-        // First write failure clears radioService
-        connection.service.writeException = NotConnectedException("session closed")
-        bleTransport.handleSendToRadio(byteArrayOf(1, 2, 3))
-        // Advance enough for retryBleOperation to exhaust 3 retries (~750ms max) + handleFailure +
-        // disconnect, but NOT enough to reach the 3 s reconnect settle delay.
-        advanceTimeBy(2_000L)
+            // First write failure clears radioService
+            connection.service.writeException = NotConnectedException("session closed")
+            bleTransport.handleSendToRadio(byteArrayOf(1, 2, 3))
+            // Advance enough for retryBleOperation to exhaust 3 retries (~750ms max) + handleFailure +
+            // disconnect, but NOT enough to reach the 3 s reconnect settle delay.
+            advanceTimeBy(2_000L)
 
-        // Second write — radioService should be null, so no write is attempted
-        connection.service.writeException = null // clear the exception hook
-        bleTransport.handleSendToRadio(byteArrayOf(4, 5, 6))
-        advanceTimeBy(1_000L)
+            // Second write — radioService should be null, so no write is attempted
+            connection.service.writeException = null // clear the exception hook
+            bleTransport.handleSendToRadio(byteArrayOf(4, 5, 6))
+            advanceTimeBy(1_000L)
 
-        // No new writes should have been recorded (radioService was null → write skipped)
-        assertEquals(
-            writesBefore,
-            connection.service.writes.size,
-            "No new write should be recorded after radioService was cleared",
-        )
+            // No new writes should have been recorded (radioService was null → write skipped)
+            assertEquals(
+                writesBefore,
+                connection.service.writes.size,
+                "No new write should be recorded after radioService was cleared",
+            )
 
-        bleTransport.close()
+            bleTransport.close()
+        } finally {
+            bleTransport.close()
+        }
     }
 
     @Test
@@ -459,28 +498,37 @@ class BleRadioTransportReconnectCrashTest {
                 callback = service,
                 address = address,
             )
-        bleTransport.start()
-        advanceTimeBy(4_000L) // connect + handshake
+        try {
+            bleTransport.start()
+            advanceTimeBy(4_000L) // connect + handshake
 
-        // Inject a write failure — this should NOT be treated as intentional
-        connection.service.writeException = NotConnectedException("session closed")
-        bleTransport.handleSendToRadio(byteArrayOf(1, 2, 3))
-        advanceUntilIdle()
+            // Inject a write failure — this should NOT be treated as intentional
+            connection.service.writeException = NotConnectedException("session closed")
+            bleTransport.handleSendToRadio(byteArrayOf(1, 2, 3))
+            // Drain the immediate failure path; the reconnect loop's delayed retry is advanced
+            // explicitly below.
+            testScheduler.runCurrent()
 
-        // disconnect must have been called (forced cleanup)
-        assertTrue(connection.disconnectCalls >= 1, "disconnect() must be called after write failure")
+            // disconnect must have been called (forced cleanup)
+            assertTrue(connection.disconnectCalls >= 1, "disconnect() must be called after write failure")
 
-        // Verify onDisconnect was called with isPermanent = false (not true)
-        dev.mokkery.verify { service.onDisconnect(isPermanent = false, errorMessage = any()) }
-        dev.mokkery.verify(mode = dev.mokkery.verify.VerifyMode.not) {
-            service.onDisconnect(isPermanent = true, errorMessage = any())
+            // Verify onDisconnect was called with isPermanent = false (not true)
+            dev.mokkery.verify { service.onDisconnect(isPermanent = false, errorMessage = any()) }
+            dev.mokkery.verify(mode = dev.mokkery.verify.VerifyMode.not) {
+                service.onDisconnect(isPermanent = true, errorMessage = any())
+            }
+
+            // Reconnect should happen (policy should iterate)
+            advanceTimeBy(15_000L)
+            assertTrue(
+                connection.connectAndAwaitCalls >= 2,
+                "Reconnect loop must iterate after internal session failure",
+            )
+
+            bleTransport.close()
+        } finally {
+            bleTransport.close()
         }
-
-        // Reconnect should happen (policy should iterate)
-        advanceTimeBy(15_000L)
-        assertTrue(connection.connectAndAwaitCalls >= 2, "Reconnect loop must iterate after internal session failure")
-
-        bleTransport.close()
     }
 
     // ─── Liveness restart semantics (Wave 3) ──────────────────────────────────────────────────────
@@ -507,32 +555,43 @@ class BleRadioTransportReconnectCrashTest {
                 callback = service,
                 address = address,
             )
-        bleTransport.start()
-        advanceTimeBy(4_000L)
-        assertTrue(connection.connectAndAwaitCalls == 1, "First connect must happen")
+        try {
+            bleTransport.start()
+            advanceTimeBy(4_000L)
+            assertTrue(connection.connectAndAwaitCalls == 1, "First connect must happen")
 
-        // Simulate liveness restart: close + create fresh transport
-        bleTransport.close()
-        advanceTimeBy(2_000L)
+            // Simulate liveness restart: close + create fresh transport
+            bleTransport.close()
+            advanceTimeBy(2_000L)
 
-        val freshConnection = FakeBleConnection()
-        val freshFactory = FakeBleConnectionFactory(freshConnection)
+            val freshConnection = FakeBleConnection()
+            val freshFactory = FakeBleConnectionFactory(freshConnection)
 
-        val restartedTransport =
-            BleRadioTransport(
-                scope = this,
-                scanner = scanner,
-                bluetoothRepository = bluetoothRepository,
-                connectionFactory = freshFactory,
-                callback = service,
-                address = address,
-            )
-        restartedTransport.start()
-        advanceTimeBy(4_000L)
+            val restartedTransport =
+                BleRadioTransport(
+                    scope = this,
+                    scanner = scanner,
+                    bluetoothRepository = bluetoothRepository,
+                    connectionFactory = freshFactory,
+                    callback = service,
+                    address = address,
+                )
+            try {
+                restartedTransport.start()
+                advanceTimeBy(4_000L)
 
-        assertTrue(freshConnection.connectAndAwaitCalls >= 1, "Fresh transport must attempt connection after restart")
+                assertTrue(
+                    freshConnection.connectAndAwaitCalls >= 1,
+                    "Fresh transport must attempt connection after restart",
+                )
 
-        restartedTransport.close()
+                restartedTransport.close()
+            } finally {
+                restartedTransport.close()
+            }
+        } finally {
+            bleTransport.close()
+        }
     }
 
     // ─── Profile setup failure returns Failed outcome and retries ──────────────────────────────────
@@ -559,20 +618,24 @@ class BleRadioTransportReconnectCrashTest {
                 callback = service,
                 address = address,
             )
-        bleTransport.start()
+        try {
+            bleTransport.start()
 
-        // First attempt fails at profile setup, then settle delay + reconnect.
-        advanceTimeBy(15_000L)
+            // First attempt fails at profile setup, then settle delay + reconnect.
+            advanceTimeBy(15_000L)
 
-        // The reconnect loop should have called connectAndAwait at least twice
-        // (initial failure + retry)
-        assertTrue(
-            connection.connectAndAwaitCalls >= 2,
-            "Reconnect loop must iterate after profile setup failure " +
-                "(actual calls: ${connection.connectAndAwaitCalls})",
-        )
+            // The reconnect loop should have called connectAndAwait at least twice
+            // (initial failure + retry)
+            assertTrue(
+                connection.connectAndAwaitCalls >= 2,
+                "Reconnect loop must iterate after profile setup failure " +
+                    "(actual calls: ${connection.connectAndAwaitCalls})",
+            )
 
-        bleTransport.close()
+            bleTransport.close()
+        } finally {
+            bleTransport.close()
+        }
     }
 
     /**
@@ -595,26 +658,31 @@ class BleRadioTransportReconnectCrashTest {
                 callback = service,
                 address = address,
             )
-        bleTransport.start()
-        advanceTimeBy(4_000L)
+        try {
+            bleTransport.start()
+            advanceTimeBy(4_000L)
 
-        // Inject CancellationException into a write
-        connection.service.writeException = CancellationException("cancelled")
-        bleTransport.handleSendToRadio(byteArrayOf(1))
-        advanceUntilIdle()
+            // Inject CancellationException into a write
+            connection.service.writeException = CancellationException("cancelled")
+            bleTransport.handleSendToRadio(byteArrayOf(1))
+            // Drain the cancelled write coroutine; no retry is triggered for CancellationException.
+            testScheduler.runCurrent()
 
-        // CancellationException must NOT result in a user-facing disconnect callback
-        dev.mokkery.verify(mode = dev.mokkery.verify.VerifyMode.not) { service.onDisconnect(any(), any()) }
+            // CancellationException must NOT result in a user-facing disconnect callback
+            dev.mokkery.verify(mode = dev.mokkery.verify.VerifyMode.not) { service.onDisconnect(any(), any()) }
 
-        // Clear the exception and verify the transport is still usable
-        connection.service.writeException = null
-        bleTransport.handleSendToRadio(byteArrayOf(2))
-        advanceTimeBy(1_000L)
+            // Clear the exception and verify the transport is still usable
+            connection.service.writeException = null
+            bleTransport.handleSendToRadio(byteArrayOf(2))
+            advanceTimeBy(1_000L)
 
-        // Still no disconnect should have been called
-        dev.mokkery.verify(mode = dev.mokkery.verify.VerifyMode.not) { service.onDisconnect(any(), any()) }
+            // Still no disconnect should have been called
+            dev.mokkery.verify(mode = dev.mokkery.verify.VerifyMode.not) { service.onDisconnect(any(), any()) }
 
-        bleTransport.close()
+            bleTransport.close()
+        } finally {
+            bleTransport.close()
+        }
     }
 
     // ─── Read-path session-failure recovery (fromRadio fatal) ──────────────────────────────────────
@@ -648,30 +716,36 @@ class BleRadioTransportReconnectCrashTest {
                 callback = service,
                 address = address,
             )
-        bleTransport.start()
-        advanceTimeBy(4_000L) // connect + handshake
-        assertTrue(connection.connectAndAwaitCalls == 1, "First connect must happen")
+        try {
+            bleTransport.start()
+            advanceTimeBy(4_000L) // connect + handshake
+            assertTrue(connection.connectAndAwaitCalls == 1, "First connect must happen")
 
-        // Inject a read failure that will fire on the next drain cycle
-        connection.service.readException = NotConnectedException("read session closed")
+            // Inject a read failure that will fire on the next drain cycle
+            connection.service.readException = NotConnectedException("read session closed")
 
-        // Trigger a drain by emitting a FROMNUM notification — this causes the profile to poll
-        // fromRadioChar, which throws NotConnectedException (a session-fatal BLE exception).
-        connection.service.emitNotification(FROMNUM_CHARACTERISTIC, byteArrayOf(1))
-        advanceUntilIdle()
+            // Trigger a drain by emitting a FROMNUM notification — this causes the profile to poll
+            // fromRadioChar, which throws NotConnectedException (a session-fatal BLE exception).
+            connection.service.emitNotification(FROMNUM_CHARACTERISTIC, byteArrayOf(1))
+            // Drain the immediate fromRadio failure and forced disconnect; the explicit advanceTimeBy
+            // below covers the reconnect loop's delayed retry.
+            testScheduler.runCurrent()
 
-        // handleFailure must have forced a GATT disconnect
-        assertTrue(connection.disconnectCalls >= 1, "disconnect() must be called after fromRadio read failure")
+            // handleFailure must have forced a GATT disconnect
+            assertTrue(connection.disconnectCalls >= 1, "disconnect() must be called after fromRadio read failure")
 
-        // Reconnect policy should iterate
-        advanceTimeBy(10_000L)
-        assertTrue(
-            connection.connectAndAwaitCalls >= 2,
-            "Reconnect loop must iterate after fromRadio read failure " +
-                "(actual calls: ${connection.connectAndAwaitCalls})",
-        )
+            // Reconnect policy should iterate
+            advanceTimeBy(10_000L)
+            assertTrue(
+                connection.connectAndAwaitCalls >= 2,
+                "Reconnect loop must iterate after fromRadio read failure " +
+                    "(actual calls: ${connection.connectAndAwaitCalls})",
+            )
 
-        bleTransport.close()
+            bleTransport.close()
+        } finally {
+            bleTransport.close()
+        }
     }
 
     /**
@@ -703,26 +777,31 @@ class BleRadioTransportReconnectCrashTest {
                 callback = service,
                 address = address,
             )
-        bleTransport.start()
-        advanceTimeBy(4_000L)
+        try {
+            bleTransport.start()
+            advanceTimeBy(4_000L)
 
-        // Inject BOTH read and write failures against the same session
-        connection.service.readException = NotConnectedException("read failure")
-        connection.service.writeException = NotConnectedException("write failure")
+            // Inject BOTH read and write failures against the same session
+            connection.service.readException = NotConnectedException("read failure")
+            connection.service.writeException = NotConnectedException("write failure")
 
-        // Trigger both paths nearly simultaneously
-        connection.service.emitNotification(FROMNUM_CHARACTERISTIC, byteArrayOf(1))
-        bleTransport.handleSendToRadio(byteArrayOf(42))
-        advanceUntilIdle()
+            // Trigger both paths nearly simultaneously
+            connection.service.emitNotification(FROMNUM_CHARACTERISTIC, byteArrayOf(1))
+            bleTransport.handleSendToRadio(byteArrayOf(42))
+            // Drain both failure paths; handleFailure's CAS guard should leave exactly one onDisconnect.
+            testScheduler.runCurrent()
 
-        assertEquals(
-            1,
-            onDisconnectCalls,
-            "onDisconnect must fire exactly once despite concurrent read+write failures " +
-                "(actual: $onDisconnectCalls)",
-        )
+            assertEquals(
+                1,
+                onDisconnectCalls,
+                "onDisconnect must fire exactly once despite concurrent read+write failures " +
+                    "(actual: $onDisconnectCalls)",
+            )
 
-        bleTransport.close()
+            bleTransport.close()
+        } finally {
+            bleTransport.close()
+        }
     }
 
     // ─── FROMNUM subscription readiness setup failures ───────────────────────────────────────────
@@ -759,23 +838,27 @@ class BleRadioTransportReconnectCrashTest {
                 callback = service,
                 address = address,
             )
-        bleTransport.start()
+        try {
+            bleTransport.start()
 
-        // Initial settle (3s) + setup failure. Assert before retry can succeed, proving the failed
-        // pre-readiness attempt did not falsely mark subscription readiness or call onConnect().
-        advanceTimeBy(4_000L)
+            // Initial settle (3s) + setup failure. Assert before retry can succeed, proving the failed
+            // pre-readiness attempt did not falsely mark subscription readiness or call onConnect().
+            advanceTimeBy(4_000L)
 
-        assertTrue(connection.disconnectCalls >= 1, "disconnect() must be called after FROMNUM observe failure")
-        assertEquals(0, onConnectCalls, "Failed pre-readiness setup must not call onConnect")
+            assertTrue(connection.disconnectCalls >= 1, "disconnect() must be called after FROMNUM observe failure")
+            assertEquals(0, onConnectCalls, "Failed pre-readiness setup must not call onConnect")
 
-        advanceTimeBy(10_000L)
-        assertTrue(
-            connection.connectAndAwaitCalls >= 2,
-            "Reconnect loop must retry after FROMNUM pre-readiness failure " +
-                "(actual calls: ${connection.connectAndAwaitCalls})",
-        )
+            advanceTimeBy(10_000L)
+            assertTrue(
+                connection.connectAndAwaitCalls >= 2,
+                "Reconnect loop must retry after FROMNUM pre-readiness failure " +
+                    "(actual calls: ${connection.connectAndAwaitCalls})",
+            )
 
-        bleTransport.close()
+            bleTransport.close()
+        } finally {
+            bleTransport.close()
+        }
     }
 
     @Test
@@ -799,31 +882,35 @@ class BleRadioTransportReconnectCrashTest {
                 callback = service,
                 address = address,
             )
-        bleTransport.start()
+        try {
+            bleTransport.start()
 
-        // Settle (3s) + SUBSCRIPTION_READY_TIMEOUT (5s) + margin. FROMNUM observe never invokes
-        // onSubscription, so setup must abort instead of continuing with a half-initialized service.
-        advanceTimeBy(9_000L)
+            // Settle (3s) + SUBSCRIPTION_READY_TIMEOUT (5s) + margin. FROMNUM observe never invokes
+            // onSubscription, so setup must abort instead of continuing with a half-initialized service.
+            advanceTimeBy(9_000L)
 
-        assertTrue(connection.disconnectCalls >= 1, "disconnect() must be called after subscription timeout")
-        assertEquals(0, onConnectCalls, "Subscription timeout must not call onConnect")
+            assertTrue(connection.disconnectCalls >= 1, "disconnect() must be called after subscription timeout")
+            assertEquals(0, onConnectCalls, "Subscription timeout must not call onConnect")
 
-        val writesBefore = connection.service.writes.size
-        bleTransport.handleSendToRadio(byteArrayOf(7, 8, 9))
-        assertEquals(
-            writesBefore,
-            connection.service.writes.size,
-            "Timed-out setup must clear radioService so writes do not use a half-initialized service",
-        )
+            val writesBefore = connection.service.writes.size
+            bleTransport.handleSendToRadio(byteArrayOf(7, 8, 9))
+            assertEquals(
+                writesBefore,
+                connection.service.writes.size,
+                "Timed-out setup must clear radioService so writes do not use a half-initialized service",
+            )
 
-        advanceTimeBy(10_000L)
-        assertTrue(
-            connection.connectAndAwaitCalls >= 2,
-            "Reconnect loop must retry after subscription readiness timeout " +
-                "(actual calls: ${connection.connectAndAwaitCalls})",
-        )
+            advanceTimeBy(10_000L)
+            assertTrue(
+                connection.connectAndAwaitCalls >= 2,
+                "Reconnect loop must retry after subscription readiness timeout " +
+                    "(actual calls: ${connection.connectAndAwaitCalls})",
+            )
 
-        bleTransport.close()
+            bleTransport.close()
+        } finally {
+            bleTransport.close()
+        }
     }
 
     // ─── Connected-gate timeout cleanup ──────────────────────────────────────────────────────────
@@ -850,38 +937,42 @@ class BleRadioTransportReconnectCrashTest {
                 callback = service,
                 address = address,
             )
-        bleTransport.start()
+        try {
+            bleTransport.start()
 
-        // Settle (3s) + CONNECTED_GATE_TIMEOUT (5s) + margin. connectAndAwait returns Connected,
-        // profile setup succeeds, but connectionState never emits Connected, so the gate times out.
-        advanceTimeBy(9_000L)
+            // Settle (3s) + CONNECTED_GATE_TIMEOUT (5s) + margin. connectAndAwait returns Connected,
+            // profile setup succeeds, but connectionState never emits Connected, so the gate times out.
+            advanceTimeBy(9_000L)
 
-        assertTrue(staleConnection.disconnectCalls >= 1, "Connected-gate timeout must force GATT disconnect")
-        assertTrue(onDisconnectCalls <= 1, "Connected-gate timeout must not spam onDisconnect callbacks")
+            assertTrue(staleConnection.disconnectCalls >= 1, "Connected-gate timeout must force GATT disconnect")
+            assertTrue(onDisconnectCalls <= 1, "Connected-gate timeout must not spam onDisconnect callbacks")
 
-        val writesBefore = staleConnection.service.writes.size
-        bleTransport.handleSendToRadio(byteArrayOf(4, 5, 6))
-        assertEquals(
-            writesBefore,
-            staleConnection.service.writes.size,
-            "Connected-gate timeout must clear radioService so writes do not use stale profile state",
-        )
+            val writesBefore = staleConnection.service.writes.size
+            bleTransport.handleSendToRadio(byteArrayOf(4, 5, 6))
+            assertEquals(
+                writesBefore,
+                staleConnection.service.writes.size,
+                "Connected-gate timeout must clear radioService so writes do not use stale profile state",
+            )
 
-        advanceTimeBy(10_000L)
-        assertTrue(
-            staleConnection.connectAndAwaitCalls >= 2,
-            "Reconnect loop must retry after Connected-gate timeout " +
-                "(actual calls: ${staleConnection.connectAndAwaitCalls})",
-        )
+            advanceTimeBy(10_000L)
+            assertTrue(
+                staleConnection.connectAndAwaitCalls >= 2,
+                "Reconnect loop must retry after Connected-gate timeout " +
+                    "(actual calls: ${staleConnection.connectAndAwaitCalls})",
+            )
 
-        bleTransport.close()
+            bleTransport.close()
+        } finally {
+            bleTransport.close()
+        }
     }
 
     /**
      * Validates the normal Connected-gate path: when connectAndAwait returns Connected and the connectionState
-     * StateFlow reflects Connected, the gate succeeds immediately and the transport operates normally. This test does
-     * NOT exercise the timeout path (which requires a StateFlow that never reaches Connected — not easily simulated
-     * with the existing fake). The timeout cleanup logic is verified by static analysis.
+     * StateFlow reflects Connected, the gate succeeds immediately and the transport operates normally. The timeout path
+     * — where connectionState never reaches Connected — is covered separately by the `Connected-gate timeout cleans up
+     * stale service and retries without disconnect spam` test.
      */
     @Test
     fun `Connected-gate normal path succeeds and transport operates`() = runTest {
@@ -899,17 +990,18 @@ class BleRadioTransportReconnectCrashTest {
             )
         every { service.onDisconnect(any(), any()) } returns Unit
 
-        bleTransport.start()
-        // advance past connect — connectAndAwait returns Connected synchronously, but
-        // connectionState StateFlow stays Disconnected (FakeBleConnection sets it to Connected
-        // in connect(), so this test verifies the normal path where the gate succeeds).
-        // For the timeout to fire, we need connectionState to NOT reach Connected, which
-        // can't be easily simulated with the existing fake. Instead, we verify that the
-        // transport connects and operates normally when the gate succeeds.
-        advanceTimeBy(10_000L)
-        assertTrue(connection.connectAndAwaitCalls >= 1, "Must attempt at least one connection")
+        try {
+            bleTransport.start()
+            // advance past connect — connectAndAwait returns Connected synchronously and the
+            // FakeBleConnection sets connectionState to Connected in connect(), so this test
+            // verifies the normal path where the gate succeeds.
+            advanceTimeBy(10_000L)
+            assertTrue(connection.connectAndAwaitCalls >= 1, "Must attempt at least one connection")
 
-        bleTransport.close()
+            bleTransport.close()
+        } finally {
+            bleTransport.close()
+        }
     }
 }
 
@@ -1000,7 +1092,7 @@ private class NeverConnectedStateBleConnection : BleConnection {
         serviceUuid: kotlin.uuid.Uuid,
         timeout: Duration,
         setup: suspend CoroutineScope.(BleService) -> T,
-    ): T = CoroutineScope(kotlinx.coroutines.Dispatchers.Unconfined).setup(service)
+    ): T = CoroutineScope(currentCoroutineContext()).setup(service)
 
     override fun maximumWriteValueLength(writeType: BleWriteType): Int? = null
 }

@@ -502,6 +502,23 @@ class BleRadioTransport(
                 // exception after subscriptionReady completed but before this line), do NOT call
                 // onConnect — it would set Connected state on a dead session. handleFailure has
                 // already emitted the disconnect callback.
+                //
+                // ORDERING NOTE: callback.onConnect() is emitted here, BEFORE attemptConnection()
+                // re-confirms the link via the Connected gate (see CONNECTED_GATE_TIMEOUT). In the
+                // rare case the gate times out (connectionState observer-coroutine lag, or a stale
+                // Disconnected value the StateFlow does not re-emit), the UI has briefly seen
+                // Connected. This is deliberate and acceptable:
+                //   - The gate-timeout path returns Outcome.Failed, which drives BleReconnectPolicy
+                //     (Retry backoff immediately; onTransientDisconnect → DeviceSleep once
+                //     consecutiveFailures reaches failureThreshold, default 3).
+                //   - The timeout path nulls radioService and forces bleConnection.disconnect()
+                //     under NonCancellable, so handleSendToRadio() fails fast against a null
+                //     service and the next attempt starts over a clean GATT handle.
+                // The net worst case is a brief Connected indication while the transport cycles a
+                // sub-threshold retry — a cosmetic UX lag, not a correctness or data issue.
+                // Deferring onConnect until after the gate would require a structural refactor of
+                // the profile-setup callback and introduce its own races, so the current ordering
+                // is retained.
                 if (!sessionFailed.value) {
                     this@BleRadioTransport.callback.onConnect()
                 } else {

@@ -17,7 +17,7 @@
 package org.meshtastic.core.testing
 
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -171,7 +171,7 @@ class FakeBleConnection :
         if (serviceUuid in missingServices) {
             throw NoSuchElementException("Service $serviceUuid not found")
         }
-        return CoroutineScope(Dispatchers.Unconfined).setup(service)
+        return CoroutineScope(currentCoroutineContext()).setup(service)
     }
 
     override fun maximumWriteValueLength(writeType: BleWriteType): Int? = maxWriteValueLength
