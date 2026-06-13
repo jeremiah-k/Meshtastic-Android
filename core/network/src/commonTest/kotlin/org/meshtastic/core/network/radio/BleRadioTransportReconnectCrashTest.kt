@@ -628,6 +628,12 @@ class BleRadioTransportReconnectCrashTest {
         val device = FakeBleDevice(address = address, name = "Test Radio")
         bluetoothRepository.bond(device)
 
+        // Register FROMNUM before start() so the profile's observe collector is set up during
+        // discoverServicesAndSetupCharacteristics. Without this, hasCharacteristic(FROMNUM)
+        // returns false at setup time, no collector is established, and emitNotification
+        // below would fire into a void.
+        connection.service.addCharacteristic(FROMNUM_CHARACTERISTIC)
+
         val bleTransport =
             BleRadioTransport(
                 scope = this,
@@ -674,6 +680,10 @@ class BleRadioTransportReconnectCrashTest {
     fun `concurrent fromRadio and write failure fires onDisconnect exactly once`() = runTest {
         val device = FakeBleDevice(address = address, name = "Test Radio")
         bluetoothRepository.bond(device)
+
+        // Register FROMNUM before start() so the profile's observe collector is set up during
+        // discoverServicesAndSetupCharacteristics. See the read-failure test above for details.
+        connection.service.addCharacteristic(FROMNUM_CHARACTERISTIC)
 
         var onDisconnectCalls = 0
         every { service.onDisconnect(any(), any()) } calls { onDisconnectCalls++ }
