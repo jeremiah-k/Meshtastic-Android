@@ -199,7 +199,7 @@ class FakeBleService : BleService {
     /** When non-null, [read] throws this exception instead of returning data. Reset to null after throw. */
     var readException: Exception? = null
 
-    /** When non-null, [observe] returns a flow that emits one empty [ByteArray] then throws. Reset to null after. */
+    /** When non-null, [observe] returns a flow that immediately throws. Reset to null after. */
     var observeException: Exception? = null
 
     override fun hasCharacteristic(characteristic: BleCharacteristic): Boolean =
@@ -209,10 +209,7 @@ class FakeBleService : BleService {
         val ex = observeException
         if (ex != null) {
             observeException = null
-            return flow {
-                emit(ByteArray(0))
-                throw ex
-            }
+            return flow { throw ex }
         }
         return notificationFlows.getOrPut(characteristic.uuid) { MutableSharedFlow(extraBufferCapacity = 16) }
     }

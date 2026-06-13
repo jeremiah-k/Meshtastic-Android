@@ -25,7 +25,8 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.channelFlow
-import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.launch
 import org.meshtastic.core.ble.MeshtasticBleConstants.FROMNUM_CHARACTERISTIC
 import org.meshtastic.core.ble.MeshtasticBleConstants.FROMRADIO_CHARACTERISTIC
@@ -105,17 +106,17 @@ class KableMeshtasticRadioProfile(private val service: BleService) : MeshtasticR
         }
     }
 
-    override val logRadio: Flow<ByteArray> =
-        if (service.hasCharacteristic(logRadioChar)) {
+    override val logRadio: Flow<ByteArray> = flow {
+        if (!service.hasCharacteristic(logRadioChar)) return@flow
+        emitAll(
             service.observe(logRadioChar).catch { e ->
                 if (e is CancellationException) throw e
                 if (e.isSessionFatalBleException()) throw e
                 // logRadio is optional — log at debug for diagnostics but don't surface to callers.
                 Logger.d(e) { "logRadio observation failure suppressed" }
-            }
-        } else {
-            emptyFlow()
-        }
+            },
+        )
+    }
 
     override suspend fun sendToRadio(packet: ByteArray) {
         service.write(toRadio, packet, toRadioWriteType)
