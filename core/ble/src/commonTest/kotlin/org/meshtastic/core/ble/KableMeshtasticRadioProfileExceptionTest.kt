@@ -126,4 +126,26 @@ class KableMeshtasticRadioProfileExceptionTest {
         service.observeException = GattStatusException(status = 133, message = "GATT error")
         assertFailsWith<GattStatusException> { profile.logRadio.first() }
     }
+
+    // --- subscriptionReady exceptional completion tests ---
+
+    @Test
+    fun `awaitSubscriptionReady throws promptly when FROMNUM observe fails before readiness`() = runTest {
+        val service = createService()
+        val profile = KableMeshtasticRadioProfile(service)
+
+        // Set observeException — when fromRadio is collected, the FROMNUM observe will throw
+        // before subscriptionReady is completed. The fix completes it exceptionally.
+        service.observeException = NotConnectedException("observe failed before CCCD")
+
+        // Start collecting fromRadio (triggers the observe + launch)
+        val collectJob = launch { profile.fromRadio.collect {} }
+        advanceUntilIdle()
+
+        // awaitSubscriptionReady should throw the exception promptly, not hang
+        val result = assertFailsWith<NotConnectedException> { profile.awaitSubscriptionReady() }
+        assertTrue(result.message!!.contains("observe failed before CCCD"))
+
+        collectJob.cancel()
+    }
 }

@@ -99,7 +99,10 @@ private fun Throwable.isSessionFatalBleExceptionInternal(maxDepth: Int): Boolean
     if (maxDepth <= 0) return false
     return when (this) {
         is NotConnectedException -> true
-        is GattStatusException -> status in FATAL_GATT_STATUSES
+
+        is GattStatusException ->
+            status in FATAL_GATT_STATUSES || cause?.isSessionFatalBleExceptionInternal(maxDepth - 1) ?: false
+
         else -> cause?.isSessionFatalBleExceptionInternal(maxDepth - 1) ?: false
     }
 }

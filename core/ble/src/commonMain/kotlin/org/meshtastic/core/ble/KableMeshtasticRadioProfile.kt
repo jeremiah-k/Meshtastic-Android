@@ -71,12 +71,23 @@ class KableMeshtasticRadioProfile(private val service: BleService) : MeshtasticR
     override val fromRadio: Flow<ByteArray> = channelFlow {
         launch {
             if (service.hasCharacteristic(fromNum)) {
-                service
-                    .observe(fromNum) {
-                        Logger.d { "FROMNUM CCCD written — notifications enabled" }
-                        subscriptionReady.complete(Unit)
-                    }
-                    .collect { triggerDrain.tryEmit(Unit) }
+                try {
+                    service
+                        .observe(fromNum) {
+                            Logger.d { "FROMNUM CCCD written — notifications enabled" }
+                            subscriptionReady.complete(Unit)
+                        }
+                        .collect { triggerDrain.tryEmit(Unit) }
+                } catch (e: CancellationException) {
+                    // Propagate cancellation — don't complete subscription as that would
+                    // let setup proceed on a cancelled scope.
+                    throw e
+                } catch (e: Exception) {
+                    // Complete subscriptionReady exceptionally so awaitSubscriptionReady()
+                    // throws promptly instead of waiting for the transport's 5s timeout.
+                    subscriptionReady.completeExceptionally(e)
+                    throw e
+                }
             } else {
                 subscriptionReady.complete(Unit)
             }

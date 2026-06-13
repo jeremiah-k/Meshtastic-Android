@@ -80,6 +80,9 @@ class SharedRadioInterfaceServiceLivenessTest {
         // Without this, those infinite flow collectors keep the forked test JVM alive after tests
         // complete, causing Gradle to hang at subsequent :core:*:allTests tasks.
         processLifecycleOwner.destroy()
+        // Allow pending cancellation to propagate before resetting the Main dispatcher.
+        // Without this, resetMain() can prevent the cancellation from reaching collectors.
+        testDispatcher.advanceUntilIdle()
         Dispatchers.resetMain()
     }
 
