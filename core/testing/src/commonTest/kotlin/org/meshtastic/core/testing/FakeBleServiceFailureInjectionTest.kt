@@ -19,6 +19,7 @@ package org.meshtastic.core.testing
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.test.runTest
 import org.meshtastic.core.ble.BleCharacteristic
+import org.meshtastic.core.ble.BleWriteType
 import kotlin.test.Test
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
@@ -31,10 +32,10 @@ class FakeBleServiceFailureInjectionTest {
     @Test
     fun writeExceptionIsPersistent() = runTest {
         service.writeException = Exception("write-fail")
-        assertFailsWith<Exception> { service.write(char, ByteArray(0)) }
+        assertFailsWith<Exception> { service.write(char, ByteArray(0), BleWriteType.WITH_RESPONSE) }
         // writeException is persistent — tests must explicitly clear it
         service.writeException = null
-        service.write(char, ByteArray(1))
+        service.write(char, ByteArray(1), BleWriteType.WITH_RESPONSE)
         assertTrue(service.writes.size == 1)
     }
 
