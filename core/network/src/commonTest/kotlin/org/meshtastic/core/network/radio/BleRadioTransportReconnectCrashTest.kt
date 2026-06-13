@@ -16,6 +16,7 @@
  */
 package org.meshtastic.core.network.radio
 
+import com.juul.kable.NotConnectedException
 import dev.mokkery.MockMode
 import dev.mokkery.answering.calls
 import dev.mokkery.answering.returns
@@ -310,7 +311,7 @@ class BleRadioTransportReconnectCrashTest {
         assertTrue(connection.connectAndAwaitCalls == 1, "First connect must happen")
 
         // Inject write failure while BLE state remains Connected
-        connection.service.writeException = IllegalStateException("session closed")
+        connection.service.writeException = NotConnectedException("session closed")
 
         // Trigger a write (simulating a heartbeat or user packet)
         bleTransport.handleSendToRadio(byteArrayOf(1, 2, 3))
@@ -381,7 +382,7 @@ class BleRadioTransportReconnectCrashTest {
         advanceTimeBy(4_000L)
 
         // First write failure — should trigger onDisconnect once
-        connection.service.writeException = IllegalStateException("session closed")
+        connection.service.writeException = NotConnectedException("session closed")
         bleTransport.handleSendToRadio(byteArrayOf(1))
         // Advance enough for retryBleOperation to exhaust 3 retries (~750ms max) + handleFailure +
         // disconnect, but NOT enough to reach the 3 s reconnect settle delay.
@@ -416,7 +417,7 @@ class BleRadioTransportReconnectCrashTest {
         val writesBefore = connection.service.writes.size
 
         // First write failure clears radioService
-        connection.service.writeException = IllegalStateException("session closed")
+        connection.service.writeException = NotConnectedException("session closed")
         bleTransport.handleSendToRadio(byteArrayOf(1, 2, 3))
         // Advance enough for retryBleOperation to exhaust 3 retries (~750ms max) + handleFailure +
         // disconnect, but NOT enough to reach the 3 s reconnect settle delay.
@@ -433,6 +434,38 @@ class BleRadioTransportReconnectCrashTest {
             connection.service.writes.size,
             "No new write should be recorded after radioService was cleared",
         )
+
+        bleTransport.close()
+    }
+
+    @Test
+    fun `internal session failure is not treated as intentional disconnect`() = runTest {
+        val device = FakeBleDevice(address = address, name = "Test Radio")
+        bluetoothRepository.bond(device)
+
+        val bleTransport =
+            BleRadioTransport(
+                scope = this,
+                scanner = scanner,
+                bluetoothRepository = bluetoothRepository,
+                connectionFactory = connectionFactory,
+                callback = service,
+                address = address,
+            )
+        bleTransport.start()
+        advanceTimeBy(4_000L) // connect + handshake
+
+        // Inject a write failure — this should NOT be treated as intentional
+        connection.service.writeException = NotConnectedException("session closed")
+        bleTransport.handleSendToRadio(byteArrayOf(1, 2, 3))
+        advanceUntilIdle()
+
+        // disconnect must have been called (forced cleanup)
+        assertTrue(connection.disconnectCalls >= 1, "disconnect() must be called after write failure")
+
+        // Reconnect should happen (policy should iterate)
+        advanceTimeBy(15_000L)
+        assertTrue(connection.connectAndAwaitCalls >= 2, "Reconnect loop must iterate after internal session failure")
 
         bleTransport.close()
     }

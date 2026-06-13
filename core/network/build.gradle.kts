@@ -58,6 +58,7 @@ kotlin {
         commonTest.dependencies {
             implementation(projects.core.testing)
             implementation(libs.kotlinx.coroutines.test)
+            implementation(libs.kable.core) // Kable exception types for BLE failure-injection tests
         }
     }
 }

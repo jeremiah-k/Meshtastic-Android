@@ -334,6 +334,9 @@ class SharedRadioInterfaceService(
                     "(threshold: ${LIVENESS_TIMEOUT_MILLIS}ms). Treating as disconnect."
             }
             onDisconnect(isPermanent = false, errorMessage = "Connection timeout — no data received")
+            // TODO: If the zombie condition manifests as silence rather than a write/read exception,
+            // this liveness timeout should force a transport restart (stopTransportLocked +
+            // startTransportLocked) rather than just updating the UI connection state.
         }
     }
 

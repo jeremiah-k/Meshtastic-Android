@@ -62,3 +62,26 @@ fun Throwable.classifyBleException(): BleExceptionInfo? = when (this) {
 
     else -> null
 }
+
+/**
+ * GATT status codes that indicate the BLE session is irrecoverably broken.
+ *
+ * Used by [isSessionFatalBleException] and shared across the BLE stack so classification stays in one place.
+ */
+@Suppress("MagicNumber")
+private val FATAL_GATT_STATUSES =
+    setOf(
+        133, // GATT_ERROR — generic connection failure
+        8, // GATT_CONN_TIMEOUT — link-layer timeout
+        129, // GATT_FAILURE — unrecoverable operation failure
+    )
+
+/**
+ * Returns `true` if this throwable indicates the BLE session is irrecoverably broken and should be torn down
+ * (triggering reconnection), as opposed to a transient condition that can be retried.
+ */
+fun Throwable.isSessionFatalBleException(): Boolean = when (this) {
+    is NotConnectedException -> true
+    is GattStatusException -> status in FATAL_GATT_STATUSES
+    else -> false
+}

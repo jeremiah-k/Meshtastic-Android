@@ -158,6 +158,12 @@ class BleRadioTransport(
     // on the flow collector coroutine and may race. Stale reads are benign (affect only dedup timing).
     @Volatile private var sessionFailed = false
 
+    // Captures the exception that caused handleFailure() to tear down the session, so
+    // attemptConnection() can distinguish an internal-failure disconnect from a genuine
+    // LocalDisconnect (user-initiated or clean close). When non-null, the reconnect policy
+    // treats the disconnect as unintentional and applies backoff escalation.
+    @Volatile private var sessionFailureCause: Throwable? = null
+
     // Never give up while the user has this device selected. Higher layers (SharedRadioInterfaceService)
     // own the explicit-disconnect lifecycle and will close() us when the user picks a different device or
     // toggles the connection off; until then, retry forever with the policy's exponential-backoff cap (60 s).
@@ -253,6 +259,7 @@ class BleRadioTransport(
     private suspend fun attemptConnection(): BleReconnectPolicy.Outcome {
         connectionStartTime = nowMillis
         sessionFailed = false
+        sessionFailureCause = null
         Logger.i { "[$address] BLE connection attempt started" }
 
         val device = findDevice()
@@ -306,7 +313,19 @@ class BleRadioTransport(
 
         Logger.i { "[$address] BLE connection dropped (reason: $disconnectReason), preparing to reconnect" }
 
-        val wasIntentional = disconnectReason is DisconnectReason.LocalDisconnect
+        // Internal session failures (write/read exceptions that triggered handleFailure →
+        // disconnect) must NOT be treated as intentional/user disconnects — the reconnect policy
+        // needs to escalate backoff for these.
+        val internalFailure = sessionFailureCause
+        if (internalFailure != null) {
+            Logger.w(internalFailure) { "[$address] Session forced disconnect due to internal failure" }
+        }
+        val wasIntentional =
+            if (internalFailure != null) {
+                false
+            } else {
+                disconnectReason is DisconnectReason.LocalDisconnect
+            }
         val connectionUptime = (nowMillis - gattConnectedAt).milliseconds
         val wasStable = connectionUptime >= reconnectPolicy.minStableConnection
 
@@ -407,6 +426,7 @@ class BleRadioTransport(
                     Logger.w(ignored) { "[$address] disconnect() failed after profile error" }
                 }
             }
+            throw e // Re-throw so attemptConnection() returns Outcome.Failed(e) for policy backoff.
         }
     }
 
@@ -513,6 +533,7 @@ class BleRadioTransport(
         // Heartbeat writes that arrive after the first failure must not spam callbacks.
         if (sessionFailed) return
         sessionFailed = true
+        sessionFailureCause = throwable
 
         // Tear down stale session state immediately so future writes fail-fast without retrying
         // against a dead GATT handle.
