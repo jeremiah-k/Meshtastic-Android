@@ -128,6 +128,9 @@ class SharedRadioInterfaceService(
      */
     @Volatile private var isStopping = false
 
+    /** Prevents concurrent liveness-induced transport restarts from stacking. */
+    private val isRestarting = atomic(false)
+
     private val listenersInitialized = atomic(false)
     private var heartbeatJob: Job? = null
     private var lastHeartbeatMillis = 0L
@@ -334,9 +337,21 @@ class SharedRadioInterfaceService(
                     "(threshold: ${LIVENESS_TIMEOUT_MILLIS}ms). Treating as disconnect."
             }
             onDisconnect(isPermanent = false, errorMessage = "Connection timeout — no data received")
-            // TODO: If the zombie condition manifests as silence rather than a write/read exception,
-            // this liveness timeout should force a transport restart (stopTransportLocked +
-            // startTransportLocked) rather than just updating the UI connection state.
+            // Force transport restart to recover from silent zombie sessions where the BLE stack
+            // did not report a disconnect. Uses the same processLifecycle scope and transportMutex
+            // pattern as setDeviceAddress() to guarantee clean teardown/restart sequencing.
+            if (isRestarting.compareAndSet(expect = false, update = true)) {
+                processLifecycle.coroutineScope.launch {
+                    try {
+                        transportMutex.withLock {
+                            ignoreExceptionSuspend { stopTransportLocked() }
+                            startTransportLocked()
+                        }
+                    } finally {
+                        isRestarting.value = false
+                    }
+                }
+            }
         }
     }
 
