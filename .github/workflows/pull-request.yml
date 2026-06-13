@@ -2,26 +2,45 @@ name: Pull Request CI
 
 on:
   pull_request:
-    branches: [ main ]
+    branches: [ main, "**-review" ]
+  push:
+    branches: [ "**-review" ]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch or tag to run CI against'
+        required: false
+        default: ''
+        type: string
+      skip_change_detection:
+        description: 'Skip change detection and run full validation'
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.event.inputs.ref || github.ref }}
   cancel-in-progress: true
 
 jobs:
   # 1. CHANGE DETECTION: Prevents unnecessary builds
   check-changes:
-    if: github.repository == 'meshtastic/Meshtastic-Android' && !( github.head_ref == 'scheduled-updates' || github.head_ref == 'l10n_main' )
+    if: |
+      github.repository == 'jeremiah-k/Meshtastic-Android'
+      && !(github.head_ref == 'scheduled-updates' || github.head_ref == 'l10n_main')
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 10
     outputs:
-      android: ${{ steps.filter.outputs.android }}
+      android: ${{ steps.gate.outputs.android }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
       - uses: dorny/paths-filter@v4
+        if: github.event_name == 'pull_request'
         id: filter
         with:
           token: ''
@@ -50,10 +69,19 @@ jobs:
               - 'gradlew.bat'
               - 'settings.gradle.kts'
               - 'test.gradle.kts'
+      - name: Set gate output
+        id: gate
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]] || [[ "${{ github.event_name }}" == "push" ]]; then
+            echo "android=true" >> "$GITHUB_OUTPUT"
+            echo "${{ github.event_name }} — running full validation"
+          else
+            echo "android=${{ steps.filter.outputs.android }}" >> "$GITHUB_OUTPUT"
+          fi
 
   # 1b. FILTER DRIFT CHECK: Ensures check-changes stays aligned with module roots
   verify-check-changes-filter:
-    if: github.repository == 'meshtastic/Meshtastic-Android' && !( github.head_ref == 'scheduled-updates' || github.head_ref == 'l10n_main' )
+    if: github.repository == 'jeremiah-k/Meshtastic-Android' && !( github.head_ref == 'scheduled-updates' || github.head_ref == 'l10n_main' )
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 10
     steps:
