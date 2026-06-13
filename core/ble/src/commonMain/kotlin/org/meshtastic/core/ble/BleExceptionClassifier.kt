@@ -91,10 +91,15 @@ private val FATAL_GATT_STATUSES =
  * (triggering reconnection), as opposed to a transient condition that can be retried.
  *
  * Also checks the cause chain — if a session-fatal exception is wrapped inside another exception (e.g., by coroutine
- * machinery or retry logic), it is still detected.
+ * machinery or retry logic), it is still detected. Depth-limited to prevent stack overflow on malformed cause chains.
  */
-fun Throwable.isSessionFatalBleException(): Boolean = when (this) {
-    is NotConnectedException -> true
-    is GattStatusException -> status in FATAL_GATT_STATUSES
-    else -> cause?.isSessionFatalBleException() ?: false
+fun Throwable.isSessionFatalBleException(): Boolean = isSessionFatalBleExceptionInternal(maxDepth = 10)
+
+private fun Throwable.isSessionFatalBleExceptionInternal(maxDepth: Int): Boolean {
+    if (maxDepth <= 0) return false
+    return when (this) {
+        is NotConnectedException -> true
+        is GattStatusException -> status in FATAL_GATT_STATUSES
+        else -> cause?.isSessionFatalBleExceptionInternal(maxDepth - 1) ?: false
+    }
 }

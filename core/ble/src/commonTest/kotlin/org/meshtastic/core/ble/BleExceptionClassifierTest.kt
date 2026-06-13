@@ -99,4 +99,22 @@ class BleExceptionClassifierTest {
         assertFalse(IllegalStateException("test").isSessionFatalBleException())
         assertFalse(RuntimeException("test").isSessionFatalBleException())
     }
+
+    @Test
+    fun `isSessionFatalBleException traverses cause chain for wrapped exceptions`() {
+        val fatal = GattStatusException(status = 133, message = "wrapped fatal")
+        val wrapper = RuntimeException("wrapper", fatal)
+        assertTrue(wrapper.isSessionFatalBleException())
+
+        val notConnected = NotConnectedException("wrapped")
+        val doubleWrapper = IllegalStateException("outer", RuntimeException("middle", notConnected))
+        assertTrue(doubleWrapper.isSessionFatalBleException())
+    }
+
+    @Test
+    fun `isSessionFatalBleException returns false for non-fatal cause chain`() {
+        val transient = GattStatusException(status = 6, message = "busy")
+        val wrapper = RuntimeException("wrapper", transient)
+        assertFalse(wrapper.isSessionFatalBleException())
+    }
 }

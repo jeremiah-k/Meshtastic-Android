@@ -172,9 +172,9 @@ class BleRadioTransport(
 
     private val packetsSent = atomic(0)
 
-    @Volatile private var bytesReceived: Long = 0
+    private val bytesReceived = atomic(0L)
 
-    @Volatile private var bytesSent: Long = 0
+    private val bytesSent = atomic(0L)
 
     @Volatile private var isFullyConnected = false
     private var connectionJob: Job? = null
@@ -592,9 +592,9 @@ class BleRadioTransport(
                 try {
                     retryBleOperation(tag = address) { currentService.sendToRadio(p) }
                     val sent = packetsSent.incrementAndGet()
-                    bytesSent += p.size
+                    val txBytes = bytesSent.addAndGet(p.size.toLong())
                     Logger.v {
-                        "[$address] Wrote packet #$sent " + "to toRadio (${p.size} bytes, total TX: $bytesSent bytes)"
+                        "[$address] Wrote packet #$sent " + "to toRadio (${p.size} bytes, total TX: $txBytes bytes)"
                     }
                 } catch (e: CancellationException) {
                     throw e
@@ -646,10 +646,8 @@ class BleRadioTransport(
 
     private fun dispatchPacket(packet: ByteArray) {
         val received = packetsReceived.incrementAndGet()
-        bytesReceived += packet.size
-        Logger.v {
-            "[$address] Dispatching packet #$received " + "(${packet.size} bytes, total RX: $bytesReceived bytes)"
-        }
+        val rxBytes = bytesReceived.addAndGet(packet.size.toLong())
+        Logger.v { "[$address] Dispatching packet #$received " + "(${packet.size} bytes, total RX: $rxBytes bytes)" }
         callback.handleFromRadio(packet)
     }
 
@@ -690,8 +688,8 @@ class BleRadioTransport(
     private fun formatSessionStats(): String {
         val uptime = if (connectionStartTime > 0) nowMillis - connectionStartTime else 0
         return "Uptime: ${uptime}ms, " +
-            "Packets RX: ${packetsReceived.value} ($bytesReceived bytes), " +
-            "Packets TX: ${packetsSent.value} ($bytesSent bytes)"
+            "Packets RX: ${packetsReceived.value} (${bytesReceived.value} bytes), " +
+            "Packets TX: ${packetsSent.value} (${bytesSent.value} bytes)"
     }
 
     private fun Throwable.toDisconnectReason(): Pair<Boolean, String> {
