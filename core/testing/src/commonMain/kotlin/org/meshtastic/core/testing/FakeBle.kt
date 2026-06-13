@@ -17,6 +17,9 @@
 package org.meshtastic.core.testing
 
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -130,7 +133,23 @@ class FakeBleConnection :
 
     val service = FakeBleService()
 
+    /**
+     * Per-connection profile scope, mirroring [KableBleConnection]'s connectionScope.
+     *
+     * Created in [connect], cancelled in [disconnect]. Profile collectors launched via
+     * [profile] become children of this scope, so they are cancelled on fake disconnect —
+     * not just when the outer transport scope eventually closes. This prevents stale
+     * fromRadio/logRadio collectors from accumulating across reconnect cycles.
+     */
+    private var profileScope: CoroutineScope? = null
+
     override suspend fun connect(device: BleDevice) {
+        // Cancel any stale profile scope from a prior connection attempt.
+        profileScope?.cancel()
+        // Parent the new scope to the caller's Job so it inherits the test/transport scheduler
+        // and cannot outlive the caller. SupervisorJob prevents one collector failure from
+        // cascading to siblings — matching Kable's connectionScope contract.
+        profileScope = CoroutineScope(currentCoroutineContext() + SupervisorJob(currentCoroutineContext()[Job]))
         _device.value = device
         _connectionState.value = BleConnectionState.Connecting
         if (device is FakeBleDevice) {
@@ -155,6 +174,8 @@ class FakeBleConnection :
 
     override suspend fun disconnect() {
         disconnectCalls++
+        profileScope?.cancel()
+        profileScope = null
         val currentDevice = _device.value
         _connectionState.value = BleConnectionState.Disconnected()
         if (currentDevice is FakeBleDevice) {
@@ -171,10 +192,10 @@ class FakeBleConnection :
         if (serviceUuid in missingServices) {
             throw NoSuchElementException("Service $serviceUuid not found")
         }
-        // Reuse the caller's Job and scheduler so collectors launched by setup() are cancelled with
-        // the caller (matches KableBleConnection.profile's connectionScope contract). Do NOT use
-        // coroutineScope { setup(service) } — it would hang on the infinite fromRadio/logRadio collectors.
-        return CoroutineScope(currentCoroutineContext()).setup(service)
+        // Run setup in the per-connection profile scope so collectors are cancelled on
+        // disconnect(), matching KableBleConnection.profile's connectionScope contract.
+        val scope = profileScope ?: error("Not connected")
+        return scope.setup(service)
     }
 
     override fun maximumWriteValueLength(writeType: BleWriteType): Int? = maxWriteValueLength

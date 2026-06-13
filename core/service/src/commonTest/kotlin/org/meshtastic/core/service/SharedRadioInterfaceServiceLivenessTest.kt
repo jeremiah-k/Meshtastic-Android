@@ -84,13 +84,10 @@ class SharedRadioInterfaceServiceLivenessTest {
         // add testDispatcher.scheduler.runCurrent() here before runBlocking to avoid a mutex deadlock.
         activeCloseGate?.complete(Unit)
         activeCloseGate = null
-        // CRITICAL: Stop every service's heartbeat loop and transport. Destroying the process
-        // lifecycle below does NOT cancel SharedRadioInterfaceService._serviceScope, so leaked
-        // heartbeat loops would otherwise keep the forked test JVM alive between tests.
-        // NOTE: Cannot use runBlocking { services.forEach { it.disconnect() } } here — it
-        // deadlocks on Robolectric's main thread (androidHostTest target). Each test body
-        // already calls service.disconnect() + advanceTimeBy before exiting; this safety net
-        // is only for the failure path where a test throws before reaching disconnect().
+        // Service cleanup is handled per-test in try/finally blocks — each test calls
+        // service.disconnect() + advanceTimeBy in a finally clause. tearDown cannot use
+        // runBlocking { services.forEach { it.disconnect() } } because it deadlocks on
+        // Robolectric's main thread (androidHostTest target).
         services.clear()
         createdTransports.clear()
         // CRITICAL: Destroy the lifecycle to cancel processLifecycle.coroutineScope and all
@@ -233,23 +230,24 @@ class SharedRadioInterfaceServiceLivenessTest {
     fun `BLE liveness timeout closes old transport and creates fresh one`() = runTest(testDispatcher) {
         clock = 0L
         val service = createConnectedService("xAA:BB:CC:DD:EE:FF")
-        assertEquals(1, createdTransports.size, "Initial connect should create one transport")
+        try {
+            assertEquals(1, createdTransports.size, "Initial connect should create one transport")
 
-        clock = 65_000L
-        service.checkLiveness()
-        // Under UnconfinedTestDispatcher the liveness restart (sendPoliteDisconnect = false) runs
-        // inline during checkLiveness(). runCurrent/advanceTimeBy are belt-and-suspenders; the
-        // real 500ms polite-disconnect delay is covered by the trailing service.disconnect() below.
-        testDispatcher.scheduler.runCurrent()
-        advanceTimeBy(1_000L)
+            clock = 65_000L
+            service.checkLiveness()
+            // Under UnconfinedTestDispatcher the liveness restart (sendPoliteDisconnect = false) runs
+            // inline during checkLiveness(). runCurrent/advanceTimeBy are belt-and-suspenders; the
+            // real 500ms polite-disconnect delay is covered by the trailing service.disconnect() below.
+            testDispatcher.scheduler.runCurrent()
+            advanceTimeBy(1_000L)
 
-        assertEquals(2, createdTransports.size, "Liveness restart should create exactly one fresh transport")
-        assertTrue(createdTransports.first().closeCalled, "Old transport must be closed")
-        assertEquals(1, createdTransports.first().closeCount, "Old transport closed exactly once")
-
-        // Stop the heartbeat loop before exiting so tearDown never sees an active service.
-        service.disconnect()
-        advanceTimeBy(1_000L)
+            assertEquals(2, createdTransports.size, "Liveness restart should create exactly one fresh transport")
+            assertTrue(createdTransports.first().closeCalled, "Old transport must be closed")
+            assertEquals(1, createdTransports.first().closeCount, "Old transport closed exactly once")
+        } finally {
+            service.disconnect()
+            advanceTimeBy(1_000L)
+        }
     }
 
     @Test
@@ -257,49 +255,53 @@ class SharedRadioInterfaceServiceLivenessTest {
         clock = 0L
         val service = createConnectedService("xAA:BB:CC:DD:EE:FF")
 
-        // Capture all state transitions during the liveness recovery
-        val stateEmissions = mutableListOf<ConnectionState>()
-        val collectJob = backgroundScope.launch { service.connectionState.collect { stateEmissions.add(it) } }
+        try {
+            // Capture all state transitions during the liveness recovery
+            val stateEmissions = mutableListOf<ConnectionState>()
+            val collectJob = backgroundScope.launch { service.connectionState.collect { stateEmissions.add(it) } }
 
-        clock = 65_000L
-        service.checkLiveness()
-        // The restart completes inline under UnconfinedTestDispatcher; runCurrent/advanceTimeBy
-        // are belt-and-suspenders. The trailing disconnect() covers its own 500ms polite delay.
-        testDispatcher.scheduler.runCurrent()
-        advanceTimeBy(1_000L)
+            clock = 65_000L
+            service.checkLiveness()
+            // The restart completes inline under UnconfinedTestDispatcher; runCurrent/advanceTimeBy
+            // are belt-and-suspenders. The trailing disconnect() covers its own 500ms polite delay.
+            testDispatcher.scheduler.runCurrent()
+            advanceTimeBy(1_000L)
 
-        collectJob.cancel()
+            collectJob.cancel()
 
-        // Recovery must NEVER emit permanent Disconnected
-        assertFalse(
-            ConnectionState.Disconnected in stateEmissions,
-            "Automatic recovery must not emit permanent Disconnected state " + "(emitted: $stateEmissions)",
-        )
-
-        service.disconnect()
-        advanceTimeBy(1_000L)
+            // Recovery must NEVER emit permanent Disconnected
+            assertFalse(
+                ConnectionState.Disconnected in stateEmissions,
+                "Automatic recovery must not emit permanent Disconnected state " + "(emitted: $stateEmissions)",
+            )
+        } finally {
+            service.disconnect()
+            advanceTimeBy(1_000L)
+        }
     }
 
     @Test
     fun `BLE liveness restart does not send polite disconnect into zombie transport`() = runTest(testDispatcher) {
         clock = 0L
         val service = createConnectedService("xAA:BB:CC:DD:EE:FF")
-        val oldTransport = createdTransports.first()
+        try {
+            val oldTransport = createdTransports.first()
 
-        oldTransport.sentData.clear()
+            oldTransport.sentData.clear()
 
-        clock = 65_000L
-        service.checkLiveness()
-        testDispatcher.scheduler.runCurrent()
-        advanceTimeBy(1_000L)
+            clock = 65_000L
+            service.checkLiveness()
+            testDispatcher.scheduler.runCurrent()
+            advanceTimeBy(1_000L)
 
-        assertTrue(
-            oldTransport.sentData.isEmpty(),
-            "Polite disconnect frame must NOT be sent into zombie transport during liveness restart",
-        )
-
-        service.disconnect()
-        advanceTimeBy(1_000L)
+            assertTrue(
+                oldTransport.sentData.isEmpty(),
+                "Polite disconnect frame must NOT be sent into zombie transport during liveness restart",
+            )
+        } finally {
+            service.disconnect()
+            advanceTimeBy(1_000L)
+        }
     }
 
     @Test
@@ -307,21 +309,23 @@ class SharedRadioInterfaceServiceLivenessTest {
         clock = 0L
         val service = createConnectedService("xAA:BB:CC:DD:EE:FF")
 
-        clock = 65_000L
-        service.checkLiveness()
-        testDispatcher.scheduler.runCurrent()
-        advanceTimeBy(1_000L)
+        try {
+            clock = 65_000L
+            service.checkLiveness()
+            testDispatcher.scheduler.runCurrent()
+            advanceTimeBy(1_000L)
 
-        clock = 66_000L
-        service.checkLiveness()
-        testDispatcher.scheduler.runCurrent()
-        advanceTimeBy(1_000L)
+            clock = 66_000L
+            service.checkLiveness()
+            testDispatcher.scheduler.runCurrent()
+            advanceTimeBy(1_000L)
 
-        val firstTransportCloses = createdTransports.firstOrNull()?.closeCount ?: 0
-        assertEquals(1, firstTransportCloses, "First transport should be closed exactly once (no stacking)")
-
-        service.disconnect()
-        advanceTimeBy(1_000L)
+            val firstTransportCloses = createdTransports.firstOrNull()?.closeCount ?: 0
+            assertEquals(1, firstTransportCloses, "First transport should be closed exactly once (no stacking)")
+        } finally {
+            service.disconnect()
+            advanceTimeBy(1_000L)
+        }
     }
 
     @Test
@@ -345,71 +349,72 @@ class SharedRadioInterfaceServiceLivenessTest {
 
         clock = 0L
         val service = createConnectedService("xAA:BB:CC:DD:EE:FF", transportProvider)
-        assertEquals(1, gatedTransports.size, "Initial connect should create one transport")
-        val initialTransport = gatedTransports.first()
-
-        // Past the 60s threshold → first checkLiveness triggers a restart whose close() suspends
-        // on closeGate. Under UnconfinedTestDispatcher the launched restart runs eagerly up to the
-        // suspension point, so by the time checkLiveness() returns the restart is in-flight.
-        clock = 65_000L
-        service.checkLiveness()
-
-        // Issue a second checkLiveness() while the first restart is still suspended in close().
-        // Do NOT advance time here — the overlap must happen with the first restart in-flight.
-        clock = 65_001L
-        service.checkLiveness()
-
-        // Assertions below run while the restart is held suspended on closeGate. They MUST be
-        // wrapped in try/finally so closeGate is completed even if one of them fails; otherwise
-        // tearDown's runBlocking { disconnect() } would hang forever on the gated close().
         try {
-            // While the first restart is suspended: exactly one transport created so far, and close()
-            // was entered exactly once and has NOT completed. The second check started no new cycle.
+            assertEquals(1, gatedTransports.size, "Initial connect should create one transport")
+            val initialTransport = gatedTransports.first()
+
+            // Past the 60s threshold → first checkLiveness triggers a restart whose close() suspends
+            // on closeGate. Under UnconfinedTestDispatcher the launched restart runs eagerly up to the
+            // suspension point, so by the time checkLiveness() returns the restart is in-flight.
+            clock = 65_000L
+            service.checkLiveness()
+
+            // Issue a second checkLiveness() while the first restart is still suspended in close().
+            // Do NOT advance time here — the overlap must happen with the first restart in-flight.
+            clock = 65_001L
+            service.checkLiveness()
+
+            // Assertions below run while the restart is held suspended on closeGate. They MUST be
+            // wrapped in try/finally so closeGate is completed even if one of them fails; otherwise
+            // tearDown's runBlocking { disconnect() } would hang forever on the gated close().
+            try {
+                // While the first restart is suspended: exactly one transport created so far, and close()
+                // was entered exactly once and has NOT completed. The second check started no new cycle.
+                assertEquals(
+                    1,
+                    gatedTransports.size,
+                    "Second check must not create a transport while the first restart is in-flight",
+                )
+                assertTrue(initialTransport.closeCalled, "First transport close must have been entered by the restart")
+                assertEquals(
+                    1,
+                    initialTransport.closeCount,
+                    "close() entered exactly once (no stacking of close calls)",
+                )
+                assertEquals(
+                    0,
+                    initialTransport.closeCompletedCount,
+                    "close() must still be suspended (restart held in-flight) before releasing the gate",
+                )
+            } finally {
+                // Release the gate unconditionally so the suspended restart can complete. tearDown
+                // also releases activeCloseGate, but completing it here is required for the post-finally
+                // assertions below to observe the resumed restart.
+                closeGate.complete(Unit)
+            }
+
+            // Release the gate: the suspended restart resumes, completes stopTransportLocked (whose
+            // polite-disconnect delay is 500ms — covered by the 1s below), and startTransportLocked
+            // creates the single fresh transport. isRestarting is reset in the finally block.
+            testDispatcher.scheduler.runCurrent()
+            advanceTimeBy(1_000L)
+
+            // Exactly 2 transports: 1 initial + 1 restart. A stacking bug would produce 3+.
             assertEquals(
-                1,
+                2,
                 gatedTransports.size,
-                "Second check must not create a transport while the first restart is in-flight",
+                "Exactly one fresh transport created after the restart resumes (1 initial + 1 restart)",
             )
-            assertTrue(initialTransport.closeCalled, "First transport close must have been entered by the restart")
             assertEquals(
                 1,
                 initialTransport.closeCount,
-                "close() entered exactly once (no stacking of close calls)",
+                "First transport still closed exactly once after restart completes",
             )
-            assertEquals(
-                0,
-                initialTransport.closeCompletedCount,
-                "close() must still be suspended (restart held in-flight) before releasing the gate",
-            )
+            assertEquals(1, initialTransport.closeCompletedCount, "First transport close completed exactly once")
         } finally {
-            // Release the gate unconditionally so the suspended restart can complete. tearDown
-            // also releases activeCloseGate, but completing it here is required for the post-finally
-            // assertions below to observe the resumed restart.
-            closeGate.complete(Unit)
+            service.disconnect()
+            advanceTimeBy(1_000L)
         }
-
-        // Release the gate: the suspended restart resumes, completes stopTransportLocked (whose
-        // polite-disconnect delay is 500ms — covered by the 1s below), and startTransportLocked
-        // creates the single fresh transport. isRestarting is reset in the finally block.
-        testDispatcher.scheduler.runCurrent()
-        advanceTimeBy(1_000L)
-
-        // Exactly 2 transports: 1 initial + 1 restart. A stacking bug would produce 3+.
-        assertEquals(
-            2,
-            gatedTransports.size,
-            "Exactly one fresh transport created after the restart resumes (1 initial + 1 restart)",
-        )
-        assertEquals(
-            1,
-            initialTransport.closeCount,
-            "First transport still closed exactly once after restart completes",
-        )
-        assertEquals(1, initialTransport.closeCompletedCount, "First transport close completed exactly once")
-
-        // Stop the heartbeat loop before exiting so tearDown never sees an active service.
-        service.disconnect()
-        advanceTimeBy(1_000L)
     }
 
     // ─── Non-BLE: Liveness does not mutate state ───────────────────────────────────────────────
@@ -418,19 +423,21 @@ class SharedRadioInterfaceServiceLivenessTest {
     fun `non-BLE transport liveness timeout does not close transport or change state`() = runTest(testDispatcher) {
         clock = 0L
         val service = createConnectedService("t192.168.1.100")
-        val stateBefore = service.connectionState.value
+        try {
+            val stateBefore = service.connectionState.value
 
-        clock = 65_000L
-        service.checkLiveness()
-        testDispatcher.scheduler.runCurrent()
-        advanceTimeBy(1_000L)
+            clock = 65_000L
+            service.checkLiveness()
+            testDispatcher.scheduler.runCurrent()
+            advanceTimeBy(1_000L)
 
-        assertEquals(stateBefore, service.connectionState.value, "Non-BLE state must not change")
-        assertFalse(createdTransports.first().closeCalled, "Non-BLE transport must NOT be closed")
-        assertEquals(1, createdTransports.size, "No restart should occur for non-BLE transport")
-
-        service.disconnect()
-        advanceTimeBy(1_000L)
+            assertEquals(stateBefore, service.connectionState.value, "Non-BLE state must not change")
+            assertFalse(createdTransports.first().closeCalled, "Non-BLE transport must NOT be closed")
+            assertEquals(1, createdTransports.size, "No restart should occur for non-BLE transport")
+        } finally {
+            service.disconnect()
+            advanceTimeBy(1_000L)
+        }
     }
 
     // ─── handleFromRadio resets the liveness timer ──────────────────────────────────────────────
@@ -440,30 +447,32 @@ class SharedRadioInterfaceServiceLivenessTest {
         clock = 0L
         val service = createConnectedService("xAA:BB:CC:DD:EE:FF")
 
-        // Advance 30s, then receive data (resets lastDataReceivedMillis to clock=30s)
-        clock = 30_000L
-        service.handleFromRadio(byteArrayOf(1, 2, 3))
+        try {
+            // Advance 30s, then receive data (resets lastDataReceivedMillis to clock=30s)
+            clock = 30_000L
+            service.handleFromRadio(byteArrayOf(1, 2, 3))
 
-        // 30s since last data → within 60s threshold → should NOT fire
-        clock = 60_000L
-        service.checkLiveness()
-        assertFalse(
-            createdTransports.first().closeCalled,
-            "Liveness must not fire when silence is within threshold after inbound data",
-        )
+            // 30s since last data → within 60s threshold → should NOT fire
+            clock = 60_000L
+            service.checkLiveness()
+            assertFalse(
+                createdTransports.first().closeCalled,
+                "Liveness must not fire when silence is within threshold after inbound data",
+            )
 
-        // 66s since last data (at t=30s) → past 60s threshold → should fire
-        clock = 96_000L
-        service.checkLiveness()
-        testDispatcher.scheduler.runCurrent()
-        advanceTimeBy(1_000L)
-        assertTrue(
-            createdTransports.first().closeCalled,
-            "Liveness should fire after silence exceeds threshold since last inbound data",
-        )
-
-        service.disconnect()
-        advanceTimeBy(1_000L)
+            // 66s since last data (at t=30s) → past 60s threshold → should fire
+            clock = 96_000L
+            service.checkLiveness()
+            testDispatcher.scheduler.runCurrent()
+            advanceTimeBy(1_000L)
+            assertTrue(
+                createdTransports.first().closeCalled,
+                "Liveness should fire after silence exceeds threshold since last inbound data",
+            )
+        } finally {
+            service.disconnect()
+            advanceTimeBy(1_000L)
+        }
     }
 
     @Test
@@ -471,16 +480,18 @@ class SharedRadioInterfaceServiceLivenessTest {
         clock = 0L
         val service = createConnectedService("xAA:BB:CC:DD:EE:FF")
 
-        service.onDisconnect(isPermanent = true)
-        assertFalse(service.connectionState.value == ConnectionState.Connected)
+        try {
+            service.onDisconnect(isPermanent = true)
+            assertFalse(service.connectionState.value == ConnectionState.Connected)
 
-        clock = 65_000L
-        service.checkLiveness()
-        testDispatcher.scheduler.runCurrent()
-        advanceTimeBy(1_000L)
-        assertFalse(createdTransports.first().closeCalled, "Liveness must not fire when not Connected")
-
-        service.disconnect()
-        advanceTimeBy(1_000L)
+            clock = 65_000L
+            service.checkLiveness()
+            testDispatcher.scheduler.runCurrent()
+            advanceTimeBy(1_000L)
+            assertFalse(createdTransports.first().closeCalled, "Liveness must not fire when not Connected")
+        } finally {
+            service.disconnect()
+            advanceTimeBy(1_000L)
+        }
     }
 }
