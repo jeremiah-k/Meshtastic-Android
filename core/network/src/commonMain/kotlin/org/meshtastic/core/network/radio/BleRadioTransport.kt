@@ -298,9 +298,7 @@ class BleRadioTransport(
             Logger.w(sessionFailureCause) {
                 "[$address] Session failed during profile setup — returning failed outcome"
             }
-            return BleReconnectPolicy.Outcome.Failed(
-                sessionFailureCause ?: RuntimeException("Session setup failed"),
-            )
+            return BleReconnectPolicy.Outcome.Failed(sessionFailureCause ?: RuntimeException("Session setup failed"))
         }
 
         // Wait for the StateFlow to actually reflect Connected before watching for the next
