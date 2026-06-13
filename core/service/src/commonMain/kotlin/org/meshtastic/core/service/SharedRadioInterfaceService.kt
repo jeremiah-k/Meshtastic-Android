@@ -143,6 +143,7 @@ class SharedRadioInterfaceService(
      * time source. Not a constructor parameter to avoid breaking Koin @Single annotation generation (which would try to
      * resolve `() -> Long` from the DI graph).
      */
+    @Volatile
     @Suppress("MemberVisibilityCanBePrivate")
     internal var clockMillis: () -> Long = { nowMillis }
 

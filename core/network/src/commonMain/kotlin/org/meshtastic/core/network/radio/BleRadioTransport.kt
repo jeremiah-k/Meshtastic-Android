@@ -168,9 +168,9 @@ class BleRadioTransport(
 
     @Volatile private var connectionStartTime: Long = 0
 
-    @Volatile private var packetsReceived: Int = 0
+    private val packetsReceived = atomic(0)
 
-    @Volatile private var packetsSent: Int = 0
+    private val packetsSent = atomic(0)
 
     @Volatile private var bytesReceived: Long = 0
 
@@ -591,11 +591,10 @@ class BleRadioTransport(
                         }
                 try {
                     retryBleOperation(tag = address) { currentService.sendToRadio(p) }
-                    packetsSent++
+                    val sent = packetsSent.incrementAndGet()
                     bytesSent += p.size
                     Logger.v {
-                        "[$address] Wrote packet #$packetsSent " +
-                            "to toRadio (${p.size} bytes, total TX: $bytesSent bytes)"
+                        "[$address] Wrote packet #$sent " + "to toRadio (${p.size} bytes, total TX: $bytesSent bytes)"
                     }
                 } catch (e: CancellationException) {
                     throw e
@@ -606,7 +605,7 @@ class BleRadioTransport(
                     if (currentService === radioService) {
                         Logger.w(e) {
                             "[$address] Failed to write packet to toRadioCharacteristic after " +
-                                "$packetsSent successful writes"
+                                "${packetsSent.value} successful writes"
                         }
                         handleFailure(e)
                     } else {
@@ -646,11 +645,10 @@ class BleRadioTransport(
     }
 
     private fun dispatchPacket(packet: ByteArray) {
-        packetsReceived++
+        val received = packetsReceived.incrementAndGet()
         bytesReceived += packet.size
         Logger.v {
-            "[$address] Dispatching packet #$packetsReceived " +
-                "(${packet.size} bytes, total RX: $bytesReceived bytes)"
+            "[$address] Dispatching packet #$received " + "(${packet.size} bytes, total RX: $bytesReceived bytes)"
         }
         callback.handleFromRadio(packet)
     }
@@ -692,8 +690,8 @@ class BleRadioTransport(
     private fun formatSessionStats(): String {
         val uptime = if (connectionStartTime > 0) nowMillis - connectionStartTime else 0
         return "Uptime: ${uptime}ms, " +
-            "Packets RX: $packetsReceived ($bytesReceived bytes), " +
-            "Packets TX: $packetsSent ($bytesSent bytes)"
+            "Packets RX: ${packetsReceived.value} ($bytesReceived bytes), " +
+            "Packets TX: ${packetsSent.value} ($bytesSent bytes)"
     }
 
     private fun Throwable.toDisconnectReason(): Pair<Boolean, String> {

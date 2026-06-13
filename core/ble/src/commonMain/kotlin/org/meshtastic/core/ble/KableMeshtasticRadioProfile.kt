@@ -109,6 +109,13 @@ class KableMeshtasticRadioProfile(private val service: BleService) : MeshtasticR
         }
     }
 
+    /**
+     * Observes the LOGRADIO characteristic. Session-fatal exceptions propagate to trigger reconnect.
+     *
+     * Note: a transient (non-fatal) observation error terminates this flow permanently for the current session. Unlike
+     * [fromRadio] which has a retry loop, [logRadio] does not recover from transient errors. This is intentional —
+     * logRadio is diagnostic-only, and the flow is recreated on the next reconnect cycle.
+     */
     override val logRadio: Flow<ByteArray> = flow {
         if (!service.hasCharacteristic(logRadioChar)) return@flow
         emitAll(

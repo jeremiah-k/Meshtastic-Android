@@ -89,9 +89,12 @@ private val FATAL_GATT_STATUSES =
 /**
  * Returns `true` if this throwable indicates the BLE session is irrecoverably broken and should be torn down
  * (triggering reconnection), as opposed to a transient condition that can be retried.
+ *
+ * Also checks the cause chain — if a session-fatal exception is wrapped inside another exception (e.g., by coroutine
+ * machinery or retry logic), it is still detected.
  */
 fun Throwable.isSessionFatalBleException(): Boolean = when (this) {
     is NotConnectedException -> true
     is GattStatusException -> status in FATAL_GATT_STATUSES
-    else -> false
+    else -> cause?.isSessionFatalBleException() ?: false
 }
