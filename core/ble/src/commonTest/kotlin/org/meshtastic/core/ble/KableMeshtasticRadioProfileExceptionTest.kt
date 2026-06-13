@@ -56,6 +56,18 @@ class KableMeshtasticRadioProfileExceptionTest {
     }
 
     @Test
+    fun `fromRadio propagates fatal GattStatusException to collector`() = runTest {
+        val service = createService()
+        val profile = KableMeshtasticRadioProfile(service)
+
+        // Fatal GATT status (133 = GATT_ERROR, in FATAL_GATT_STATUSES)
+        service.readException = GattStatusException(message = "GATT error", status = 133)
+
+        val result = assertFailsWith<GattStatusException> { profile.fromRadio.first() }
+        assertTrue(result.message!!.contains("GATT error"))
+    }
+
+    @Test
     fun `fromRadio propagates CancellationException`() = runTest {
         val service = createService()
         val profile = KableMeshtasticRadioProfile(service)

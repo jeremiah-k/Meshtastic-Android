@@ -19,6 +19,7 @@
 package org.meshtastic.core.network.radio
 
 import co.touchlab.kermit.Logger
+import kotlinx.atomicfu.atomic
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
@@ -155,8 +156,9 @@ class BleRadioTransport(
     // Guards against duplicate callbacks when multiple writes or a write + fromRadio failure
     // fire against the same stale session. Reset at the start of each attemptConnection().
     // Write-path failures are serialized by writeMutex; fromRadio/logRadio .catch handlers run
-    // on the flow collector coroutine and may race. Stale reads are benign (affect only dedup timing).
-    @Volatile private var sessionFailed = false
+    // on the flow collector coroutine and may race. Atomic CAS guarantees first-writer-wins —
+    // only the caller that wins the compareAndSet(false, true) fires onDisconnect.
+    private val sessionFailed = atomic(false)
 
     // Captures the exception that caused handleFailure() to tear down the session, so
     // attemptConnection() can distinguish an internal-failure disconnect from a genuine
@@ -258,7 +260,7 @@ class BleRadioTransport(
     @Suppress("CyclomaticComplexMethod", "LongMethod")
     private suspend fun attemptConnection(): BleReconnectPolicy.Outcome {
         connectionStartTime = nowMillis
-        sessionFailed = false
+        sessionFailed.value = false
         sessionFailureCause = null
         Logger.i { "[$address] BLE connection attempt started" }
 
@@ -363,16 +365,15 @@ class BleRadioTransport(
 
     private fun onDisconnected() {
         radioService = null
-        // If handleFailure already fired the disconnect callback for this session, don't fire a
-        // duplicate here. The forced disconnect() from handleFailure causes Kable to emit
-        // Disconnected, which routes here — without this guard the UI would see two onDisconnect
-        // calls (one with the real error message from handleFailure, one generic from here).
-        val alreadyHandled = sessionFailed
-        // Set the guard so a concurrent handleFailure (from fromRadio/logRadio .catch) does
-        // not fire a second callback during the same session-loss event.
-        sessionFailed = true
+        // Atomic first-writer-wins: if handleFailure already claimed this session's failure
+        // callback (or another onDisconnected raced), CAS returns false and we skip the
+        // duplicate. The forced disconnect() from handleFailure causes Kable to emit
+        // Disconnected, which routes here — without this guard the UI would see two
+        // onDisconnect calls (one with the real error message from handleFailure, one
+        // generic from here).
+        val firstWriter = sessionFailed.compareAndSet(expect = false, update = true)
         Logger.i { "[$address] BLE disconnected - ${formatSessionStats()}" }
-        if (!alreadyHandled) {
+        if (firstWriter) {
             // Signal immediately so the UI reflects the disconnect while reconnect continues.
             callback.onDisconnect(isPermanent = false)
         }
@@ -545,10 +546,10 @@ class BleRadioTransport(
         // Never surface it as a user-facing disconnect error.
         if (throwable is CancellationException) return
 
-        // Deduplicate: only the first failure per connection attempt triggers session teardown.
-        // Heartbeat writes that arrive after the first failure must not spam callbacks.
-        if (sessionFailed) return
-        sessionFailed = true
+        // Deduplicate via atomic CAS: only the first failure per connection attempt triggers
+        // session teardown. Heartbeat writes that arrive after the first failure must not spam
+        // callbacks. compareAndSet(false, true) returns true iff THIS caller is the first.
+        if (!sessionFailed.compareAndSet(expect = false, update = true)) return
         sessionFailureCause = throwable
 
         // Tear down stale session state immediately so future writes fail-fast without retrying

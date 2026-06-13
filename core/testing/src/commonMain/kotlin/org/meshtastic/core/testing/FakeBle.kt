@@ -196,10 +196,16 @@ class FakeBleService : BleService {
     /** When non-null, [write] throws this exception on every call until explicitly cleared. */
     var writeException: Exception? = null
 
-    /** When non-null, [read] throws this exception instead of returning data. Reset to null after throw. */
+    /**
+     * When non-null, [read] throws this exception instead of returning data. Reset to null before throwing (in the same
+     * call).
+     */
     var readException: Exception? = null
 
-    /** When non-null, [observe] returns a flow that immediately throws. Reset to null after. */
+    /**
+     * When non-null, [observe] returns a flow that immediately throws. Reset to null when observe() is called (before
+     * flow collection).
+     */
     var observeException: Exception? = null
 
     override fun hasCharacteristic(characteristic: BleCharacteristic): Boolean =

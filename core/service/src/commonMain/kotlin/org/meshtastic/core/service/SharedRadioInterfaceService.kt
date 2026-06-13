@@ -347,8 +347,12 @@ class SharedRadioInterfaceService(
                     "(threshold: ${LIVENESS_TIMEOUT_MILLIS}ms). Treating as disconnect."
             }
 
-            // Only BLE transports suffer from silent zombie sessions (no disconnect signal from stack).
-            // TCP/serial/mock can legitimately idle >60s without inbound data.
+            // "Silence" = lastDataReceivedMillis not updated by handleFromRadio (no inbound
+            // packets). Only BLE suffers from silent zombie sessions (no disconnect signal from
+            // stack). Healthy TCP/serial firmware responds to heartbeat ToRadio with a queueStatus
+            // FromRadio packet, so they should not go silent past LIVENESS_TIMEOUT_MILLIS.
+            // MockRadioTransport.handleSendToRadio ignores heartbeat traffic, so mock sessions can
+            // false-positive here — acceptable for debug-only transport.
             if (runningTransportId != InterfaceId.BLUETOOTH) {
                 // Non-BLE: emit the disconnect notification (no restart mechanism for these transports).
                 onDisconnect(isPermanent = false, errorMessage = "Connection timeout — no data received")
