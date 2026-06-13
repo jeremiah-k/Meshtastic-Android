@@ -78,12 +78,6 @@ class SharedRadioInterfaceService(
     private val radioPrefs: RadioPrefs,
     private val transportFactory: RadioTransportFactory,
     private val analytics: PlatformAnalytics,
-    /**
-     * Injectable clock for deterministic testing. Defaults to [nowMillis] in production. Used by [onConnect],
-     * [handleFromRadio], [checkLiveness], and [keepAlive] so all four share one coherent time source — mixing real
-     * wall-clock with injected test time produces negative silence durations and false test results.
-     */
-    private val clockMillis: () -> Long = { nowMillis },
 ) : RadioInterfaceService {
 
     override val supportedDeviceTypes: List<DeviceType>
@@ -142,6 +136,15 @@ class SharedRadioInterfaceService(
     private var lastHeartbeatMillis = 0L
 
     @Volatile private var lastDataReceivedMillis = 0L
+
+    /**
+     * Internal test seam for deterministic clock injection. Production uses [nowMillis]; tests override this to a
+     * controllable clock so [onConnect], [handleFromRadio], [checkLiveness], and [keepAlive] all share one coherent
+     * time source. Not a constructor parameter to avoid breaking Koin @Single annotation generation (which would try to
+     * resolve `() -> Long` from the DI graph).
+     */
+    @Suppress("MemberVisibilityCanBePrivate")
+    internal var clockMillis: () -> Long = { nowMillis }
 
     /** The current time from the injected clock. */
     private fun now(): Long = clockMillis()

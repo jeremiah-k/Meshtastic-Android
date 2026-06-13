@@ -32,9 +32,11 @@ class FakeBleServiceFailureInjectionTest {
     @Test
     fun writeExceptionIsPersistent() = runTest {
         service.writeException = Exception("write-fail")
-        assertFailsWith<Exception> { service.write(char, ByteArray(0), BleWriteType.WITH_RESPONSE) }
+        val ex1 = assertFailsWith<Exception> { service.write(char, ByteArray(0), BleWriteType.WITH_RESPONSE) }
+        assertTrue(ex1.message == "write-fail", "Expected write-fail message")
         // Prove persistence — second write also throws because exception persists
-        assertFailsWith<Exception> { service.write(char, ByteArray(1), BleWriteType.WITH_RESPONSE) }
+        val ex2 = assertFailsWith<Exception> { service.write(char, ByteArray(1), BleWriteType.WITH_RESPONSE) }
+        assertTrue(ex2.message == "write-fail", "Expected write-fail message on second call")
         // tests must explicitly clear it
         service.writeException = null
         service.write(char, ByteArray(2), BleWriteType.WITH_RESPONSE)
@@ -45,7 +47,7 @@ class FakeBleServiceFailureInjectionTest {
     fun readExceptionIsThrownAndReset() = runTest {
         service.readException = Exception("read-fail")
         assertFailsWith<Exception> { service.read(char) }
-        assertTrue(service.read(char).isEmpty()) // normal after reset
+        assertTrue(service.read(char).isEmpty(), "Read should return empty after exception reset")
     }
 
     @Test

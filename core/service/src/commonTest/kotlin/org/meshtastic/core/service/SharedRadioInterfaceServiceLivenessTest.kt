@@ -20,6 +20,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
 import dev.mokkery.MockMode
+import dev.mokkery.answering.calls
 import dev.mokkery.answering.returns
 import dev.mokkery.every
 import dev.mokkery.matcher.any
@@ -28,6 +29,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.meshtastic.core.di.CoroutineDispatchers
 import org.meshtastic.core.model.ConnectionState
@@ -38,7 +40,6 @@ import org.meshtastic.core.repository.RadioTransportFactory
 import org.meshtastic.core.testing.FakeBluetoothRepository
 import org.meshtastic.core.testing.FakeRadioPrefs
 import org.meshtastic.core.testing.FakeRadioTransport
-import java.util.concurrent.atomic.AtomicLong
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -47,8 +48,8 @@ import kotlin.test.assertTrue
 /**
  * Service-level tests for [SharedRadioInterfaceService] liveness detection.
  *
- * Uses a controllable clock injected via the constructor so [onConnect], [handleFromRadio], and [checkLiveness] all
- * share one coherent time source — no mixing of real wall-clock with virtual test time.
+ * Uses a controllable clock via [SharedRadioInterfaceService.clockMillis] so [onConnect], [handleFromRadio], and
+ * [checkLiveness] all share one coherent time source — no mixing of real wall-clock with test time.
  *
  * A counting transport factory returns a fresh [FakeRadioTransport] per createTransport() call so we can observe how
  * many restarts actually occurred.
@@ -79,7 +80,7 @@ class SharedRadioInterfaceServiceLivenessTest {
     private val processLifecycleOwner = TestLifecycleOwner()
 
     /** Controllable clock — tests advance this manually so all time comparisons are deterministic. */
-    private val clock = AtomicLong(0L)
+    private var clock: Long = 0L
 
     /** Tracks all transports created by the factory so we can count restarts and inspect sent data. */
     private val createdTransports = mutableListOf<FakeRadioTransport>()
@@ -98,7 +99,7 @@ class SharedRadioInterfaceServiceLivenessTest {
         every { transportFactory.isMockTransport() } returns false
         every { transportFactory.isAddressValid(any()) } returns true
         every { transportFactory.toInterfaceAddress(any(), any()) } returns address
-        every { transportFactory.createTransport(any(), any()) } answers
+        every { transportFactory.createTransport(any(), any()) } calls
             {
                 FakeRadioTransport().also { createdTransports.add(it) }
             }
@@ -114,8 +115,8 @@ class SharedRadioInterfaceServiceLivenessTest {
                 radioPrefs = radioPrefs,
                 transportFactory = transportFactory,
                 analytics = analytics,
-                clockMillis = { clock.get() },
             )
+        service.clockMillis = { clock }
         service.connect()
         service.onConnect()
         return service
@@ -125,13 +126,13 @@ class SharedRadioInterfaceServiceLivenessTest {
 
     @Test
     fun `BLE liveness timeout closes old transport and creates fresh one`() = runTest(testDispatcher) {
-        clock.set(0L)
+        clock = 0L
         val service = createConnectedService("xAA:BB:CC:DD:EE:FF")
         assertEquals(1, createdTransports.size, "Initial connect should create one transport")
 
-        // Advance clock past 60s liveness threshold
-        clock.set(65_000L)
+        clock = 65_000L
         service.checkLiveness()
+        advanceUntilIdle()
 
         assertTrue(createdTransports.size >= 2, "Liveness restart should create a fresh transport")
         assertTrue(createdTransports.first().closeCalled, "Old transport must be closed")
@@ -140,11 +141,12 @@ class SharedRadioInterfaceServiceLivenessTest {
 
     @Test
     fun `BLE liveness restart does not emit permanent Disconnected`() = runTest(testDispatcher) {
-        clock.set(0L)
+        clock = 0L
         val service = createConnectedService("xAA:BB:CC:DD:EE:FF")
 
-        clock.set(65_000L)
+        clock = 65_000L
         service.checkLiveness()
+        advanceUntilIdle()
 
         assertFalse(
             service.connectionState.value == ConnectionState.Disconnected,
@@ -154,14 +156,15 @@ class SharedRadioInterfaceServiceLivenessTest {
 
     @Test
     fun `BLE liveness restart does not send polite disconnect into zombie transport`() = runTest(testDispatcher) {
-        clock.set(0L)
+        clock = 0L
         val service = createConnectedService("xAA:BB:CC:DD:EE:FF")
         val oldTransport = createdTransports.first()
 
         oldTransport.sentData.clear()
 
-        clock.set(65_000L)
+        clock = 65_000L
         service.checkLiveness()
+        advanceUntilIdle()
 
         assertTrue(
             oldTransport.sentData.isEmpty(),
@@ -171,14 +174,16 @@ class SharedRadioInterfaceServiceLivenessTest {
 
     @Test
     fun `BLE repeated liveness checks do not stack restarts`() = runTest(testDispatcher) {
-        clock.set(0L)
+        clock = 0L
         val service = createConnectedService("xAA:BB:CC:DD:EE:FF")
 
-        clock.set(65_000L)
+        clock = 65_000L
         service.checkLiveness()
+        advanceUntilIdle()
 
-        clock.set(66_000L)
+        clock = 66_000L
         service.checkLiveness()
+        advanceUntilIdle()
 
         val firstTransportCloses = createdTransports.firstOrNull()?.closeCount ?: 0
         assertTrue(firstTransportCloses <= 1, "First transport should be closed at most once (no stacking)")
@@ -188,12 +193,13 @@ class SharedRadioInterfaceServiceLivenessTest {
 
     @Test
     fun `non-BLE transport liveness timeout does not close transport or change state`() = runTest(testDispatcher) {
-        clock.set(0L)
+        clock = 0L
         val service = createConnectedService("t192.168.1.100")
         val stateBefore = service.connectionState.value
 
-        clock.set(65_000L)
+        clock = 65_000L
         service.checkLiveness()
+        advanceUntilIdle()
 
         assertEquals(stateBefore, service.connectionState.value, "Non-BLE state must not change")
         assertFalse(createdTransports.first().closeCalled, "Non-BLE transport must NOT be closed")
@@ -204,15 +210,15 @@ class SharedRadioInterfaceServiceLivenessTest {
 
     @Test
     fun `inbound data resets liveness timer so timeout does not fire`() = runTest(testDispatcher) {
-        clock.set(0L)
+        clock = 0L
         val service = createConnectedService("xAA:BB:CC:DD:EE:FF")
 
         // Advance 30s, then receive data (resets lastDataReceivedMillis to clock=30s)
-        clock.set(30_000L)
+        clock = 30_000L
         service.handleFromRadio(byteArrayOf(1, 2, 3))
 
         // 30s since last data → within 60s threshold → should NOT fire
-        clock.set(60_000L)
+        clock = 60_000L
         service.checkLiveness()
         assertFalse(
             createdTransports.first().closeCalled,
@@ -220,8 +226,9 @@ class SharedRadioInterfaceServiceLivenessTest {
         )
 
         // 66s since last data (at t=30s) → past 60s threshold → should fire
-        clock.set(96_000L)
+        clock = 96_000L
         service.checkLiveness()
+        advanceUntilIdle()
         assertTrue(
             createdTransports.first().closeCalled,
             "Liveness should fire after silence exceeds threshold since last inbound data",
@@ -230,14 +237,15 @@ class SharedRadioInterfaceServiceLivenessTest {
 
     @Test
     fun `BLE liveness does not fire when connection state is not Connected`() = runTest(testDispatcher) {
-        clock.set(0L)
+        clock = 0L
         val service = createConnectedService("xAA:BB:CC:DD:EE:FF")
 
         service.onDisconnect(isPermanent = true)
         assertFalse(service.connectionState.value == ConnectionState.Connected)
 
-        clock.set(65_000L)
+        clock = 65_000L
         service.checkLiveness()
+        advanceUntilIdle()
         assertFalse(createdTransports.first().closeCalled, "Liveness must not fire when not Connected")
     }
 }

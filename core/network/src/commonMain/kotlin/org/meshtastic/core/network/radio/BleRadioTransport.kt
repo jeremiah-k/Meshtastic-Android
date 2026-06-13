@@ -332,6 +332,18 @@ class BleRadioTransport(
         if (connectedReached == null) {
             val failure = sessionFailureCause ?: RuntimeException("Timed out waiting for Connected state gate")
             Logger.w(failure) { "[$address] Session failed before Connected gate — returning failed outcome" }
+            // CRITICAL: force GATT cleanup before returning Failed so we don't start a new
+            // attempt over an uncleared session. Without this, a timeout caused by flow lag or
+            // a stale-Disconnected state mismatch would leave a live/half-live GATT handle behind.
+            radioService = null
+            isFullyConnected = false
+            withContext(NonCancellable) {
+                try {
+                    bleConnection.disconnect()
+                } catch (ignored: Exception) {
+                    Logger.w(ignored) { "[$address] disconnect() failed during Connected-gate timeout cleanup" }
+                }
+            }
             return BleReconnectPolicy.Outcome.Failed(failure)
         }
 
@@ -449,6 +461,8 @@ class BleRadioTransport(
         } catch (e: CancellationException) {
             // Scope was cancelled externally — still ensure GATT cleanup runs so we don't
             // leak a BluetoothGatt handle and trigger GATT status 133 on the next attempt.
+            radioService = null
+            isFullyConnected = false
             withContext(NonCancellable) {
                 try {
                     bleConnection.disconnect()
@@ -459,8 +473,10 @@ class BleRadioTransport(
             throw e
         } catch (e: Exception) {
             Logger.w(e) { "[$address] Profile service discovery or operation failed" }
-            // Disconnect to let the outer reconnect loop see a clean Disconnected state.
-            // Do NOT call handleFailure here — the reconnect loop owns failure counting.
+            // Clear stale state so the next attempt starts clean — if failure happened after
+            // radioService assignment but before callback.onConnect(), stale state would survive.
+            radioService = null
+            isFullyConnected = false
             withContext(NonCancellable) {
                 try {
                     bleConnection.disconnect()
