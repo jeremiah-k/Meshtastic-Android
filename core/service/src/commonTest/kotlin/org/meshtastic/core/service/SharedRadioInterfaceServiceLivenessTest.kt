@@ -29,6 +29,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
@@ -151,7 +152,7 @@ class SharedRadioInterfaceServiceLivenessTest {
         service.checkLiveness()
         advanceUntilIdle()
 
-        assertTrue(createdTransports.size >= 2, "Liveness restart should create a fresh transport")
+        assertEquals(2, createdTransports.size, "Liveness restart should create exactly one fresh transport")
         assertTrue(createdTransports.first().closeCalled, "Old transport must be closed")
         assertEquals(1, createdTransports.first().closeCount, "Old transport closed exactly once")
     }
@@ -161,13 +162,20 @@ class SharedRadioInterfaceServiceLivenessTest {
         clock = 0L
         val service = createConnectedService("xAA:BB:CC:DD:EE:FF")
 
+        // Capture all state transitions during the liveness recovery
+        val stateEmissions = mutableListOf<ConnectionState>()
+        val collectJob = backgroundScope.launch { service.connectionState.collect { stateEmissions.add(it) } }
+
         clock = 65_000L
         service.checkLiveness()
         advanceUntilIdle()
 
+        collectJob.cancel()
+
+        // Recovery must NEVER emit permanent Disconnected
         assertFalse(
-            service.connectionState.value == ConnectionState.Disconnected,
-            "Automatic recovery must not emit permanent Disconnected state",
+            ConnectionState.Disconnected in stateEmissions,
+            "Automatic recovery must not emit permanent Disconnected state " + "(emitted: $stateEmissions)",
         )
     }
 
@@ -203,7 +211,7 @@ class SharedRadioInterfaceServiceLivenessTest {
         advanceUntilIdle()
 
         val firstTransportCloses = createdTransports.firstOrNull()?.closeCount ?: 0
-        assertTrue(firstTransportCloses <= 1, "First transport should be closed at most once (no stacking)")
+        assertEquals(1, firstTransportCloses, "First transport should be closed exactly once (no stacking)")
     }
 
     // ─── Non-BLE: Liveness does not mutate state ───────────────────────────────────────────────

@@ -89,6 +89,14 @@ private val GATT_CLEANUP_TIMEOUT = 5.seconds
 private val CONNECTED_GATE_TIMEOUT = 5.seconds
 
 /**
+ * Bounded wait for FROMNUM CCCD subscription before proceeding with the handshake.
+ *
+ * In normal operation the observe callback fires within milliseconds. If a fatal fromRadio failure fires before
+ * subscriptionReady completes, this timeout prevents a permanent hang.
+ */
+private val SUBSCRIPTION_READY_TIMEOUT = 5.seconds
+
+/**
  * Delay after onConnect before downgrading BLE connection priority to Balanced.
  *
  * The initial config drain (fromRadio burst) typically completes within 2–5 seconds on most devices, but slower radios
@@ -142,7 +150,12 @@ class BleRadioTransport(
         }
         // Guard: use the same CAS dedup as handleFailure/onDisconnected so an uncaught
         // exception doesn't produce a duplicate onDisconnect after handleFailure already fired.
-        if (sessionFailed.compareAndSet(expect = false, update = true)) {
+        // Also set sessionFailureCause so attemptConnection treats the forced disconnect as
+        // an internal failure (not user-initiated LocalDisconnect).
+        if (throwable !is CancellationException && sessionFailed.compareAndSet(expect = false, update = true)) {
+            sessionFailureCause = throwable
+            radioService = null
+            isFullyConnected = false
             val (isPermanent, msg) = throwable.toDisconnectReason()
             callback.onDisconnect(isPermanent, errorMessage = msg)
         }
@@ -426,7 +439,7 @@ class BleRadioTransport(
         }
     }
 
-    @Suppress("LongMethod")
+    @Suppress("LongMethod", "ThrowsCount")
     private suspend fun discoverServicesAndSetupCharacteristics() {
         try {
             bleConnection.profile(serviceUuid = SERVICE_UUID) { service ->
@@ -459,7 +472,15 @@ class BleRadioTransport(
                 Logger.i { "[$address] Profile service active and characteristics subscribed" }
 
                 // Wait for FROMNUM CCCD write before triggering the Meshtastic handshake.
-                radioService.awaitSubscriptionReady()
+                // Bounded: if fromRadio fails before subscriptionReady completes, handleFailure
+                // sets sessionFailureCause. The timeout prevents a hang — we check sessionFailed
+                // and throw a retryable setup failure if the session is already dead.
+                withTimeoutOrNull(SUBSCRIPTION_READY_TIMEOUT) { radioService.awaitSubscriptionReady() }
+                if (sessionFailed.value) {
+                    val cause = sessionFailureCause ?: RuntimeException("Session failed before subscription ready")
+                    Logger.w(cause) { "[$address] Session failed during subscription wait — aborting setup" }
+                    throw cause
+                }
 
                 // Log negotiated MTU for diagnostics
                 val maxLen = bleConnection.maximumWriteValueLength(BleWriteType.WITHOUT_RESPONSE)

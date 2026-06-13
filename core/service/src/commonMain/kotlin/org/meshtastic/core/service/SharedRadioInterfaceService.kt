@@ -356,20 +356,21 @@ class SharedRadioInterfaceService(
 
         val silenceMs = now() - lastDataReceivedMillis
         if (silenceMs > LIVENESS_TIMEOUT_MILLIS) {
-            Logger.w {
-                "Liveness check failed: no data received for ${silenceMs}ms " +
-                    "(threshold: ${LIVENESS_TIMEOUT_MILLIS}ms). Treating as disconnect."
-            }
-
             // "Silence" = lastDataReceivedMillis not updated by handleFromRadio (no inbound
             // packets). Only BLE suffers from silent zombie sessions (no disconnect signal from
             // stack), so the liveness-restart path is BLE-only. For non-BLE transports we return
             // WITHOUT emitting a disconnect or mutating ConnectionState — there is no
             // transport-level timeout contract proving that silence past this threshold means
-            // the session is dead. Healthy TCP/serial firmware responds to heartbeat ToRadio with
-            // a queueStatus FromRadio packet, so true silence likely indicates a different issue
-            // that the transport's own reconnect mechanism handles.
-            if (runningTransportId != InterfaceId.BLUETOOTH) return
+            // the session is dead.
+            if (runningTransportId != InterfaceId.BLUETOOTH) {
+                Logger.d { "Ignoring liveness timeout for non-BLE transport (silence: ${silenceMs}ms)" }
+                return
+            }
+
+            Logger.w {
+                "Liveness check failed: no data received for ${silenceMs}ms " +
+                    "(threshold: ${LIVENESS_TIMEOUT_MILLIS}ms). Restarting BLE transport."
+            }
 
             // Force transport restart to recover from silent zombie sessions where the BLE stack
             // did not report a disconnect. Uses the same processLifecycle scope and transportMutex
