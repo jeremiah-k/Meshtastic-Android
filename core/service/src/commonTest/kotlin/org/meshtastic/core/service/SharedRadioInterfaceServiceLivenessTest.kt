@@ -82,7 +82,7 @@ class SharedRadioInterfaceServiceLivenessTest {
         processLifecycleOwner.destroy()
         // Allow pending cancellation to propagate before resetting the Main dispatcher.
         // Without this, resetMain() can prevent the cancellation from reaching collectors.
-        testDispatcher.advanceUntilIdle()
+        testDispatcher.scheduler.advanceUntilIdle()
         Dispatchers.resetMain()
     }
 

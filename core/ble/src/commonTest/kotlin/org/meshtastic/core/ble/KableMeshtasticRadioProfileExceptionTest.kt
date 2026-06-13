@@ -20,6 +20,7 @@ import com.juul.kable.GattStatusException
 import com.juul.kable.NotConnectedException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -138,8 +139,17 @@ class KableMeshtasticRadioProfileExceptionTest {
         // before subscriptionReady is completed. The fix completes it exceptionally.
         service.observeException = NotConnectedException("observe failed before CCCD")
 
-        // Start collecting fromRadio (triggers the observe + launch)
-        val collectJob = launch { profile.fromRadio.collect {} }
+        // Start collecting fromRadio in a SupervisorJob so the propagated exception doesn't
+        // crash the test scope. The channelFlow propagates the observe failure, which also
+        // triggers subscriptionReady.completeExceptionally(e).
+        val collectJob =
+            launch(SupervisorJob()) {
+                try {
+                    profile.fromRadio.collect {}
+                } catch (e: Exception) {
+                    // Expected — the observe failure propagates through the channelFlow
+                }
+            }
         advanceUntilIdle()
 
         // awaitSubscriptionReady should throw the exception promptly, not hang
