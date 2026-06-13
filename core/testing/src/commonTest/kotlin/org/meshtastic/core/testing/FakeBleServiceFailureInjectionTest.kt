@@ -17,6 +17,7 @@
 package org.meshtastic.core.testing
 
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeoutOrNull
@@ -71,13 +72,7 @@ class FakeBleServiceFailureInjectionTest {
 
         var subscribed = false
         service.emitNotification(otherChar.uuid, byteArrayOf(1))
-        withTimeoutOrNull(100) {
-            service
-                .observe(otherChar) { subscribed = true }
-                .collect {
-                    return@withTimeoutOrNull
-                }
-        }
+        withTimeoutOrNull(100) { service.observe(otherChar) { subscribed = true }.first() }
         assertTrue(subscribed, "Other characteristic should still subscribe normally")
     }
 

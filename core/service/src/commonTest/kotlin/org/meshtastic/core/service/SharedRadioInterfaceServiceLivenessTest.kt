@@ -31,7 +31,6 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.resetMain
@@ -88,7 +87,10 @@ class SharedRadioInterfaceServiceLivenessTest {
         // CRITICAL: Stop every service's heartbeat loop and transport. Destroying the process
         // lifecycle below does NOT cancel SharedRadioInterfaceService._serviceScope, so leaked
         // heartbeat loops would otherwise keep the forked test JVM alive between tests.
-        runBlocking { services.forEach { it.disconnect() } }
+        // NOTE: Cannot use runBlocking { services.forEach { it.disconnect() } } here — it
+        // deadlocks on Robolectric's main thread (androidHostTest target). Each test body
+        // already calls service.disconnect() + advanceTimeBy before exiting; this safety net
+        // is only for the failure path where a test throws before reaching disconnect().
         services.clear()
         createdTransports.clear()
         // CRITICAL: Destroy the lifecycle to cancel processLifecycle.coroutineScope and all
