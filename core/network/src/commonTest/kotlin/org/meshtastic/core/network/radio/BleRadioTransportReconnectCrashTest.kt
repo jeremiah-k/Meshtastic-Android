@@ -40,6 +40,7 @@ import org.meshtastic.core.ble.BleService
 import org.meshtastic.core.ble.BleWriteType
 import org.meshtastic.core.ble.DisconnectReason
 import org.meshtastic.core.ble.MeshtasticBleConstants.FROMNUM_CHARACTERISTIC
+import org.meshtastic.core.ble.MeshtasticBleConstants.FROMRADIO_CHARACTERISTIC
 import org.meshtastic.core.ble.MeshtasticBleConstants.SERVICE_UUID
 import org.meshtastic.core.testing.FakeBleConnection
 import org.meshtastic.core.testing.FakeBleConnectionFactory
@@ -628,11 +629,13 @@ class BleRadioTransportReconnectCrashTest {
         val device = FakeBleDevice(address = address, name = "Test Radio")
         bluetoothRepository.bond(device)
 
-        // Register FROMNUM before start() so the profile's observe collector is set up during
-        // discoverServicesAndSetupCharacteristics. Without this, hasCharacteristic(FROMNUM)
-        // returns false at setup time, no collector is established, and emitNotification
-        // below would fire into a void.
+        // Register FROMNUM + FROMRADIO before start() so the profile's observe collector and read
+        // loop are set up during discoverServicesAndSetupCharacteristics. Without FROMNUM, no
+        // notification collector is established (emitNotification fires into a void). Without
+        // FROMRADIO, hasCharacteristic(fromRadioChar) returns false and the read loop skips before
+        // readException can fire.
         connection.service.addCharacteristic(FROMNUM_CHARACTERISTIC)
+        connection.service.addCharacteristic(FROMRADIO_CHARACTERISTIC)
 
         val bleTransport =
             BleRadioTransport(
@@ -681,9 +684,10 @@ class BleRadioTransportReconnectCrashTest {
         val device = FakeBleDevice(address = address, name = "Test Radio")
         bluetoothRepository.bond(device)
 
-        // Register FROMNUM before start() so the profile's observe collector is set up during
-        // discoverServicesAndSetupCharacteristics. See the read-failure test above for details.
+        // Register FROMNUM + FROMRADIO before start() so both read and write failure paths can
+        // fire. See the read-failure test above for details.
         connection.service.addCharacteristic(FROMNUM_CHARACTERISTIC)
+        connection.service.addCharacteristic(FROMRADIO_CHARACTERISTIC)
 
         var onDisconnectCalls = 0
         every { service.onDisconnect(any(), any()) } calls { onDisconnectCalls++ }
