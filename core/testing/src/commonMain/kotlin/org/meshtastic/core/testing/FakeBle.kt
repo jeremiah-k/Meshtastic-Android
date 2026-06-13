@@ -24,6 +24,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.onStart
 import org.meshtastic.core.ble.BleCharacteristic
 import org.meshtastic.core.ble.BleConnection
 import org.meshtastic.core.ble.BleConnectionFactory
@@ -218,6 +219,22 @@ class FakeBleService : BleService {
             return flow { throw ex }
         }
         return notificationFlows.getOrPut(characteristic.uuid) { MutableSharedFlow(extraBufferCapacity = 16) }
+    }
+
+    /**
+     * Overrides the 2-arg observe to prevent false subscriptionReady when testing pre-readiness failures.
+     *
+     * The default BleService implementation calls `observe(characteristic).onStart { onSubscription() }`, which invokes
+     * [onSubscription] BEFORE the observeException flow throws. This override throws BEFORE invoking [onSubscription],
+     * correctly simulating "observe failed before CCCD/subscription readiness."
+     */
+    override fun observe(characteristic: BleCharacteristic, onSubscription: suspend () -> Unit): Flow<ByteArray> {
+        val ex = observeException
+        if (ex != null) {
+            observeException = null
+            return flow { throw ex } // onSubscription is NOT invoked
+        }
+        return observe(characteristic).onStart { onSubscription() }
     }
 
     override suspend fun read(characteristic: BleCharacteristic): ByteArray {

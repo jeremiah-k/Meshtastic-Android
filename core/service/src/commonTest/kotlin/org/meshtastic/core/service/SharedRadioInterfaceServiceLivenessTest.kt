@@ -228,19 +228,14 @@ class SharedRadioInterfaceServiceLivenessTest {
 
     @Test
     fun `BLE in-flight liveness restart prevents overlapping restart via isRestarting`() = runTest(testDispatcher) {
-        // This test verifies isRestarting prevents overlapping restarts. The simple stacking test
-        // above (which calls checkLiveness twice with advanceUntilIdle) doesn't prove the guard
-        // during an in-flight restart — it just proves no double-close after a completed restart.
-        //
-        // We can't easily make FakeRadioTransport.close() suspend with the existing test infra
-        // (the factory is mocked, not subclassed). Instead, we verify the isRestarting CAS
-        // behavior by calling checkLiveness() twice WITHOUT advanceUntilIdle between calls.
-        // On UnconfinedTestDispatcher, processLifecycle.coroutineScope.launch executes eagerly,
-        // so the restart coroutine starts immediately. The first checkLiveness wins the CAS
-        // and launches the restart. The second checkLiveness (same dispatcher tick) should find
-        // isRestarting still true (or the restart already completed).
+        // This test verifies the end-state (no stacking) rather than strictly isolating the
+        // isRestarting CAS guard. With UnconfinedTestDispatcher, the restart coroutine runs
+        // eagerly — the second checkLiveness() returns early because connectionState is
+        // DeviceSleep (not Connected), not because isRestarting blocks it.
         //
         // Key assertion: exactly 2 transports created (1 initial + 1 restart), proving no stacking.
+        // To truly test the CAS in isolation, use a suspending restart via CompletableDeferred
+        // or a custom dispatcher that delays mid-restart.
         clock = 0L
         val service = createConnectedService("xAA:BB:CC:DD:EE:FF")
 
