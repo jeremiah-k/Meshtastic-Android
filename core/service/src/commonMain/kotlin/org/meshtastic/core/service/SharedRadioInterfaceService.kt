@@ -332,15 +332,17 @@ class SharedRadioInterfaceService(
     }
 
     /**
-     * Detects zombie connections where the BLE stack didn't report a disconnect.
+     * Detects zombie connections where the BLE stack didn't reported a disconnect.
      *
      * If we believe we're connected but haven't received any data from the radio within [LIVENESS_TIMEOUT_MILLIS], the
      * connection is likely dead. Signal a non-permanent disconnect so the reconnect machinery can take over.
+     *
+     * @param now Injected clock value for testability. Defaults to [nowMillis] in production.
      */
-    private fun checkLiveness() {
+    internal fun checkLiveness(now: Long = nowMillis) {
         if (_connectionState.value != ConnectionState.Connected) return
 
-        val silenceMs = nowMillis - lastDataReceivedMillis
+        val silenceMs = now - lastDataReceivedMillis
         if (silenceMs > LIVENESS_TIMEOUT_MILLIS) {
             Logger.w {
                 "Liveness check failed: no data received for ${silenceMs}ms " +
@@ -349,15 +351,13 @@ class SharedRadioInterfaceService(
 
             // "Silence" = lastDataReceivedMillis not updated by handleFromRadio (no inbound
             // packets). Only BLE suffers from silent zombie sessions (no disconnect signal from
-            // stack). Healthy TCP/serial firmware responds to heartbeat ToRadio with a queueStatus
-            // FromRadio packet, so they should not go silent past LIVENESS_TIMEOUT_MILLIS.
-            // MockRadioTransport.handleSendToRadio ignores heartbeat traffic, so mock sessions can
-            // false-positive here — acceptable for debug-only transport.
-            if (runningTransportId != InterfaceId.BLUETOOTH) {
-                // Non-BLE: emit the disconnect notification (no restart mechanism for these transports).
-                onDisconnect(isPermanent = false, errorMessage = "Connection timeout — no data received")
-                return
-            }
+            // stack), so the liveness-restart path is BLE-only. For non-BLE transports we return
+            // WITHOUT emitting a disconnect or mutating ConnectionState — there is no
+            // transport-level timeout contract proving that silence past this threshold means
+            // the session is dead. Healthy TCP/serial firmware responds to heartbeat ToRadio with
+            // a queueStatus FromRadio packet, so true silence likely indicates a different issue
+            // that the transport's own reconnect mechanism handles.
+            if (runningTransportId != InterfaceId.BLUETOOTH) return
 
             // Force transport restart to recover from silent zombie sessions where the BLE stack
             // did not report a disconnect. Uses the same processLifecycle scope and transportMutex

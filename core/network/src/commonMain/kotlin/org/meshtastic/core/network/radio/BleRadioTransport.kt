@@ -257,7 +257,7 @@ class BleRadioTransport(
      * Finds the device, bonds if needed, connects, discovers services, and waits for disconnect. Returns a
      * [BleReconnectPolicy.Outcome] describing how the connection ended.
      */
-    @Suppress("CyclomaticComplexMethod", "LongMethod")
+    @Suppress("CyclomaticComplexMethod", "LongMethod", "ReturnCount")
     private suspend fun attemptConnection(): BleReconnectPolicy.Outcome {
         connectionStartTime = nowMillis
         sessionFailed.value = false
@@ -308,7 +308,22 @@ class BleRadioTransport(
         // peripheral state, but our _connectionState observer runs on a separate coroutine and
         // may lag. Without this gate the next .first { Disconnected } below could match the
         // *previous* cycle's stale Disconnected value and fire immediately, breaking reconnect.
-        bleConnection.connectionState.first { it is BleConnectionState.Connected }
+        //
+        // RACE GUARD: A fatal fromRadio/logRadio failure can land AFTER the sessionFailureCause
+        // check above but BEFORE connectionState reaches Connected. handleFailure() forces
+        // bleConnection.disconnect(), which emits Disconnected — so .first { Connected } would
+        // hang forever. We race the Connected wait against a sessionFailureCause poll: if a
+        // failure arrives first, we return a retryable Failed outcome immediately.
+        val connectedReached =
+            bleConnection.connectionState.first { it is BleConnectionState.Connected || sessionFailureCause != null }
+        if (connectedReached !is BleConnectionState.Connected) {
+            Logger.w(sessionFailureCause) {
+                "[$address] Session failed before Connected gate — returning failed outcome"
+            }
+            return BleReconnectPolicy.Outcome.Failed(
+                sessionFailureCause ?: RuntimeException("Session failed before Connected gate"),
+            )
+        }
 
         // Suspend until the next Disconnected emission. We deliberately do NOT wrap this in a
         // coroutineScope { launchIn(...); first(...) } pattern: launching a hot StateFlow
@@ -471,6 +486,13 @@ class BleRadioTransport(
 
     /**
      * Sends a packet to the radio with retry support.
+     *
+     * Write-failure policy: any non-cancellation exception from a failed write (after exhausting [retryBleOperation]
+     * retries) is treated as fatal to the current BLE session. Production logs show long-running sessions eventually
+     * failing writes with [NotConnectedException] after hundreds of successful writes — by that point the GATT handle
+     * is stale and retrying in-place cannot recover. Calling [handleFailure] forces a full GATT teardown + reconnect
+     * cycle, which is the only reliable recovery for a dead session. Transient single-write blips are absorbed by
+     * [retryBleOperation]'s 3-attempt retry before reaching this catch.
      *
      * @param p The packet to send.
      */
