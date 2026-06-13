@@ -140,8 +140,12 @@ class BleRadioTransport(
                 Logger.w(e) { "[$address] Failed to disconnect in exception handler" }
             }
         }
-        val (isPermanent, msg) = throwable.toDisconnectReason()
-        callback.onDisconnect(isPermanent, errorMessage = msg)
+        // Guard: use the same CAS dedup as handleFailure/onDisconnected so an uncaught
+        // exception doesn't produce a duplicate onDisconnect after handleFailure already fired.
+        if (sessionFailed.compareAndSet(expect = false, update = true)) {
+            val (isPermanent, msg) = throwable.toDisconnectReason()
+            callback.onDisconnect(isPermanent, errorMessage = msg)
+        }
     }
 
     private val connectionScope: CoroutineScope =
@@ -249,12 +253,18 @@ class BleRadioTransport(
                         }
                     },
                     onTransientDisconnect = { error ->
-                        val msg = error?.toDisconnectReason()?.second ?: "Device unreachable"
-                        callback.onDisconnect(isPermanent = false, errorMessage = msg)
+                        // Guard: if handleFailure already emitted the disconnect callback for this
+                        // session (sessionFailed CAS won), don't emit a duplicate from the policy.
+                        if (!sessionFailed.value) {
+                            val msg = error?.toDisconnectReason()?.second ?: "Device unreachable"
+                            callback.onDisconnect(isPermanent = false, errorMessage = msg)
+                        }
                     },
                     onPermanentDisconnect = { error ->
-                        val msg = error?.toDisconnectReason()?.second ?: "Device unreachable"
-                        callback.onDisconnect(isPermanent = true, errorMessage = msg)
+                        if (!sessionFailed.value) {
+                            val msg = error?.toDisconnectReason()?.second ?: "Device unreachable"
+                            callback.onDisconnect(isPermanent = true, errorMessage = msg)
+                        }
                     },
                 )
             }
@@ -416,6 +426,7 @@ class BleRadioTransport(
         }
     }
 
+    @Suppress("LongMethod")
     private suspend fun discoverServicesAndSetupCharacteristics() {
         try {
             bleConnection.profile(serviceUuid = SERVICE_UUID) { service ->
@@ -456,7 +467,15 @@ class BleRadioTransport(
 
                 requestHighPriorityAndScheduleDowngrade()
 
-                this@BleRadioTransport.callback.onConnect()
+                // Guard: if handleFailure fired during setup (e.g., fromRadio/logRadio fatal
+                // exception after subscriptionReady completed but before this line), do NOT call
+                // onConnect — it would set Connected state on a dead session. handleFailure has
+                // already emitted the disconnect callback.
+                if (!sessionFailed.value) {
+                    this@BleRadioTransport.callback.onConnect()
+                } else {
+                    Logger.w { "[$address] Session failed during setup — skipping onConnect" }
+                }
             }
         } catch (e: CancellationException) {
             // Scope was cancelled externally — still ensure GATT cleanup runs so we don't
@@ -550,11 +569,18 @@ class BleRadioTransport(
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    Logger.w(e) {
-                        "[$address] Failed to write packet to toRadioCharacteristic after " +
-                            "$packetsSent successful writes"
+                    // Guard: only call handleFailure if this write was against the CURRENT session.
+                    // If radioService was replaced (new reconnect cycle) or cleared (handleFailure
+                    // already ran), this is a stale write from the old session — silently discard.
+                    if (currentService === radioService) {
+                        Logger.w(e) {
+                            "[$address] Failed to write packet to toRadioCharacteristic after " +
+                                "$packetsSent successful writes"
+                        }
+                        handleFailure(e)
+                    } else {
+                        Logger.w(e) { "[$address] Stale write failure ignored (session was replaced)" }
                     }
-                    handleFailure(e)
                 }
             }
         }
