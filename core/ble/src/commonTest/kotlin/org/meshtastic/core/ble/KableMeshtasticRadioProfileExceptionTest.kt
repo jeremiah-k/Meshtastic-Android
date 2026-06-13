@@ -95,4 +95,22 @@ class KableMeshtasticRadioProfileExceptionTest {
 
         collectJob.cancel()
     }
+
+    // --- logRadio fatal exception propagation tests ---
+
+    @Test
+    fun `logRadio propagates NotConnectedException from observation`() = runTest {
+        val service = createService().apply { addCharacteristic(MeshtasticBleConstants.LOGRADIO_CHARACTERISTIC) }
+        val profile = KableMeshtasticRadioProfile(service)
+        service.observeException = NotConnectedException("log radio session closed")
+        assertFailsWith<NotConnectedException> { profile.logRadio.first() }
+    }
+
+    @Test
+    fun `logRadio propagates fatal GattStatusException from observation`() = runTest {
+        val service = createService().apply { addCharacteristic(MeshtasticBleConstants.LOGRADIO_CHARACTERISTIC) }
+        val profile = KableMeshtasticRadioProfile(service)
+        service.observeException = GattStatusException(status = 133, message = "GATT error")
+        assertFailsWith<GattStatusException> { profile.logRadio.first() }
+    }
 }

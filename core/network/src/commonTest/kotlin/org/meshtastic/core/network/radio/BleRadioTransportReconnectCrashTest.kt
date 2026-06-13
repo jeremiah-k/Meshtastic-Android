@@ -39,6 +39,7 @@ import org.meshtastic.core.ble.BleDevice
 import org.meshtastic.core.ble.BleService
 import org.meshtastic.core.ble.BleWriteType
 import org.meshtastic.core.ble.DisconnectReason
+import org.meshtastic.core.ble.MeshtasticBleConstants.SERVICE_UUID
 import org.meshtastic.core.testing.FakeBleConnection
 import org.meshtastic.core.testing.FakeBleConnectionFactory
 import org.meshtastic.core.testing.FakeBleDevice
@@ -443,6 +444,8 @@ class BleRadioTransportReconnectCrashTest {
         val device = FakeBleDevice(address = address, name = "Test Radio")
         bluetoothRepository.bond(device)
 
+        every { service.onDisconnect(any(), any()) } returns Unit
+
         val bleTransport =
             BleRadioTransport(
                 scope = this,
@@ -463,9 +466,149 @@ class BleRadioTransportReconnectCrashTest {
         // disconnect must have been called (forced cleanup)
         assertTrue(connection.disconnectCalls >= 1, "disconnect() must be called after write failure")
 
+        // Verify onDisconnect was called with isPermanent = false (not true)
+        dev.mokkery.verify { service.onDisconnect(isPermanent = false, errorMessage = any()) }
+        dev.mokkery.verify(mode = dev.mokkery.verify.VerifyMode.not) {
+            service.onDisconnect(isPermanent = true, errorMessage = any())
+        }
+
         // Reconnect should happen (policy should iterate)
         advanceTimeBy(15_000L)
         assertTrue(connection.connectAndAwaitCalls >= 2, "Reconnect loop must iterate after internal session failure")
+
+        bleTransport.close()
+    }
+
+    // ─── Liveness restart semantics (Wave 3) ──────────────────────────────────────────────────────
+
+    /**
+     * Validates the transport-level behavior that liveness restart depends on: after stop (close) + start, a new
+     * connection attempt must occur.
+     *
+     * The [SharedRadioInterfaceService.checkLiveness] path calls stopTransportLocked then startTransportLocked, which
+     * destroys and recreates the transport. This test verifies that BleRadioTransport correctly handles this stop/start
+     * cycle.
+     */
+    @Test
+    fun `stop and restart creates a new connection attempt`() = runTest {
+        val device = FakeBleDevice(address = address, name = "Test Radio")
+        bluetoothRepository.bond(device)
+
+        val bleTransport =
+            BleRadioTransport(
+                scope = this,
+                scanner = scanner,
+                bluetoothRepository = bluetoothRepository,
+                connectionFactory = connectionFactory,
+                callback = service,
+                address = address,
+            )
+        bleTransport.start()
+        advanceTimeBy(4_000L)
+        assertTrue(connection.connectAndAwaitCalls == 1, "First connect must happen")
+
+        // Simulate liveness restart: close + create fresh transport
+        bleTransport.close()
+        advanceTimeBy(2_000L)
+
+        val freshConnection = FakeBleConnection()
+        val freshFactory = FakeBleConnectionFactory(freshConnection)
+
+        val restartedTransport =
+            BleRadioTransport(
+                scope = this,
+                scanner = scanner,
+                bluetoothRepository = bluetoothRepository,
+                connectionFactory = freshFactory,
+                callback = service,
+                address = address,
+            )
+        restartedTransport.start()
+        advanceTimeBy(4_000L)
+
+        assertTrue(freshConnection.connectAndAwaitCalls >= 1, "Fresh transport must attempt connection after restart")
+
+        restartedTransport.close()
+    }
+
+    // ─── Profile setup failure returns Failed outcome and retries ──────────────────────────────────
+
+    /**
+     * When profile setup fails (e.g. missing service UUID), the transport should return a
+     * [BleReconnectPolicy.Outcome.Failed] and the reconnect loop should iterate. Uses
+     * [FakeBleConnection.missingServices] to cause `profile()` to throw.
+     */
+    @Test
+    fun `profile setup failure returns Failed outcome and retries`() = runTest {
+        val device = FakeBleDevice(address = address, name = "Test Radio")
+        bluetoothRepository.bond(device)
+
+        // Make SERVICE_UUID missing → profile() throws NoSuchElementException
+        connection.missingServices.add(SERVICE_UUID)
+
+        val bleTransport =
+            BleRadioTransport(
+                scope = this,
+                scanner = scanner,
+                bluetoothRepository = bluetoothRepository,
+                connectionFactory = connectionFactory,
+                callback = service,
+                address = address,
+            )
+        bleTransport.start()
+
+        // First attempt fails at profile setup, then settle delay + reconnect.
+        advanceTimeBy(15_000L)
+
+        // The reconnect loop should have called connectAndAwait at least twice
+        // (initial failure + retry)
+        assertTrue(
+            connection.connectAndAwaitCalls >= 2,
+            "Reconnect loop must iterate after profile setup failure " +
+                "(actual calls: ${connection.connectAndAwaitCalls})",
+        )
+
+        bleTransport.close()
+    }
+
+    /**
+     * Regression: CancellationException from a write should not trigger onDisconnect even after the transport has
+     * reconnected and is operating normally.
+     */
+    @Test
+    fun `CancellationException from write does not trigger onDisconnect after reconnection`() = runTest {
+        val device = FakeBleDevice(address = address, name = "Test Radio")
+        bluetoothRepository.bond(device)
+
+        every { service.onDisconnect(any(), any()) } returns Unit
+
+        val bleTransport =
+            BleRadioTransport(
+                scope = this,
+                scanner = scanner,
+                bluetoothRepository = bluetoothRepository,
+                connectionFactory = connectionFactory,
+                callback = service,
+                address = address,
+            )
+        bleTransport.start()
+        advanceTimeBy(4_000L)
+
+        // Inject CancellationException into a write
+        connection.service.writeException = CancellationException("cancelled")
+        bleTransport.handleSendToRadio(byteArrayOf(1))
+        advanceUntilIdle()
+
+        // CancellationException must NOT result in a user-facing disconnect callback
+        dev.mokkery.verify(mode = dev.mokkery.verify.VerifyMode.not) { service.onDisconnect(any(), any()) }
+
+        // Clear the exception and verify the transport is still usable
+        connection.service.writeException = null
+        bleTransport.handleSendToRadio(byteArrayOf(2))
+        advanceTimeBy(1_000L)
+
+        // Still no disconnect should have been called
+        dev.mokkery.verify(mode = dev.mokkery.verify.VerifyMode.not) { service.onDisconnect(any(), any()) }
 
         bleTransport.close()
     }

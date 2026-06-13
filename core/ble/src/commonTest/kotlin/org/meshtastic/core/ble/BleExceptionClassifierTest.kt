@@ -64,4 +64,29 @@ class BleExceptionClassifierTest {
     fun `RuntimeException returns null`() {
         assertNull(RuntimeException("boom").classifyBleException())
     }
+
+    // --- isSessionFatalBleException tests ---
+
+    @Test
+    fun `isSessionFatalBleException returns true for NotConnectedException`() {
+        assertTrue(NotConnectedException("test").isSessionFatalBleException())
+    }
+
+    @Test
+    fun `isSessionFatalBleException returns true for fatal GATT status codes`() {
+        assertTrue(GattStatusException(status = 133, message = "test").isSessionFatalBleException())
+        assertTrue(GattStatusException(status = 8, message = "test").isSessionFatalBleException())
+        assertTrue(GattStatusException(status = 129, message = "test").isSessionFatalBleException())
+    }
+
+    @Test
+    fun `isSessionFatalBleException returns false for transient GATT status`() {
+        assertFalse(GattStatusException(status = 6, message = "busy").isSessionFatalBleException())
+    }
+
+    @Test
+    fun `isSessionFatalBleException returns false for unrelated exceptions`() {
+        assertFalse(IllegalStateException("test").isSessionFatalBleException())
+        assertFalse(RuntimeException("test").isSessionFatalBleException())
+    }
 }

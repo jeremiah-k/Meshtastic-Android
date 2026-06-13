@@ -255,7 +255,7 @@ class BleRadioTransport(
      * Finds the device, bonds if needed, connects, discovers services, and waits for disconnect. Returns a
      * [BleReconnectPolicy.Outcome] describing how the connection ended.
      */
-    @Suppress("CyclomaticComplexMethod")
+    @Suppress("CyclomaticComplexMethod", "LongMethod")
     private suspend fun attemptConnection(): BleReconnectPolicy.Outcome {
         connectionStartTime = nowMillis
         sessionFailed = false
@@ -291,6 +291,17 @@ class BleRadioTransport(
         onConnected()
 
         discoverServicesAndSetupCharacteristics()
+
+        // If a fatal session failure (fromRadio/logRadio error) forced disconnect during setup,
+        // skip the Connected gate — return a retryable failure so BleReconnectPolicy handles it.
+        if (sessionFailureCause != null) {
+            Logger.w(sessionFailureCause) {
+                "[$address] Session failed during profile setup — returning failed outcome"
+            }
+            return BleReconnectPolicy.Outcome.Failed(
+                sessionFailureCause ?: RuntimeException("Session setup failed"),
+            )
+        }
 
         // Wait for the StateFlow to actually reflect Connected before watching for the next
         // Disconnected. connectAndAwait returns synchronously based on the underlying Kable

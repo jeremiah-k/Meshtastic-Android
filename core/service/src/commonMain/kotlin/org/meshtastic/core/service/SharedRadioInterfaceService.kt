@@ -274,8 +274,16 @@ class SharedRadioInterfaceService(
         startHeartbeat()
     }
 
-    /** Must be called under [transportMutex]. */
-    private suspend fun stopTransportLocked() {
+    /**
+     * Must be called under [transportMutex].
+     *
+     * @param notifyPermanent When `true`, emits a permanent disconnect state to [connectionState]. Set `false` during
+     *   automatic liveness recovery to avoid surfacing a user-facing disconnect.
+     * @param sendPoliteDisconnect When `true`, sends a `ToRadio(disconnect = true)` frame to the firmware before
+     *   tearing down. Set `false` when the transport is already dead (zombie session) to avoid writing into a broken
+     *   link.
+     */
+    private suspend fun stopTransportLocked(notifyPermanent: Boolean = true, sendPoliteDisconnect: Boolean = true) {
         val currentTransport = radioTransport
         Logger.i { "Stopping transport $currentTransport" }
         // Best-effort polite goodbye: tell the firmware we're disconnecting on purpose so it can
@@ -287,7 +295,9 @@ class SharedRadioInterfaceService(
         // transport's own scope; the drain delay gives async transports a window to flush before
         // close() cancels their write scope. BLE's retry path backs off 500ms, so this window
         // also covers one retry on flaky GATT links.
-        if (currentTransport != null && _connectionState.value != ConnectionState.Disconnected) {
+        if (
+            sendPoliteDisconnect && currentTransport != null && _connectionState.value != ConnectionState.Disconnected
+        ) {
             isStopping = true
             ignoreExceptionSuspend {
                 currentTransport.handleSendToRadio(ToRadio(disconnect = true).encode())
@@ -303,7 +313,7 @@ class SharedRadioInterfaceService(
         _serviceScope.cancel("stopping transport")
         _serviceScope = CoroutineScope(dispatchers.io + SupervisorJob())
 
-        if (currentTransport != null) {
+        if (notifyPermanent && currentTransport != null) {
             onDisconnect(isPermanent = true)
         }
     }
@@ -337,6 +347,11 @@ class SharedRadioInterfaceService(
                     "(threshold: ${LIVENESS_TIMEOUT_MILLIS}ms). Treating as disconnect."
             }
             onDisconnect(isPermanent = false, errorMessage = "Connection timeout — no data received")
+
+            // Only BLE transports suffer from silent zombie sessions (no disconnect signal from stack).
+            // TCP/serial/mock can legitimately idle >60s without inbound data.
+            if (runningTransportId != InterfaceId.BLUETOOTH) return
+
             // Force transport restart to recover from silent zombie sessions where the BLE stack
             // did not report a disconnect. Uses the same processLifecycle scope and transportMutex
             // pattern as setDeviceAddress() to guarantee clean teardown/restart sequencing.
@@ -344,7 +359,9 @@ class SharedRadioInterfaceService(
                 processLifecycle.coroutineScope.launch {
                     try {
                         transportMutex.withLock {
-                            ignoreExceptionSuspend { stopTransportLocked() }
+                            ignoreExceptionSuspend {
+                                stopTransportLocked(notifyPermanent = false, sendPoliteDisconnect = false)
+                            }
                             startTransportLocked()
                         }
                     } finally {
