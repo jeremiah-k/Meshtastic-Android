@@ -136,10 +136,9 @@ class FakeBleConnection :
     /**
      * Per-connection profile scope, mirroring [KableBleConnection]'s connectionScope.
      *
-     * Created in [connect], cancelled in [disconnect]. Profile collectors launched via
-     * [profile] become children of this scope, so they are cancelled on fake disconnect —
-     * not just when the outer transport scope eventually closes. This prevents stale
-     * fromRadio/logRadio collectors from accumulating across reconnect cycles.
+     * Created in [connect], cancelled in [disconnect]. Profile collectors launched via [profile] become children of
+     * this scope, so they are cancelled on fake disconnect — not just when the outer transport scope eventually closes.
+     * This prevents stale fromRadio/logRadio collectors from accumulating across reconnect cycles.
      */
     private var profileScope: CoroutineScope? = null
 

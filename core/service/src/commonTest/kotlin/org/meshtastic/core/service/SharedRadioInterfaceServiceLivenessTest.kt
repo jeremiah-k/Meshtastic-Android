@@ -375,7 +375,10 @@ class SharedRadioInterfaceServiceLivenessTest {
                     gatedTransports.size,
                     "Second check must not create a transport while the first restart is in-flight",
                 )
-                assertTrue(initialTransport.closeCalled, "First transport close must have been entered by the restart")
+                assertTrue(
+                    initialTransport.closeCalled,
+                    "First transport close must have been entered by the restart",
+                )
                 assertEquals(
                     1,
                     initialTransport.closeCount,
