@@ -646,7 +646,7 @@ class BleRadioTransportReconnectCrashTest {
 
         // Trigger a drain by emitting a FROMNUM notification — this causes the profile to poll
         // fromRadioChar, which throws NotConnectedException (a session-fatal BLE exception).
-        connection.service.emitNotification(FROMNUM_CHARACTERISTIC.uuid, byteArrayOf(1))
+        connection.service.emitNotification(FROMNUM_CHARACTERISTIC, byteArrayOf(1))
         advanceUntilIdle()
 
         // handleFailure must have forced a GATT disconnect
@@ -695,7 +695,7 @@ class BleRadioTransportReconnectCrashTest {
         connection.service.writeException = NotConnectedException("write failure")
 
         // Trigger both paths nearly simultaneously
-        connection.service.emitNotification(FROMNUM_CHARACTERISTIC.uuid, byteArrayOf(1))
+        connection.service.emitNotification(FROMNUM_CHARACTERISTIC, byteArrayOf(1))
         bleTransport.handleSendToRadio(byteArrayOf(42))
         advanceUntilIdle()
 
