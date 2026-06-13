@@ -152,9 +152,10 @@ class BleRadioTransport(
     @Volatile private var isFullyConnected = false
     private var connectionJob: Job? = null
 
-    // Guards against duplicate callbacks when multiple writes fail against the same stale session.
-    // Reset at the start of each attemptConnection(). Set under writeMutex (or hit by a single
-    // winning caller); read without lock since stale reads are benign (only affect dedup timing).
+    // Guards against duplicate callbacks when multiple writes or a write + fromRadio failure
+    // fire against the same stale session. Reset at the start of each attemptConnection().
+    // Write-path failures are serialized by writeMutex; fromRadio/logRadio .catch handlers run
+    // on the flow collector coroutine and may race. Stale reads are benign (affect only dedup timing).
     @Volatile private var sessionFailed = false
 
     // Never give up while the user has this device selected. Higher layers (SharedRadioInterfaceService)
@@ -334,6 +335,9 @@ class BleRadioTransport(
 
     private fun onDisconnected() {
         radioService = null
+        // Set the guard so a concurrent handleFailure (from fromRadio/logRadio .catch) does
+        // not fire a second callback during the same session-loss event.
+        sessionFailed = true
         Logger.i { "[$address] BLE disconnected - ${formatSessionStats()}" }
         // Signal immediately so the UI reflects the disconnect while reconnect continues.
         callback.onDisconnect(isPermanent = false)
