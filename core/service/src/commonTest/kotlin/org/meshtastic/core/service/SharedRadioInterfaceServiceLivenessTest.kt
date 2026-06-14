@@ -17,8 +17,9 @@
 package org.meshtastic.core.service
 
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.LifecycleObserver
 import androidx.lifecycle.LifecycleOwner
-import androidx.lifecycle.LifecycleRegistry
 import dev.mokkery.MockMode
 import dev.mokkery.answering.calls
 import dev.mokkery.answering.returns
@@ -113,19 +114,36 @@ class SharedRadioInterfaceServiceLivenessTest {
     private val networkRepository: NetworkRepository = mock(MockMode.autofill)
     private val analytics: PlatformAnalytics = mock(MockMode.autofill)
 
+    /**
+     * Minimal [LifecycleOwner] for tests that avoids [LifecycleRegistry], which enforces main-thread checks and throws
+     * `RuntimeException` under Robolectric (androidHostTest). This custom [Lifecycle] dispatches ON_DESTROY to
+     * registered [LifecycleEventObserver]s so `lifecycleScope` cancels correctly.
+     */
     private class TestLifecycleOwner : LifecycleOwner {
-        val registry = LifecycleRegistry(this)
+        private val observers = java.util.concurrent.CopyOnWriteArrayList<LifecycleObserver>()
+        private var state = Lifecycle.State.RESUMED
 
-        init {
-            registry.currentState = Lifecycle.State.RESUMED
-        }
+        override val lifecycle: Lifecycle =
+            object : Lifecycle() {
+                override fun addObserver(observer: LifecycleObserver) {
+                    observers.add(observer)
+                }
+
+                override fun removeObserver(observer: LifecycleObserver) {
+                    observers.remove(observer)
+                }
+
+                override val currentState: Lifecycle.State
+                    get() = state
+            }
 
         fun destroy() {
-            registry.currentState = Lifecycle.State.DESTROYED
+            state = Lifecycle.State.DESTROYED
+            val event = Lifecycle.Event.ON_DESTROY
+            observers.toList().forEach { observer ->
+                (observer as? LifecycleEventObserver)?.onStateChanged(this@TestLifecycleOwner, event)
+            }
         }
-
-        override val lifecycle: Lifecycle
-            get() = registry
     }
 
     /**

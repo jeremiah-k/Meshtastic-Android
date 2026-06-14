@@ -17,7 +17,7 @@
 package org.meshtastic.core.testing
 
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -171,10 +171,10 @@ class FakeBleConnection :
         if (serviceUuid in missingServices) {
             throw NoSuchElementException("Service $serviceUuid not found")
         }
-        // Reuse the caller's Job and scheduler so collectors launched by setup() are cancelled with
-        // the caller (matches KableBleConnection.profile's connectionScope contract). Do NOT use
-        // coroutineScope { setup(service) } — it would hang on the infinite fromRadio/logRadio collectors.
-        return CoroutineScope(currentCoroutineContext()).setup(service)
+        // Use Dispatchers.Unconfined so notification emissions are delivered synchronously to
+        // collectors (write → immediate notification). This matches the original FakeBleConnection
+        // contract and the auto-responding pattern used by DFU/OTA transport tests.
+        return CoroutineScope(Dispatchers.Unconfined).setup(service)
     }
 
     override fun maximumWriteValueLength(writeType: BleWriteType): Int? = maxWriteValueLength
