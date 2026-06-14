@@ -315,7 +315,7 @@ class BleRadioTransportReconnectCrashTest {
         }
     }
 
-    // ─── Session-failure recovery (Wave 2) ────────────────────────────────────────────────────────
+    // ─── Session-failure recovery ────────────────────────────────────────────────────────────────
 
     @Test
     fun `write failure while connected clears state and triggers reconnect`() = runTest {
@@ -531,7 +531,7 @@ class BleRadioTransportReconnectCrashTest {
         }
     }
 
-    // ─── Liveness restart semantics (Wave 3) ──────────────────────────────────────────────────────
+    // ─── Liveness restart semantics ──────────────────────────────────────────────────────────────
 
     /**
      * Validates the transport-level behavior that liveness restart depends on: after stop (close) + start, a new

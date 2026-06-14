@@ -690,7 +690,7 @@ class BleRadioTransport(
         Logger.w(throwable) { "[$address] Session failure — forcing cleanup for reconnect" }
 
         // Force GATT disconnect on the detached cleanupScope (matching the pattern used by
-        // the existing exceptionHandler at lines 124-135). This causes Kable's connectionState
+        // the exceptionHandler defined above). This causes Kable's connectionState
         // to emit Disconnected, unblocking attemptConnection so BleReconnectPolicy iterates.
         cleanupScope.launch {
             try {

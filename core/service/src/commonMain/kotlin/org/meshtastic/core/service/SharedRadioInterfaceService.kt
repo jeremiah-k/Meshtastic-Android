@@ -383,7 +383,6 @@ class SharedRadioInterfaceService(
                 // Note: hardcoded error message follows the existing pattern used throughout the
                 // transport layer (BleExceptionClassifier, toDisconnectReason, etc.). Refactoring to
                 // typed DisconnectReason + string resources is a broader change across all transports.
-                @Suppress("StringLiteralDuplicate")
                 onDisconnect(isPermanent = false, errorMessage = "Connection timeout — no data received")
                 processLifecycle.coroutineScope.launch {
                     try {
