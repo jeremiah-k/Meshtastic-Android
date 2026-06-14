@@ -141,16 +141,17 @@ class BleRadioTransport(
 
     private val exceptionHandler = CoroutineExceptionHandler { _, throwable ->
         Logger.w(throwable) { "[$address] Uncaught exception in connectionScope" }
-        // CRITICAL: set state BEFORE launching disconnect() — if disconnect emits Disconnected
-        // immediately, attemptConnection() must see sessionFailureCause to classify it as
-        // internal (not user-initiated LocalDisconnect). Launching disconnect first creates a
-        // race where the Disconnected emission arrives before sessionFailureCause is visible.
-        if (throwable !is CancellationException && sessionFailed.compareAndSet(expect = false, update = true)) {
-            sessionFailureCause = throwable
-            radioService = null
-            isFullyConnected = false
-            val (isPermanent, msg) = throwable.toDisconnectReason()
-            callback.onDisconnect(isPermanent, errorMessage = msg)
+        if (throwable !is CancellationException) {
+            // Record the cause BEFORE the CAS so there is no window where another coroutine
+            // sees sessionFailed == true but sessionFailureCause == null. first-cause is
+            // preserved: a concurrent loser only overwrites if still null.
+            recordSessionFailureCause(throwable)
+            if (sessionFailed.compareAndSet(expect = false, update = true)) {
+                radioService = null
+                isFullyConnected = false
+                val (isPermanent, msg) = throwable.toDisconnectReason()
+                callback.onDisconnect(isPermanent, errorMessage = msg)
+            }
         }
         cleanupScope.launch {
             try {
@@ -668,16 +669,29 @@ class BleRadioTransport(
         callback.handleFromRadio(packet)
     }
 
+    /**
+     * Preserves the first session-failure cause across concurrent failures. Called before
+     * the [sessionFailed] CAS in [handleFailure] and [exceptionHandler] to eliminate the
+     * window where [sessionFailed] is true but [sessionFailureCause] is still null.
+     */
+    private fun recordSessionFailureCause(throwable: Throwable) {
+        if (sessionFailureCause == null) sessionFailureCause = throwable
+    }
+
     private fun handleFailure(throwable: Throwable) {
         // CancellationException signals intentional scope cancellation (close() called).
         // Never surface it as a user-facing disconnect error.
         if (throwable is CancellationException) return
 
+        // Record the cause BEFORE the CAS so there is no window where another coroutine
+        // sees sessionFailed == true but sessionFailureCause == null. first-cause is
+        // preserved: a concurrent loser only overwrites if still null.
+        recordSessionFailureCause(throwable)
+
         // Deduplicate via atomic CAS: only the first failure per connection attempt triggers
         // session teardown. Heartbeat writes that arrive after the first failure must not spam
         // callbacks. compareAndSet(false, true) returns true iff THIS caller is the first.
         if (!sessionFailed.compareAndSet(expect = false, update = true)) return
-        sessionFailureCause = throwable
 
         // Tear down stale session state immediately so future writes fail-fast without retrying
         // against a dead GATT handle.
