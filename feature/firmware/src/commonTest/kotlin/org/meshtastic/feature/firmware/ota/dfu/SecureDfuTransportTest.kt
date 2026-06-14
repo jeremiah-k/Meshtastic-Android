@@ -498,8 +498,8 @@ class SecureDfuTransportTest {
      * emits a DFU notification response. This solves the coroutine ordering problem where `sendCommand()` writes then
      * suspends on `notificationChannel.receive()` — the response must be in the channel before the receive.
      *
-     * Because [FakeBleConnection.profile] runs with [kotlinx.coroutines.Dispatchers.Unconfined], the notification
-     * emitted here propagates immediately through the observation flow into the transport's `notificationChannel`.
+     * Because the transport is constructed with [kotlinx.coroutines.Dispatchers.Unconfined], the notification emitted
+     * here propagates immediately through the observation flow into the transport's `notificationChannel`.
      */
     private class AutoRespondingBleService(val delegate: FakeBleService) : BleService {
         var responder: DfuResponder? = null

@@ -28,15 +28,16 @@ class FDroidNetworkModule {
     /**
      * F-Droid builds intentionally avoid network calls to the Meshtastic API.
      *
-     * We throw [UnsupportedOperationException] (an [Exception], not an [Error]) so that `safeCatching {}` in the
-     * repositories captures the failure and falls back to the bundled JSON assets instead of crashing the app.
+     * Returning empty results (a valid [NetworkFirmwareReleases] with default empty lists) avoids exception creation
+     * and stack-trace filling on every refresh. Empty API responses do NOT trigger bundled-JSON fallback —
+     * [FirmwareReleaseRepositoryImpl]'s `singleFlightRefresh()` inserts returned lists directly (no-op for empty), and
+     * bundled JSON seeding is driven by `ensureSeeded()` only when the local DB/cache is empty, not as a consequence of
+     * empty network results.
      */
     @Single
     fun provideApiService(): ApiService = object : ApiService {
-        override suspend fun getDeviceHardware(): List<NetworkDeviceHardware> =
-            throw UnsupportedOperationException("getDeviceHardware is not supported on F-Droid builds.")
+        override suspend fun getDeviceHardware(): List<NetworkDeviceHardware> = emptyList()
 
-        override suspend fun getFirmwareReleases(): NetworkFirmwareReleases =
-            throw UnsupportedOperationException("getFirmwareReleases is not supported on F-Droid builds.")
+        override suspend fun getFirmwareReleases(): NetworkFirmwareReleases = NetworkFirmwareReleases()
     }
 }
