@@ -670,9 +670,9 @@ class BleRadioTransport(
     }
 
     /**
-     * Preserves the first session-failure cause across concurrent failures. Called before
-     * the [sessionFailed] CAS in [handleFailure] and [exceptionHandler] to eliminate the
-     * window where [sessionFailed] is true but [sessionFailureCause] is still null.
+     * Preserves the first session-failure cause across concurrent failures. Called before the [sessionFailed] CAS in
+     * [handleFailure] and [exceptionHandler] to eliminate the window where [sessionFailed] is true but
+     * [sessionFailureCause] is still null.
      */
     private fun recordSessionFailureCause(throwable: Throwable) {
         if (sessionFailureCause == null) sessionFailureCause = throwable
