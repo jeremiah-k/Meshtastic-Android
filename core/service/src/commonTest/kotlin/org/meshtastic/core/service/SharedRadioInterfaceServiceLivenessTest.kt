@@ -120,7 +120,7 @@ class SharedRadioInterfaceServiceLivenessTest {
      * registered [LifecycleEventObserver]s so `lifecycleScope` cancels correctly.
      */
     private class TestLifecycleOwner : LifecycleOwner {
-        private val observers = java.util.concurrent.CopyOnWriteArrayList<LifecycleObserver>()
+        private val observers = mutableListOf<LifecycleObserver>()
         private var state = Lifecycle.State.RESUMED
 
         override val lifecycle: Lifecycle =
