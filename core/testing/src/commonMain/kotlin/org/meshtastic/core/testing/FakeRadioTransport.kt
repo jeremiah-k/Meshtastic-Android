@@ -27,6 +27,11 @@ class FakeRadioTransport : RadioTransport {
 
     var keepAliveCalled = false
 
+    /**
+     * Records the payload sent to the radio.
+     *
+     * @param p The payload data.
+     */
     override fun handleSendToRadio(p: ByteArray) {
         sentData.add(p)
     }
@@ -35,6 +40,9 @@ class FakeRadioTransport : RadioTransport {
         keepAliveCalled = true
     }
 
+    /**
+     * Records that close was invoked.
+     */
     override suspend fun close() {
         closeCalled = true
         closeCount++
