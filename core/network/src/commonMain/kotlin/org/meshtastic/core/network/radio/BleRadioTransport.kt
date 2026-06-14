@@ -250,6 +250,13 @@ class BleRadioTransport(
         throw RadioNotConnectedException("Device not found at address $address")
     }
 
+    /**
+     * Launches the connection reconnect loop.
+     *
+     * Executes the reconnect policy to attempt connections and route transient and permanent
+     * disconnect events through callbacks. Uses [sessionFailed] to deduplicate disconnect
+     * callbacks, ensuring only the first failure path emits a callback per session.
+     */
     private fun connect() {
         connectionJob =
             connectionScope.launch {
@@ -423,6 +430,10 @@ class BleRadioTransport(
         }
     }
 
+    /**
+     * Handles BLE disconnection, clearing stale service state and emitting a single
+     * disconnect callback per session.
+     */
     private fun onDisconnected() {
         radioService = null
         // Atomic first-writer-wins: if handleFailure already claimed this session's failure
@@ -439,6 +450,15 @@ class BleRadioTransport(
         }
     }
 
+    /**
+     * Discovers the radio profile and validates packet subscription readiness.
+     *
+     * Establishes subscriptions to radio packet flows, waits for subscription confirmation
+     * with a bounded timeout, and notifies the callback on successful initialization.
+     * Aborts setup if subscription fails to establish or times out.
+     *
+     * @throws Exception if profile discovery, subscription setup, or readiness validation fails.
+     */
     @Suppress("LongMethod", "ThrowsCount")
     private suspend fun discoverServicesAndSetupCharacteristics() {
         try {
@@ -580,12 +600,9 @@ class BleRadioTransport(
     /**
      * Sends a packet to the radio with retry support.
      *
-     * Write-failure policy: any non-cancellation exception from a failed write (after exhausting [retryBleOperation]
-     * retries) is treated as fatal to the current BLE session. Production logs show long-running sessions eventually
-     * failing writes with [NotConnectedException] after hundreds of successful writes — by that point the GATT handle
-     * is stale and retrying in-place cannot recover. Calling [handleFailure] forces a full GATT teardown + reconnect
-     * cycle, which is the only reliable recovery for a dead session. Transient single-write blips are absorbed by
-     * [retryBleOperation]'s 3-attempt retry before reaching this catch.
+     * Transient write failures are handled by [retryBleOperation]'s internal retry logic. If a write fails
+     * after all retries are exhausted, the exception is treated as fatal to the current BLE session and
+     * triggers a full GATT teardown and reconnect cycle via [handleFailure].
      *
      * @param p The packet to send.
      */
@@ -640,7 +657,12 @@ class BleRadioTransport(
         connectionScope.launch { heartbeatSender.sendHeartbeat() }
     }
 
-    /** Closes the connection to the device. */
+    /**
+     * Closes the BLE connection and cancels all reconnection attempts.
+     *
+     * Ensures GATT cleanup occurs even if the caller's coroutine is cancelled,
+     * preventing BluetoothGatt leaks and reconnection failures.
+     */
     override suspend fun close() {
         Logger.i { "[$address] Disconnecting. ${formatSessionStats()}" }
         connectionScope.cancel()
@@ -661,6 +683,11 @@ class BleRadioTransport(
         cleanupScope.cancel()
     }
 
+    /**
+     * Routes a received radio packet to the application callback.
+     *
+     * @param packet The serialized packet data received from the radio.
+     */
     private fun dispatchPacket(packet: ByteArray) {
         val received = packetsReceived.incrementAndGet()
         val rxBytes = bytesReceived.addAndGet(packet.size.toLong())
@@ -668,6 +695,13 @@ class BleRadioTransport(
         callback.handleFromRadio(packet)
     }
 
+    /**
+     * Deduplicates failure handling, clears session state, and forces GATT disconnect for reconnection.
+     *
+     * Only the first failure per connection attempt triggers teardown and emits a disconnect callback.
+     * Subsequent failures are ignored. [CancellationException] signals intentional disconnection and
+     * is never treated as a failure.
+     */
     private fun handleFailure(throwable: Throwable) {
         // CancellationException signals intentional scope cancellation (close() called).
         // Never surface it as a user-facing disconnect error.
@@ -709,6 +743,12 @@ class BleRadioTransport(
             "Packets TX: ${packetsSent.value} (${bytesSent.value} bytes)"
     }
 
+    /**
+     * Converts this exception to a disconnect reason pair.
+     *
+     * @return A pair where the first element is `true` if the disconnect is permanent, `false` otherwise,
+     *         and the second element is a human-readable reason message.
+     */
     private fun Throwable.toDisconnectReason(): Pair<Boolean, String> {
         classifyBleException()?.let {
             return it.isPermanent to it.message

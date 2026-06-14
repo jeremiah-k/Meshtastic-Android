@@ -163,6 +163,14 @@ class FakeBleConnection :
         _device.value = null
     }
 
+    /**
+     * Executes a setup block to access a BLE service.
+     *
+     * @param serviceUuid The UUID of the service to access.
+     * @param setup A block invoked with a coroutine scope and the service instance, returning a result.
+     * @return The result of the setup block.
+     * @throws NoSuchElementException if the service is not found.
+     */
     override suspend fun <T> profile(
         serviceUuid: Uuid,
         timeout: Duration,
@@ -221,9 +229,22 @@ class FakeBleService : BleService {
     /** Characteristics whose 2-arg [observe] never invokes onSubscription. Notifications can still be emitted. */
     val observeNeverSubscribeCharacteristics: MutableSet<Uuid> = mutableSetOf()
 
-    override fun hasCharacteristic(characteristic: BleCharacteristic): Boolean =
+    /**
+         * Determines if a characteristic is available.
+         *
+         * @return `true` if the characteristic is available, `false` otherwise.
+         */
+        override fun hasCharacteristic(characteristic: BleCharacteristic): Boolean =
         availableCharacteristics.contains(characteristic.uuid)
 
+    /**
+     * Provides a flow of notifications for a BLE characteristic.
+     *
+     * If a test exception is configured for this characteristic or globally, the returned flow throws that exception upon collection.
+     * Otherwise, returns the notification flow for this characteristic.
+     *
+     * @return A flow that emits notification [ByteArray] values, or throws a configured test exception.
+     */
     override fun observe(characteristic: BleCharacteristic): Flow<ByteArray> {
         val failure =
             observeExceptionsByCharacteristic.remove(characteristic.uuid)
@@ -235,21 +256,15 @@ class FakeBleService : BleService {
     }
 
     /**
-     * Overrides the 2-arg observe to prevent false subscriptionReady when testing pre-readiness failures.
+     * Observes BLE characteristic notifications with configurable pre-subscription error handling.
      *
-     * The default BleService implementation calls `observe(characteristic).onStart { onSubscription() }`, which would
-     * invoke [onSubscription] BEFORE any pre-collection failure flow throws. This override throws BEFORE invoking
-     * [onSubscription], correctly simulating "observe failed before CCCD/subscription readiness."
+     * Throws before invoking [onSubscription] if a pre-subscription failure is configured. Failures are checked in order
+     * from [observeBeforeSubscriptionExceptionByCharacteristic], [observeExceptionsByCharacteristic], or [observeException].
      *
-     * Pre-readiness failures are sourced (in priority order) from:
-     * - [observeBeforeSubscriptionExceptionByCharacteristic] (2-arg-specific, one-shot per uuid)
-     * - [observeExceptionsByCharacteristic] (shared with 1-arg observe, one-shot per uuid; defensively treated as a
-     *   pre-subscription failure here so the bare onStart wrap cannot swallow it after [onSubscription] runs)
-     * - [observeException] (global, one-shot)
+     * For characteristics in [observeNeverSubscribeCharacteristics], [onSubscription] is not invoked.
      *
-     * For characteristics in [observeNeverSubscribeCharacteristics], [onSubscription] is never invoked but
-     * notifications are still exposed — the returned flow is the bare SharedFlow with no [onStart] wrap, so
-     * [emitNotification] still reaches active collectors.
+     * @param onSubscription Callback invoked when the flow is subscribed, unless the characteristic is in [observeNeverSubscribeCharacteristics].
+     * @return A flow that emits byte data from the characteristic. Throws before invoking [onSubscription] if a pre-subscription failure is configured.
      */
     override fun observe(characteristic: BleCharacteristic, onSubscription: suspend () -> Unit): Flow<ByteArray> {
         val failure =
@@ -268,6 +283,13 @@ class FakeBleService : BleService {
         }
     }
 
+    /**
+     * Reads and removes the first queued response for a characteristic, or throws if an exception is injected.
+     *
+     * @param characteristic The characteristic to read from.
+     * @return The first queued read response for this characteristic, or an empty array if none are queued.
+     * @throws Exception if [readException] is configured.
+     */
     override suspend fun read(characteristic: BleCharacteristic): ByteArray {
         readException?.let {
             readException = null
@@ -276,8 +298,18 @@ class FakeBleService : BleService {
         return readQueues[characteristic.uuid]?.removeFirstOrNull() ?: ByteArray(0)
     }
 
-    override fun preferredWriteType(characteristic: BleCharacteristic): BleWriteType = BleWriteType.WITH_RESPONSE
+    /**
+ * Indicates the preferred write type for BLE write operations.
+ *
+ * @return BleWriteType.WITH_RESPONSE
+ */
+override fun preferredWriteType(characteristic: BleCharacteristic): BleWriteType = BleWriteType.WITH_RESPONSE
 
+    /**
+     * Records a write operation to a characteristic.
+     *
+     * If [writeException] is configured, throws that exception without recording the write.
+     */
     override suspend fun write(characteristic: BleCharacteristic, data: ByteArray, writeType: BleWriteType) {
         writeException?.let { ex -> throw ex }
         availableCharacteristics += characteristic.uuid

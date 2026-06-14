@@ -21,6 +21,13 @@ import org.gradle.api.Project
 import org.gradle.kotlin.dsl.dependencies
 
 /** Configure Compose-specific options */
+/**
+ * Configures Android Compose build settings and manages dependency versions.
+ *
+ * Enables Jetpack Compose support, excludes conflicting transitive Compose BOMs
+ * from third-party libraries, pins core AndroidX Compose artifacts to an aligned
+ * version, and configures the Compose compiler.
+ */
 internal fun Project.configureAndroidCompose(commonExtension: CommonExtension) {
     commonExtension.apply { buildFeatures.compose = true }
 

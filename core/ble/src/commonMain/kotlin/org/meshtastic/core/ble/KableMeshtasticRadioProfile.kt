@@ -142,6 +142,11 @@ class KableMeshtasticRadioProfile(private val service: BleService) : MeshtasticR
         )
     }
 
+    /**
+     * Writes a packet to the radio and triggers a poll for incoming messages.
+     *
+     * @param packet The bytes to write to the radio.
+     */
     override suspend fun sendToRadio(packet: ByteArray) {
         service.write(toRadio, packet, toRadioWriteType)
         triggerDrain.tryEmit(Unit)
