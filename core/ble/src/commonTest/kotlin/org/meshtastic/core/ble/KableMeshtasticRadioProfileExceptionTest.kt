@@ -20,7 +20,6 @@ import com.juul.kable.GattStatusException
 import com.juul.kable.NotConnectedException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -139,23 +138,24 @@ class KableMeshtasticRadioProfileExceptionTest {
         // before subscriptionReady is completed. The fix completes it exceptionally.
         service.observeException = NotConnectedException("observe failed before CCCD")
 
-        // Start collecting fromRadio in a SupervisorJob so the propagated exception doesn't
-        // crash the test scope. The channelFlow propagates the observe failure, which also
-        // triggers subscriptionReady.completeExceptionally(e).
-        val collectJob =
-            launch(SupervisorJob()) {
-                try {
-                    profile.fromRadio.collect {}
-                } catch (e: Exception) {
-                    // Expected — the observe failure propagates through the channelFlow
-                }
+        // Start collecting fromRadio in a regular child coroutine so it's properly scoped
+        // and cancelled by the test framework. The exception is caught inside the coroutine,
+        // so it won't crash the test scope.
+        val collectJob = launch {
+            try {
+                profile.fromRadio.collect {}
+            } catch (e: Exception) {
+                // Expected — the observe failure propagates through the channelFlow
             }
-        advanceUntilIdle()
+        }
+        try {
+            advanceUntilIdle()
 
-        // awaitSubscriptionReady should throw the exception promptly, not hang
-        val result = assertFailsWith<NotConnectedException> { profile.awaitSubscriptionReady() }
-        assertTrue(result.message!!.contains("observe failed before CCCD"))
-
-        collectJob.cancel()
+            // awaitSubscriptionReady should throw the exception promptly, not hang
+            val result = assertFailsWith<NotConnectedException> { profile.awaitSubscriptionReady() }
+            assertTrue(result.message!!.contains("observe failed before CCCD"))
+        } finally {
+            collectJob.cancel()
+        }
     }
 }
