@@ -17,7 +17,6 @@
 package org.meshtastic.core.service
 
 import android.content.Context
-import android.content.Intent
 import co.touchlab.kermit.Logger
 import kotlinx.coroutines.flow.StateFlow
 import org.koin.core.annotation.Single
@@ -216,8 +215,9 @@ class AndroidRadioControllerImpl(
     override fun setDeviceAddress(address: String) {
         @Suppress("DEPRECATION") // Internal use: routes address change through AIDL binder
         serviceRepository.meshService?.setDeviceAddress(address)
-        // Ensure service is running/restarted to handle the new address
-        val intent = Intent().apply { setClassName("com.geeksville.mesh", "org.meshtastic.core.service.MeshService") }
-        context.startForegroundService(intent)
+        // Ensure service is running/restarted to handle the new address.
+        // Use the shared start helper so Android 12+ foreground-service restrictions
+        // get the same fallback handling (ServiceKeepAliveWorker) as the Activity bind path.
+        MeshService.startService(context)
     }
 }
