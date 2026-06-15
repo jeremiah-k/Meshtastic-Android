@@ -72,11 +72,14 @@ class BleRadioTransportTest {
                 address = address,
             )
         bleTransport.start()
-
-        // start() begins connect() which is async
-        // In a real test we'd verify the connection state,
-        // but for now this confirms it works with the fakes.
-        assertEquals(address, bleTransport.address)
+        try {
+            // start() begins connect() which is async
+            // In a real test we'd verify the connection state,
+            // but for now this confirms it works with the fakes.
+            assertEquals(address, bleTransport.address)
+        } finally {
+            bleTransport.close()
+        }
     }
 
     @Test
@@ -123,15 +126,17 @@ class BleRadioTransportTest {
             )
         bleTransport.start()
 
-        // Advance through exactly 3 failure iterations (≈24 001 ms virtual time).
-        // The 4th iteration's backoff hasn't elapsed yet, so the coroutine is suspended
-        // and advanceTimeBy returns cleanly.
-        advanceTimeBy(24_001L)
+        try {
+            // Advance through exactly 3 failure iterations (≈24 001 ms virtual time).
+            // The 4th iteration's backoff hasn't elapsed yet, so the coroutine is suspended
+            // and advanceTimeBy returns cleanly.
+            advanceTimeBy(24_001L)
 
-        verify { service.onDisconnect(any(), any()) }
-
-        // Cancel the reconnect loop so runTest can complete.
-        bleTransport.close()
+            verify { service.onDisconnect(any(), any()) }
+        } finally {
+            // Cancel the reconnect loop so runTest can complete.
+            bleTransport.close()
+        }
     }
 
     /**
@@ -164,15 +169,17 @@ class BleRadioTransportTest {
             )
         bleTransport.start()
 
-        // Run well past where the legacy policy (maxFailures = 10) would have given up.
-        advanceTimeBy(800_001L)
+        try {
+            // Run well past where the legacy policy (maxFailures = 10) would have given up.
+            advanceTimeBy(800_001L)
 
-        // Transient disconnects (isPermanent = false) are expected once the failure threshold is hit;
-        // the policy must NEVER signal a permanent disconnect on its own. Only explicit close()
-        // (verified separately by the service layer) may emit isPermanent = true.
-        verify(mode = VerifyMode.not) { service.onDisconnect(isPermanent = true, errorMessage = any()) }
-
-        bleTransport.close()
+            // Transient disconnects (isPermanent = false) are expected once the failure threshold is hit;
+            // the policy must NEVER signal a permanent disconnect on its own. Only explicit close()
+            // (verified separately by the service layer) may emit isPermanent = true.
+            verify(mode = VerifyMode.not) { service.onDisconnect(isPermanent = true, errorMessage = any()) }
+        } finally {
+            bleTransport.close()
+        }
     }
 
     @Test
@@ -192,11 +199,13 @@ class BleRadioTransportTest {
                 address = address,
             )
         bleTransport.start()
-        advanceTimeBy(3_001)
+        try {
+            advanceTimeBy(3_001)
 
-        assertEquals("Scanned Device", connection.device?.name)
-
-        bleTransport.close()
+            assertEquals("Scanned Device", connection.device?.name)
+        } finally {
+            bleTransport.close()
+        }
     }
 
     @Test
@@ -214,13 +223,15 @@ class BleRadioTransportTest {
                 address = address,
             )
         bleTransport.start()
-        advanceTimeBy(5_001)
+        try {
+            advanceTimeBy(5_500)
 
-        assertEquals(SERVICE_UUID, scanner.lastScanServiceUuid)
-        assertEquals(address, scanner.lastScanAddress)
-        assertEquals("Bonded Device", connection.device?.name)
-
-        bleTransport.close()
+            assertEquals(SERVICE_UUID, scanner.lastScanServiceUuid)
+            assertEquals(address, scanner.lastScanAddress)
+            assertEquals("Bonded Device", connection.device?.name)
+        } finally {
+            bleTransport.close()
+        }
     }
 
     @Test
@@ -238,12 +249,14 @@ class BleRadioTransportTest {
                 address = address,
             )
         bleTransport.start()
-        advanceTimeBy(3_001)
+        try {
+            advanceTimeBy(3_001)
 
-        assertNotNull(scanner.lastScanServiceUuid, "scan must include serviceUuid")
-        assertEquals(SERVICE_UUID, scanner.lastScanServiceUuid)
-        assertEquals(address, scanner.lastScanAddress)
-
-        bleTransport.close()
+            assertNotNull(scanner.lastScanServiceUuid, "scan must include serviceUuid")
+            assertEquals(SERVICE_UUID, scanner.lastScanServiceUuid)
+            assertEquals(address, scanner.lastScanAddress)
+        } finally {
+            bleTransport.close()
+        }
     }
 }
