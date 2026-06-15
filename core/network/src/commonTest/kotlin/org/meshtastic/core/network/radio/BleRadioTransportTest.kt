@@ -106,7 +106,8 @@ class BleRadioTransportTest {
     @Test
     fun `onDisconnect is called after DEFAULT_FAILURE_THRESHOLD consecutive failures`() = runTest {
         val device = FakeBleDevice(address = address, name = "Test Device")
-        bluetoothRepository.bond(device) // skip BLE scan — device is already bonded
+        bluetoothRepository.bond(device)
+        scanner.emitDevice(device) // targeted scan resolves immediately; this test covers reconnect timing
 
         // Make every connectAndAwait call throw so each iteration counts as one failure.
         connection.connectException = RadioNotConnectedException("simulated failure")
@@ -147,6 +148,7 @@ class BleRadioTransportTest {
     fun `reconnect loop never gives up - no permanent disconnect from policy`() = runTest {
         val device = FakeBleDevice(address = address, name = "Test Device")
         bluetoothRepository.bond(device)
+        scanner.emitDevice(device)
 
         connection.connectException = RadioNotConnectedException("simulated failure")
         every { service.onDisconnect(any(), any()) } returns Unit
@@ -169,6 +171,54 @@ class BleRadioTransportTest {
         // the policy must NEVER signal a permanent disconnect on its own. Only explicit close()
         // (verified separately by the service layer) may emit isPermanent = true.
         verify(mode = VerifyMode.not) { service.onDisconnect(isPermanent = true, errorMessage = any()) }
+
+        bleTransport.close()
+    }
+
+    @Test
+    fun `findDevice prefers freshly scanned device over bonded device`() = runTest {
+        val bondedDevice = FakeBleDevice(address = address, name = "Bonded Device")
+        val scannedDevice = FakeBleDevice(address = address, name = "Scanned Device")
+        bluetoothRepository.bond(bondedDevice)
+        scanner.emitDevice(scannedDevice)
+
+        val bleTransport =
+            BleRadioTransport(
+                scope = this,
+                scanner = scanner,
+                bluetoothRepository = bluetoothRepository,
+                connectionFactory = connectionFactory,
+                callback = service,
+                address = address,
+            )
+        bleTransport.start()
+        advanceTimeBy(3_001)
+
+        assertEquals("Scanned Device", connection.device?.name)
+
+        bleTransport.close()
+    }
+
+    @Test
+    fun `findDevice falls back to bonded device when targeted scan finds nothing`() = runTest {
+        val bondedDevice = FakeBleDevice(address = address, name = "Bonded Device")
+        bluetoothRepository.bond(bondedDevice)
+
+        val bleTransport =
+            BleRadioTransport(
+                scope = this,
+                scanner = scanner,
+                bluetoothRepository = bluetoothRepository,
+                connectionFactory = connectionFactory,
+                callback = service,
+                address = address,
+            )
+        bleTransport.start()
+        advanceTimeBy(5_001)
+
+        assertEquals(SERVICE_UUID, scanner.lastScanServiceUuid)
+        assertEquals(address, scanner.lastScanAddress)
+        assertEquals("Bonded Device", connection.device?.name)
 
         bleTransport.close()
     }
