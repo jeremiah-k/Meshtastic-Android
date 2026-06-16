@@ -26,18 +26,29 @@ import org.meshtastic.core.network.service.ApiService
 class FDroidNetworkModule {
 
     /**
-     * F-Droid builds intentionally avoid network calls to the Meshtastic API.
+     * Provides an [ApiService] implementation for F-Droid builds that returns empty results instead of making network calls.
      *
-     * Returning empty results (a valid [NetworkFirmwareReleases] with default empty lists) avoids exception creation
-     * and stack-trace filling on every refresh. Empty API responses do NOT trigger bundled-JSON fallback —
-     * [FirmwareReleaseRepositoryImpl]'s `singleFlightRefresh()` inserts returned lists directly (no-op for empty), and
-     * bundled JSON seeding is driven by `ensureSeeded()` only when the local DB/cache is empty, not as a consequence of
-     * empty network results.
+     * Returning empty results avoids creating exceptions and stack traces on every refresh.
+     *
+     * @return An [ApiService] that returns an empty device-hardware list and a default [NetworkFirmwareReleases] instance.
      */
     @Single
     fun provideApiService(): ApiService = object : ApiService {
-        override suspend fun getDeviceHardware(): List<NetworkDeviceHardware> = emptyList()
+        /**
+ * Provides no device hardware from the network for F-Droid builds.
+ *
+ * @return An empty list of device hardware.
+ */
+override suspend fun getDeviceHardware(): List<NetworkDeviceHardware> = emptyList()
 
-        override suspend fun getFirmwareReleases(): NetworkFirmwareReleases = NetworkFirmwareReleases()
+        /**
+ * Provides default firmware release data without making network calls.
+ *
+ * This stub implementation for F-Droid builds returns a default [NetworkFirmwareReleases] instance
+ * instead of performing any network requests.
+ *
+ * @return A default [NetworkFirmwareReleases] instance.
+ */
+override suspend fun getFirmwareReleases(): NetworkFirmwareReleases = NetworkFirmwareReleases()
     }
 }

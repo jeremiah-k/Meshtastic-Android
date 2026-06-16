@@ -266,7 +266,12 @@ class SharedRadioInterfaceService(
         return true
     }
 
-    /** Must be called under [transportMutex]. */
+    /**
+     * Starts the radio transport connection and begins heartbeat monitoring.
+     *
+     * Must be called under [transportMutex]. Does nothing if a transport is already
+     * running or if no valid bonded device address is available.
+     */
     private fun startTransportLocked() {
         if (radioTransport != null) return
 
@@ -288,6 +293,8 @@ class SharedRadioInterfaceService(
     }
 
     /**
+     * Stops the radio transport and cleans up its resources.
+     *
      * Must be called under [transportMutex].
      *
      * @param notifyPermanent When `true`, emits a permanent disconnect state to [connectionState]. Set `false` during
@@ -331,6 +338,12 @@ class SharedRadioInterfaceService(
         }
     }
 
+    /**
+     * Initiates periodic monitoring of the radio connection's keep-alive status and liveness.
+     *
+     * Cancels any existing heartbeat loop and starts a new one that runs at regular intervals
+     * to detect and recover from stale connections.
+     */
     private fun startHeartbeat() {
         heartbeatJob?.cancel()
         lastDataReceivedMillis = now()
@@ -345,12 +358,14 @@ class SharedRadioInterfaceService(
     }
 
     /**
-     * Detects zombie connections where the BLE stack didn't report a disconnect.
+     * Detects zombie BLE connections where the stack did not report a disconnect.
      *
-     * If we believe we're connected but haven't received any data from the radio within [LIVENESS_TIMEOUT_MILLIS], the
-     * connection is likely dead. Signal a non-permanent disconnect so the reconnect machinery can take over.
+     * If the connection state is `Connected` but no data has been received from the radio within
+     * [LIVENESS_TIMEOUT_MILLIS], the connection is likely dead. Emits a non-permanent disconnect
+     * and restarts the transport. Only BLE transports are restarted; other transport types are
+     * ignored.
      *
-     * Uses [clockMillis] for the current time so tests can inject a deterministic clock.
+     * Uses [clockMillis] to determine the current time.
      */
     internal fun checkLiveness() {
         if (_connectionState.value != ConnectionState.Connected) return
@@ -401,6 +416,9 @@ class SharedRadioInterfaceService(
         }
     }
 
+    /**
+     * Sends a keep-alive signal to the radio transport if the heartbeat interval has elapsed.
+     */
     fun keepAlive(now: Long = now()) {
         if (now - lastHeartbeatMillis > HEARTBEAT_INTERVAL_MILLIS) {
             radioTransport?.keepAlive()
@@ -430,6 +448,11 @@ class SharedRadioInterfaceService(
         }
     }
 
+    /**
+     * Processes incoming bytes from the radio and enqueues them in arrival order.
+     *
+     * Updates the timestamp of the last received data and emits a receive activity event.
+     */
     @Suppress("TooGenericExceptionCaught")
     override fun handleFromRadio(bytes: ByteArray) {
         try {
@@ -456,6 +479,12 @@ class SharedRadioInterfaceService(
         while (_receivedData.tryReceive().isSuccess) Unit
     }
 
+    /**
+     * Marks the radio connection as established.
+     *
+     * Updates the connection state to [ConnectionState.Connected] and resets the
+     * liveness-check timer.
+     */
     override fun onConnect() {
         // MutableStateFlow.value is thread-safe (backed by atomics) — assign directly rather than
         // launching a coroutine. The async launch pattern introduced a window where a concurrent

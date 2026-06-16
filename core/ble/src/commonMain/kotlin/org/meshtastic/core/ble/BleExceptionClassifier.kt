@@ -40,6 +40,8 @@ data class BleExceptionInfo(val isPermanent: Boolean, val gattStatus: Int? = nul
  *
  * This keeps Kable type knowledge inside `core:ble` so that `core:network` (and other consumers) can classify BLE
  * exceptions without depending on Kable directly.
+ *
+ * @return [BleExceptionInfo] if the throwable is a known Kable BLE exception; `null` otherwise.
  */
 fun Throwable.classifyBleException(): BleExceptionInfo? = when (this) {
     is GattStatusException ->
@@ -87,14 +89,21 @@ private val FATAL_GATT_STATUSES =
     )
 
 /**
- * Returns `true` if this throwable indicates the BLE session is irrecoverably broken and should be torn down
- * (triggering reconnection), as opposed to a transient condition that can be retried.
+ * Determines whether the BLE session is irrecoverably broken and requires reconnection.
  *
- * Also checks the cause chain — if a session-fatal exception is wrapped inside another exception (e.g., by coroutine
- * machinery or retry logic), it is still detected. Depth-limited to prevent stack overflow on malformed cause chains.
+ * Checks the cause chain to detect session-fatal exceptions wrapped inside other exceptions (e.g., by coroutine
+ * machinery or retry logic). The check is depth-limited to prevent stack overflow on malformed cause chains.
+ *
+ * @return `true` if the throwable indicates the session is irrecoverably broken, `false` otherwise.
  */
 fun Throwable.isSessionFatalBleException(): Boolean = isSessionFatalBleExceptionInternal(maxDepth = 10)
 
+/**
+ * Determines whether a throwable or its causes indicate the BLE session is irrecoverably broken.
+ *
+ * @param maxDepth The maximum recursion depth when traversing the cause chain; prevents infinite recursion.
+ * @return `true` if a session-fatal condition is detected, `false` otherwise or if the recursion depth limit is reached.
+ */
 private fun Throwable.isSessionFatalBleExceptionInternal(maxDepth: Int): Boolean {
     if (maxDepth <= 0) return false
     return when (this) {
