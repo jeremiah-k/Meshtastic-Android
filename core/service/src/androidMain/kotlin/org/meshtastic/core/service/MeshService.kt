@@ -32,12 +32,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import org.koin.android.ext.android.inject
 import org.meshtastic.core.common.hasLocationPermission
+import org.meshtastic.core.common.util.normalizeAddress
 import org.meshtastic.core.model.DeviceVersion
 import org.meshtastic.core.repository.MeshConnectionManager
 import org.meshtastic.core.repository.MeshNotificationManager
@@ -167,8 +167,9 @@ class MeshService : Service() {
      * - On a valid emission: acquires the wake lock and the service continues as a normal foreground service.
      * - On timeout (no valid address observed): concludes no device is genuinely selected and stops cleanly.
      *
-     * [drop] skips the current StateFlow value (which is the same stale value read synchronously in [onStartCommand])
-     * so we only act on a fresh emission that reflects loaded DataStore state.
+     * Uses [first] with a predicate rather than `drop(1)` so we never skip an already-current valid StateFlow value: if
+     * the address arrived between the synchronous [onStartCommand] read and this subscription, [first] returns it
+     * immediately instead of waiting the full timeout and spuriously stopping a service that has a valid device.
      */
     private fun scheduleDeviceAddressResolution() {
         addressWaitJob?.cancel()
@@ -176,7 +177,7 @@ class MeshService : Service() {
             serviceScope.launch {
                 val resolved =
                     withTimeoutOrNull(DEVICE_ADDRESS_SETTLE_MS) {
-                        radioInterfaceService.currentDeviceAddressFlow.drop(1).first(::isValidDeviceAddress)
+                        radioInterfaceService.currentDeviceAddressFlow.first(::isValidDeviceAddress)
                     }
                 if (isValidDeviceAddress(resolved)) {
                     Logger.i { "MeshService: selected device resolved ($resolved) after address-flow wait" }
@@ -191,16 +192,15 @@ class MeshService : Service() {
     }
 
     /**
-     * Returns true iff [address] refers to a real device. Rejects null/blank and the legacy no-device sentinels (`"n"`,
-     * `"null"`, `".n"`, case-insensitive) — the same set [org.meshtastic.core.common.util.normalizeAddress] and
-     * `buildDbName` collapse to DEFAULT_DB_NAME. Kept local and explicit because it gates the foreground-service
-     * stay-alive decision in [onStartCommand] and [scheduleDeviceAddressResolution]; correctness here is easier to read
-     * in isolation than a one-liner against `normalizeAddress`.
+     * Returns true iff [address] refers to a real device. Delegates sentinel detection to [normalizeAddress] so this
+     * stays perfectly consistent with `buildDbName` / `DEFAULT_DB_NAME`: any input that normalizes to `"DEFAULT"`
+     * (null, blank, `"N"`, `"NULL"`, case-insensitive) or to the legacy `".N"` sentinel is rejected; everything else is
+     * treated as a real address. Gates the foreground-service stay-alive decision in [onStartCommand] and
+     * [scheduleDeviceAddressResolution].
      */
     private fun isValidDeviceAddress(address: String?): Boolean {
-        if (address.isNullOrBlank()) return false
-        val normalized = address.trim().lowercase()
-        return normalized != "n" && normalized != ".n" && normalized != "null"
+        val normalized = normalizeAddress(address)
+        return normalized != "DEFAULT" && normalized != ".N"
     }
 
     private fun startForegroundSafely(notification: android.app.Notification, foregroundServiceType: Int) {

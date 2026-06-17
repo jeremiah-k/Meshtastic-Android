@@ -25,7 +25,8 @@ class BuildDbNameTest {
     @Test
     fun `no-device sentinels all resolve to DEFAULT_DB_NAME`() {
         val expected = DatabaseConstants.DEFAULT_DB_NAME
-        val sentinels = listOf(null, "", "   ", "\t", "n", "N", "null", "NULL", "Null", ".n", ".N")
+        val sentinels =
+            listOf(null, "", "   ", "\t", "n", "N", "null", "NULL", "Null", ".n", ".N", "default", "DEFAULT", "Default")
         sentinels.forEach { sentinel ->
             assertEquals(
                 expected,

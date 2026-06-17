@@ -170,24 +170,35 @@ class SharedRadioInterfaceService(
     private val initLock = Mutex()
     private val transportMutex = Mutex()
 
+    init {
+        // Address sync runs INDEPENDENTLY of connect() so that observers (notably
+        // MeshServiceOrchestrator) see a valid currentDeviceAddressFlow BEFORE the transport
+        // starts. Previously this mirror lived inside initStateListeners()'s devAddr listener and
+        // was coupled to startTransportLocked() — but initStateListeners() is only invoked from
+        // connect(), so the flow never updated until connect() ran. That created a cold-start race:
+        // the orchestrator's currentDeviceAddressFlow observer could fire AFTER the transport had
+        // already started, violating the invariant that the active DB must be switched to the
+        // selected device's DB before its transport starts.
+        //
+        // This listener ONLY mirrors radioPrefs.devAddr into _currentDeviceAddressFlow; it never
+        // starts a transport. Transport start remains driven exclusively by connect() (initial),
+        // setDeviceAddress() (explicit user switch), BLE/network state changes (environment
+        // recovery), and liveness restarts (zombie recovery) — see startTransportLocked() callers.
+        // _currentDeviceAddressFlow is a MutableStateFlow (atomic .value), so the unconditional
+        // assignment here is race-free without holding transportMutex; same-address writes are
+        // idempotent no-ops.
+        radioPrefs.devAddr
+            .onEach { addr -> _currentDeviceAddressFlow.value = addr }
+            .catch { Logger.e(it) { "radioPrefs.devAddr address-sync flow crashed" } }
+            .launchIn(processLifecycle.coroutineScope)
+    }
+
     private fun initStateListeners() {
         if (listenersInitialized.value) return
         processLifecycle.coroutineScope.launch {
             initLock.withLock {
                 if (listenersInitialized.value) return@withLock
                 listenersInitialized.value = true
-
-                radioPrefs.devAddr
-                    .onEach { addr ->
-                        transportMutex.withLock {
-                            if (_currentDeviceAddressFlow.value != addr) {
-                                _currentDeviceAddressFlow.value = addr
-                                startTransportLocked()
-                            }
-                        }
-                    }
-                    .catch { Logger.e(it) { "devAddr flow crashed" } }
-                    .launchIn(processLifecycle.coroutineScope)
 
                 bluetoothRepository.state
                     .onEach { state ->

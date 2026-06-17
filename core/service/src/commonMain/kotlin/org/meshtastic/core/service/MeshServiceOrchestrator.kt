@@ -22,6 +22,7 @@ import kotlinx.atomicfu.atomic
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.isActive
@@ -29,6 +30,8 @@ import kotlinx.coroutines.launch
 import org.koin.core.annotation.Single
 import org.meshtastic.core.common.database.DatabaseManager
 import org.meshtastic.core.common.util.handledLaunch
+import org.meshtastic.core.common.util.normalizeAddress
+import org.meshtastic.core.common.util.safeCatching
 import org.meshtastic.core.di.CoroutineDispatchers
 import org.meshtastic.core.repository.MeshConnectionManager
 import org.meshtastic.core.repository.MeshMessageProcessor
@@ -72,6 +75,18 @@ class MeshServiceOrchestrator(
     /** Whether the orchestrator is currently running. */
     val isRunning: Boolean
         get() = scopeRef.value?.isActive == true
+
+    /**
+     * True iff [address] refers to a real selected device. Rejects null/blank and the legacy no-device sentinels
+     * (`"n"`, `"null"`, `".n"`, case-insensitive) — the same set [normalizeAddress] collapses to `"DEFAULT"`, plus the
+     * `.N` sentinel which [normalizeAddress] leaves intact. Mirrors [org.meshtastic.core.service.MeshService]'s
+     * stay-alive gate so the orchestrator and the Android foreground-service decision agree on what counts as
+     * "selected". Built on [normalizeAddress] from `core:common` to avoid duplicating the normalization rules.
+     */
+    private fun isValidDeviceAddress(address: String?): Boolean {
+        val normalized = normalizeAddress(address)
+        return normalized != "DEFAULT" && normalized != ".N"
+    }
 
     /**
      * Starts the mesh service components and wires up data flows.
@@ -119,25 +134,37 @@ class MeshServiceOrchestrator(
             }
             .launchIn(newScope)
 
+        // Cold-start lifecycle invariant: a transport must NOT start for a selected address until
+        // the active DB has been switched to that same address. We enforce the ordering
+        // (valid address -> DB switch -> connect) by waiting for currentDeviceAddressFlow to
+        // surface a real selected address before performing the DB switch and connecting the
+        // radio. Address sync inside SharedRadioInterfaceService now runs independently of
+        // connect() (via its init{} listener), so this wait completes as soon as prefs load —
+        // without it, connect() would race ahead of the DB switch and the firmware handshake
+        // would write into the wrong (or null) DB.
+        //
+        // If no device is ever selected this suspends indefinitely for the lifetime of newScope;
+        // by design the radio must not connect without a selected device. This mirrors
+        // MeshService's foreground-service stay-alive gate (isValidDeviceAddress).
         newScope.handledLaunch {
-            // Ensure the per-device database is active before the radio connects.
-            // On Android this is handled by MeshUtilApplication.init(); on Desktop (and any
-            // future KMP host) the orchestrator is the first entry point, so it must initialize
-            // the database here. Without this, DatabaseManager._currentDb stays null and all
-            // Room writes via withDb() are silently dropped — causing ourNodeInfo to remain null
-            // after the handshake completes.
-            databaseManager.switchActiveDatabase(radioInterfaceService.getDeviceAddress())
+            val address = radioInterfaceService.currentDeviceAddressFlow.first(::isValidDeviceAddress)
+            databaseManager.switchActiveDatabase(address)
             Logger.i { "Per-device database initialized, connecting radio" }
             radioInterfaceService.connect()
         }
 
-        // Observe device-address changes throughout this session so null->real and
-        // address->different-address transitions call switchActiveDatabase. DatabaseManager is
-        // idempotent, so the redundant initial replay (matching the getDeviceAddress() snapshot
-        // above) is a no-op. This catches mid-session address resolutions the one-shot switch
-        // would miss (e.g. late process-lifecycle devAddr propagation on Android).
+        // Mid-session device-address transitions (late process-lifecycle devAddr propagation,
+        // user-initiated device switch, etc.): keep the active DB in sync with the selected
+        // device. The initial emission (matching the .first() snapshot above) is an idempotent
+        // no-op in DatabaseManager. wrap in safeCatching so a single transient failure (e.g. Room
+        // I/O error) doesn't kill the collector and silently halt ALL future address propagation
+        // for the lifetime of this orchestrator scope. safeCatching re-throws CancellationException
+        // so scope cancellation still propagates cleanly.
         radioInterfaceService.currentDeviceAddressFlow
-            .onEach { addr -> databaseManager.switchActiveDatabase(addr) }
+            .onEach { addr ->
+                safeCatching { databaseManager.switchActiveDatabase(addr) }
+                    .onFailure { err -> Logger.e(err) { "Failed to switch active database on address update" } }
+            }
             .launchIn(newScope)
 
         radioInterfaceService.receivedData

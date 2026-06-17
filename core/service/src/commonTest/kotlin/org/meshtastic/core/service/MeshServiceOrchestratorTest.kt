@@ -76,8 +76,12 @@ class MeshServiceOrchestratorTest {
     private fun createOrchestrator(
         receivedData: MutableSharedFlow<ByteArray> = MutableSharedFlow(),
         connectionError: MutableSharedFlow<String> = MutableSharedFlow(),
-        connectionState: MutableStateFlow<ConnectionState> = MutableStateFlow(ConnectionState.Disconnected),
-        currentDeviceAddressFlow: MutableStateFlow<String?> = MutableStateFlow(null),
+        connectionState: MutableStateFlow<ConnectionState> =
+            MutableStateFlow<ConnectionState>(ConnectionState.Disconnected),
+        // A valid default address lets every start() proceed through the new
+        // wait-for-valid-address -> DB switch -> connect ordering without per-test boilerplate.
+        // Tests that need a different initial address (or no address) override it explicitly.
+        currentDeviceAddressFlow: MutableStateFlow<String?> = MutableStateFlow<String?>("x:AA:BB:CC:DD:EE:FF"),
         takEnabledFlow: MutableStateFlow<Boolean> = MutableStateFlow(false),
         takRunningFlow: MutableStateFlow<Boolean> = MutableStateFlow(false),
     ): MeshServiceOrchestrator {
@@ -156,9 +160,11 @@ class MeshServiceOrchestratorTest {
 
     @Test
     fun testStartCallsSwitchActiveDatabase() {
-        every { radioInterfaceService.getDeviceAddress() } returns "tcp:192.168.1.100"
-
-        val orchestrator = createOrchestrator()
+        // New ordering: start() waits for currentDeviceAddressFlow to surface a valid address,
+        // then switches the DB to it and connects. getDeviceAddress() is no longer consulted
+        // from start(), so drive the address via the flow.
+        val deviceAddressFlow = MutableStateFlow<String?>("tcp:192.168.1.100")
+        val orchestrator = createOrchestrator(currentDeviceAddressFlow = deviceAddressFlow)
         orchestrator.start()
 
         verifySuspend { databaseManager.switchActiveDatabase("tcp:192.168.1.100") }
@@ -289,11 +295,11 @@ class MeshServiceOrchestratorTest {
     fun testCurrentDeviceAddressChangeSwitchesActiveDatabaseAfterStart() {
         val deviceAddressFlow = MutableStateFlow<String?>("tcp:192.168.1.100")
         val orchestrator = createOrchestrator(currentDeviceAddressFlow = deviceAddressFlow)
-        every { radioInterfaceService.getDeviceAddress() } returns "tcp:192.168.1.100"
 
         orchestrator.start()
 
-        // Initial address was switched (one-shot via getDeviceAddress() + StateFlow replay via the observer).
+        // Initial address was switched (the first-valid emission in start() + the StateFlow
+        // replay into the mid-session observer; DatabaseManager is idempotent for the dup).
         verifySuspend { databaseManager.switchActiveDatabase("tcp:192.168.1.100") }
 
         // Mid-session address resolution must propagate to DatabaseManager.
@@ -319,7 +325,7 @@ class MeshServiceOrchestratorTest {
     @Test
     fun testConnectedWhileStoppedDoesNotRestartWithoutExplicitStart() {
         val receivedData = MutableSharedFlow<ByteArray>(extraBufferCapacity = 8)
-        val connectionState = MutableStateFlow(ConnectionState.Disconnected)
+        val connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
         val orchestrator = createOrchestrator(receivedData = receivedData, connectionState = connectionState)
         every { nodeManager.myNodeNum } returns MutableStateFlow(null)
 
