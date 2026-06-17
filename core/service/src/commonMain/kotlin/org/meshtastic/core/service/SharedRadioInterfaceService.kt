@@ -302,14 +302,17 @@ class SharedRadioInterfaceService(
 
         processLifecycle.coroutineScope.launch {
             transportMutex.withLock {
-                // Explicit device selection is a connect() equivalent: mark the lifecycle active
-                // before the stop/start swap so listeners cannot race the rebind into a "down" state.
-                // Only arm the gate when a real address was selected — setDeviceAddress(null)/("n")
-                // is a deselect, not a connect, so connectionRequested must NOT stick at true and
-                // block a later explicit connect() or environmental recovery.
-                if (sanitized != null) connectionRequested = true
+                // The sanitized address is the single source of truth for the connectionRequested
+                // gate: a real address arms the lifecycle (connect() equivalent) so environmental
+                // listeners cannot race the rebind into a "down" state; null/("n") is a deselect
+                // that MUST clear the gate so subsequent BT/network recovery cannot resurrect a
+                // transport for a device the user explicitly tore down. Only start a fresh
+                // transport when an address was actually selected.
+                connectionRequested = sanitized != null
                 ignoreExceptionSuspend { stopTransportLocked() }
-                startTransportLocked()
+                if (sanitized != null) {
+                    startTransportLocked()
+                }
             }
         }
         return true
