@@ -333,7 +333,7 @@ class MeshServiceOrchestratorTest {
     @Test
     fun testConnectedWhileStoppedDoesNotRestartWithoutExplicitStart() {
         val receivedData = MutableSharedFlow<ByteArray>(extraBufferCapacity = 8)
-        val connectionState = MutableStateFlow(ConnectionState.Disconnected)
+        val connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
         val orchestrator = createOrchestrator(receivedData = receivedData, connectionState = connectionState)
         every { nodeManager.myNodeNum } returns MutableStateFlow(null)
 
