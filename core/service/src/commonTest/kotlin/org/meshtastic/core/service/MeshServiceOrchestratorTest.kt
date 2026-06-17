@@ -32,6 +32,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import org.meshtastic.core.common.database.DatabaseManager
 import org.meshtastic.core.di.CoroutineDispatchers
+import org.meshtastic.core.model.ConnectionState
 import org.meshtastic.core.repository.CommandSender
 import org.meshtastic.core.repository.MeshConfigHandler
 import org.meshtastic.core.repository.MeshConnectionManager
@@ -75,11 +76,15 @@ class MeshServiceOrchestratorTest {
     private fun createOrchestrator(
         receivedData: MutableSharedFlow<ByteArray> = MutableSharedFlow(),
         connectionError: MutableSharedFlow<String> = MutableSharedFlow(),
+        connectionState: MutableStateFlow<ConnectionState> = MutableStateFlow(ConnectionState.Disconnected),
+        currentDeviceAddressFlow: MutableStateFlow<String?> = MutableStateFlow(null),
         takEnabledFlow: MutableStateFlow<Boolean> = MutableStateFlow(false),
         takRunningFlow: MutableStateFlow<Boolean> = MutableStateFlow(false),
     ): MeshServiceOrchestrator {
         every { radioInterfaceService.receivedData } returns receivedData
         every { radioInterfaceService.connectionError } returns connectionError
+        every { radioInterfaceService.connectionState } returns connectionState
+        every { radioInterfaceService.currentDeviceAddressFlow } returns currentDeviceAddressFlow
         every { serviceRepository.meshPacketFlow } returns MutableSharedFlow()
         every { meshConfigHandler.moduleConfig } returns MutableStateFlow(LocalModuleConfig())
         every { takPrefs.isTakServerEnabled } returns takEnabledFlow
@@ -266,6 +271,124 @@ class MeshServiceOrchestratorTest {
         receivedData.tryEmit(packet)
 
         // Despite six total start() calls, only the most recent collector is live.
+        verifySuspend(exactly(1)) { messageProcessor.handleFromRadio(packet, null) }
+
+        orchestrator.stop()
+    }
+
+    /**
+     * Regression: when [RadioInterfaceService.currentDeviceAddressFlow] emits a new address mid-session (e.g. a late
+     * process-lifecycle address resolution on Android), the orchestrator must propagate it to [DatabaseManager] so Room
+     * writes land in the right per-device DB. Previously start() only switched the DB once via getDeviceAddress() and
+     * missed subsequent address changes, leaving the new session writing to the old DB.
+     *
+     * DatabaseManager is idempotent, so the redundant initial replay (matching the getDeviceAddress() snapshot) is a
+     * no-op; we therefore assert by argument value rather than brittle exact counts.
+     */
+    @Test
+    fun testCurrentDeviceAddressChangeSwitchesActiveDatabaseAfterStart() {
+        val deviceAddressFlow = MutableStateFlow<String?>("tcp:192.168.1.100")
+        val orchestrator = createOrchestrator(currentDeviceAddressFlow = deviceAddressFlow)
+        every { radioInterfaceService.getDeviceAddress() } returns "tcp:192.168.1.100"
+
+        orchestrator.start()
+
+        // Initial address was switched (one-shot via getDeviceAddress() + StateFlow replay via the observer).
+        verifySuspend { databaseManager.switchActiveDatabase("tcp:192.168.1.100") }
+
+        // Mid-session address resolution must propagate to DatabaseManager.
+        deviceAddressFlow.value = "tcp:10.0.0.5"
+        verifySuspend { databaseManager.switchActiveDatabase("tcp:10.0.0.5") }
+
+        orchestrator.stop()
+    }
+
+    /**
+     * Regression: if the transport reports [ConnectionState.Connected] while the orchestrator is stopped (e.g. a late
+     * BLE liveness reconnect or process-lifecycle address resolution bringing the link up after stop()), the
+     * orphan-Connected recovery observer launched in init{} must call start() so exactly one receivedData collector
+     * drains the channel. Without it the transport sits Connected with no collector and the firmware handshake stalls
+     * (NodeDB/channels never load).
+     */
+    @Test
+    fun testConnectedWhileStoppedTriggersRecoveryAndAttachesSingleCollector() {
+        val receivedData = MutableSharedFlow<ByteArray>(extraBufferCapacity = 8)
+        val connectionState = MutableStateFlow(ConnectionState.Disconnected)
+        val orchestrator = createOrchestrator(receivedData = receivedData, connectionState = connectionState)
+        every { nodeManager.myNodeNum } returns MutableStateFlow(null)
+
+        // Orchestrator is stopped; never call start() explicitly.
+        assertFalse(orchestrator.isRunning)
+
+        // Transport reaches Connected — the init{} recovery observer must restart the orchestrator.
+        connectionState.value = ConnectionState.Connected
+        assertTrue(orchestrator.isRunning)
+
+        // Exactly one collector must now be draining receivedData.
+        val packet = byteArrayOf(7, 7, 7)
+        receivedData.tryEmit(packet)
+        verifySuspend(exactly(1)) { messageProcessor.handleFromRadio(packet, null) }
+
+        orchestrator.stop()
+    }
+
+    /**
+     * Companion to [testConnectedWhileStoppedTriggersRecoveryAndAttachesSingleCollector]: non-Connected transport
+     * states while stopped must NOT trigger recovery. The orchestrator only restarts for a live Connected transport
+     * that actually needs a receivedData collector; cycling through Connecting/DeviceSleep/Disconnected must leave the
+     * orchestrator stopped with no collector attached.
+     */
+    @Test
+    fun testNonConnectedStatesWhileStoppedDoNotTriggerRecovery() {
+        val receivedData = MutableSharedFlow<ByteArray>(extraBufferCapacity = 8)
+        val connectionState = MutableStateFlow(ConnectionState.Disconnected)
+        val orchestrator = createOrchestrator(receivedData = receivedData, connectionState = connectionState)
+        every { nodeManager.myNodeNum } returns MutableStateFlow(null)
+
+        assertFalse(orchestrator.isRunning)
+
+        // Cycle through every non-Connected state — none should restart the orchestrator.
+        connectionState.value = ConnectionState.Connecting
+        assertFalse(orchestrator.isRunning)
+        connectionState.value = ConnectionState.DeviceSleep
+        assertFalse(orchestrator.isRunning)
+        connectionState.value = ConnectionState.Disconnected
+        assertFalse(orchestrator.isRunning)
+
+        // No collector should have been attached: a packet emitted now is unhandled.
+        val packet = byteArrayOf(9, 9, 9)
+        receivedData.tryEmit(packet)
+        verifySuspend(exactly(0)) { messageProcessor.handleFromRadio(packet, null) }
+    }
+
+    /**
+     * Regression: duplicate Connected emissions (e.g. a BLE flap sequence Connected -> Disconnected -> Connected) must
+     * NOT accumulate receivedData collectors. The first Connected while stopped triggers recovery.start(); subsequent
+     * Connected emissions find isRunning == true and the recovery branch is a no-op. Otherwise every reconnect would
+     * multiply packet handling.
+     *
+     * This relies on start()'s atomic CAS guard on [MeshServiceOrchestrator.isRunning], which collapses concurrent or
+     * duplicate recovery triggers into a single restart.
+     */
+    @Test
+    fun testDuplicateConnectedRecoveryDoesNotAccumulateCollectors() {
+        val receivedData = MutableSharedFlow<ByteArray>(extraBufferCapacity = 8)
+        val connectionState = MutableStateFlow(ConnectionState.Disconnected)
+        val orchestrator = createOrchestrator(receivedData = receivedData, connectionState = connectionState)
+        every { nodeManager.myNodeNum } returns MutableStateFlow(null)
+
+        // First Connected while stopped triggers recovery -> start().
+        connectionState.value = ConnectionState.Connected
+        assertTrue(orchestrator.isRunning)
+
+        // Flap and reconnect. The second Connected must NOT trigger a second start() — isRunning is already true.
+        connectionState.value = ConnectionState.Disconnected
+        connectionState.value = ConnectionState.Connected
+        assertTrue(orchestrator.isRunning)
+
+        // Only one collector should be live: the packet is handled exactly once.
+        val packet = byteArrayOf(5, 5, 5, 5)
+        receivedData.tryEmit(packet)
         verifySuspend(exactly(1)) { messageProcessor.handleFromRadio(packet, null) }
 
         orchestrator.stop()

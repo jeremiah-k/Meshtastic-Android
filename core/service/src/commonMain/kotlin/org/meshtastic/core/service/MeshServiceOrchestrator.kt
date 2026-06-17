@@ -30,6 +30,7 @@ import org.koin.core.annotation.Single
 import org.meshtastic.core.common.database.DatabaseManager
 import org.meshtastic.core.common.util.handledLaunch
 import org.meshtastic.core.di.CoroutineDispatchers
+import org.meshtastic.core.model.ConnectionState
 import org.meshtastic.core.repository.MeshConnectionManager
 import org.meshtastic.core.repository.MeshMessageProcessor
 import org.meshtastic.core.repository.MeshNotificationManager
@@ -72,6 +73,34 @@ class MeshServiceOrchestrator(
     /** Whether the orchestrator is currently running. */
     val isRunning: Boolean
         get() = scopeRef.value?.isActive == true
+
+    /**
+     * Process-lifetime scope that survives per-start [scopeRef] cancellation.
+     *
+     * Used exclusively by the orphan-Connected recovery observer below. It must outlive [stop] so it can restart the
+     * orchestrator when the transport reports [ConnectionState.Connected] while no per-start collectors are attached —
+     * otherwise a late BLE liveness reconnect or a process-lifecycle device-address resolution could leave the
+     * transport Connected with no [receivedData] collector draining the channel, stalling the firmware handshake and
+     * NodeDB/channels load.
+     */
+    private val recoveryScope = CoroutineScope(SupervisorJob() + dispatchers.default)
+
+    init {
+        // Orphan-Connected recovery: if the transport reaches Connected while the orchestrator is
+        // stopped, restart it to reattach the receivedData collector. [start] is idempotent (CAS
+        // guard on [scopeRef]) so concurrent/duplicate recovery triggers collapse to a single
+        // restart; once [isRunning] is true this branch is a no-op, which prevents recursion storms
+        // and duplicate collectors. The observer is a leaf consumer of a StateFlow and never calls
+        // back into the transport, so it cannot create cycles.
+        radioInterfaceService.connectionState
+            .onEach { state ->
+                if (state == ConnectionState.Connected && !isRunning) {
+                    Logger.i { "Transport Connected while orchestrator stopped; recovering" }
+                    start()
+                }
+            }
+            .launchIn(recoveryScope)
+    }
 
     /**
      * Starts the mesh service components and wires up data flows.
@@ -130,6 +159,15 @@ class MeshServiceOrchestrator(
             Logger.i { "Per-device database initialized, connecting radio" }
             radioInterfaceService.connect()
         }
+
+        // Observe device-address changes throughout this session so null->real and
+        // address->different-address transitions call switchActiveDatabase. DatabaseManager is
+        // idempotent, so the redundant initial replay (matching the getDeviceAddress() snapshot
+        // above) is a no-op. This catches mid-session address resolutions the one-shot switch
+        // would miss (e.g. late process-lifecycle devAddr propagation on Android).
+        radioInterfaceService.currentDeviceAddressFlow
+            .onEach { addr -> databaseManager.switchActiveDatabase(addr) }
+            .launchIn(newScope)
 
         radioInterfaceService.receivedData
             .onEach { bytes -> messageProcessor.handleFromRadio(bytes, nodeManager.myNodeNum.value) }
