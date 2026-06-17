@@ -18,14 +18,15 @@ package org.meshtastic.core.service
 
 import co.touchlab.kermit.Severity
 import dev.mokkery.MockMode
+import dev.mokkery.answering.calls
 import dev.mokkery.answering.returns
 import dev.mokkery.every
+import dev.mokkery.everySuspend
 import dev.mokkery.matcher.any
 import dev.mokkery.mock
 import dev.mokkery.verify
 import dev.mokkery.verify.VerifyMode.Companion.atLeast
 import dev.mokkery.verify.VerifyMode.Companion.exactly
-import dev.mokkery.verify.VerifyMode.Companion.order
 import dev.mokkery.verifySuspend
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -48,6 +49,7 @@ import org.meshtastic.core.takserver.TAKMeshIntegration
 import org.meshtastic.core.takserver.TAKServerManager
 import org.meshtastic.proto.LocalModuleConfig
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -165,23 +167,34 @@ class MeshServiceOrchestratorTest {
         // from start(), so drive the address via the flow.
         val deviceAddressFlow = MutableStateFlow<String?>("tcp:192.168.1.100")
         val orchestrator = createOrchestrator(currentDeviceAddressFlow = deviceAddressFlow)
+
+        // Event recorder: locks the cold-start ordering (DB switch -> load cached NodeDB ->
+        // connect) without depending on Mokkery's global call-order semantics. The global
+        // order verifier (verifySuspend(order) { ... }) fails because start() also drives
+        // other calls on the same mocks (resetReceivedBuffer, currentDeviceAddressFlow
+        // collectors, the mid-session DB switch replay, etc.) that interleave with the
+        // three calls we care about and break the global sequence. Recording only the
+        // three calls under test sidesteps the global check entirely.
+        val events = mutableListOf<String>()
+        everySuspend { databaseManager.switchActiveDatabase(any()) } calls { events.add("switchDb") }
+        every { nodeManager.loadCachedNodeDB() } calls { events.add("loadCachedNodeDb") }
+        every { radioInterfaceService.connect() } calls { events.add("connect") }
+
         orchestrator.start()
 
         verifySuspend { databaseManager.switchActiveDatabase("tcp:192.168.1.100") }
         verify { nodeManager.loadCachedNodeDB() }
         verify { radioInterfaceService.connect() }
 
-        // Locks in the cold-start ordering invariant: DB switch → load cached NodeDB → connect.
-        // loadCachedNodeDB must run AFTER the DB switch (so it reads from the freshly-selected
-        // per-device DB) and BEFORE connect() (so the firmware handshake doesn't see a stale or
-        // empty node set). Previously loadCachedNodeDB ran synchronously in start() and raced
-        // ahead of the DB switch, reading the default/null DB. `order` mode permits other calls
-        // in between but asserts these three happened in the listed sequence.
-        verifySuspend(order) {
-            databaseManager.switchActiveDatabase("tcp:192.168.1.100")
-            nodeManager.loadCachedNodeDB()
-            radioInterfaceService.connect()
-        }
+        // Locks in the cold-start ordering invariant: DB switch -> load cached NodeDB ->
+        // connect. loadCachedNodeDB must run AFTER the DB switch (so it reads from the
+        // freshly-selected per-device DB) and BEFORE connect() (so the firmware handshake
+        // doesn't see a stale or empty node set). On UnconfinedTestDispatcher the
+        // handledLaunch block runs eagerly, producing these three events in order. The
+        // mid-session address observer then replays the initial value, producing a
+        // redundant "switchDb"; assert only the first three to lock the order without
+        // coupling to the redundant replay.
+        assertEquals(listOf("switchDb", "loadCachedNodeDb", "connect"), events.take(3))
 
         orchestrator.stop()
     }
