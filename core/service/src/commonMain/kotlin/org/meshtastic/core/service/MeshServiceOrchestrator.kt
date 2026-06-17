@@ -30,7 +30,7 @@ import kotlinx.coroutines.launch
 import org.koin.core.annotation.Single
 import org.meshtastic.core.common.database.DatabaseManager
 import org.meshtastic.core.common.util.handledLaunch
-import org.meshtastic.core.common.util.normalizeAddress
+import org.meshtastic.core.common.util.isValidDeviceAddress
 import org.meshtastic.core.common.util.safeCatching
 import org.meshtastic.core.di.CoroutineDispatchers
 import org.meshtastic.core.repository.MeshConnectionManager
@@ -75,18 +75,6 @@ class MeshServiceOrchestrator(
     /** Whether the orchestrator is currently running. */
     val isRunning: Boolean
         get() = scopeRef.value?.isActive == true
-
-    /**
-     * True iff [address] refers to a real selected device. Rejects null/blank and the legacy no-device sentinels
-     * (`"n"`, `"null"`, `".n"`, case-insensitive) — the same set [normalizeAddress] collapses to `"DEFAULT"`, plus the
-     * `.N` sentinel which [normalizeAddress] leaves intact. Mirrors [org.meshtastic.core.service.MeshService]'s
-     * stay-alive gate so the orchestrator and the Android foreground-service decision agree on what counts as
-     * "selected". Built on [normalizeAddress] from `core:common` to avoid duplicating the normalization rules.
-     */
-    private fun isValidDeviceAddress(address: String?): Boolean {
-        val normalized = normalizeAddress(address)
-        return normalized != "DEFAULT" && normalized != ".N"
-    }
 
     /**
      * Starts the mesh service components and wires up data flows.
@@ -160,6 +148,10 @@ class MeshServiceOrchestrator(
         // I/O error) doesn't kill the collector and silently halt ALL future address propagation
         // for the lifetime of this orchestrator scope. safeCatching re-throws CancellationException
         // so scope cancellation still propagates cleanly.
+        //
+        // Note: cold-start ordering (valid address -> DB switch -> connect) is enforced above,
+        // but a mid-session device switch via setDeviceAddress() races this DB switch against the
+        // transport restart. Pre-existing behavior, not introduced by the lifecycle refactor.
         radioInterfaceService.currentDeviceAddressFlow
             .onEach { addr ->
                 safeCatching { databaseManager.switchActiveDatabase(addr) }

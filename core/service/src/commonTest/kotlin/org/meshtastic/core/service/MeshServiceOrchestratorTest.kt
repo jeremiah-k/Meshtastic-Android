@@ -25,6 +25,7 @@ import dev.mokkery.mock
 import dev.mokkery.verify
 import dev.mokkery.verify.VerifyMode.Companion.atLeast
 import dev.mokkery.verify.VerifyMode.Companion.exactly
+import dev.mokkery.verify.VerifyMode.Companion.order
 import dev.mokkery.verifySuspend
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -76,8 +77,7 @@ class MeshServiceOrchestratorTest {
     private fun createOrchestrator(
         receivedData: MutableSharedFlow<ByteArray> = MutableSharedFlow(),
         connectionError: MutableSharedFlow<String> = MutableSharedFlow(),
-        connectionState: MutableStateFlow<ConnectionState> =
-            MutableStateFlow<ConnectionState>(ConnectionState.Disconnected),
+        connectionState: MutableStateFlow<ConnectionState> = MutableStateFlow(ConnectionState.Disconnected),
         // A valid default address lets every start() proceed through the new
         // wait-for-valid-address -> DB switch -> connect ordering without per-test boilerplate.
         // Tests that need a different initial address (or no address) override it explicitly.
@@ -169,6 +169,14 @@ class MeshServiceOrchestratorTest {
 
         verifySuspend { databaseManager.switchActiveDatabase("tcp:192.168.1.100") }
         verify { radioInterfaceService.connect() }
+
+        // Locks in the cold-start ordering invariant: DB switch must land before connect() so the
+        // firmware handshake writes into the correct per-device DB. `order` mode permits other
+        // calls in between but asserts these two happened in the listed sequence.
+        verifySuspend(order) {
+            databaseManager.switchActiveDatabase("tcp:192.168.1.100")
+            radioInterfaceService.connect()
+        }
 
         orchestrator.stop()
     }
@@ -325,7 +333,7 @@ class MeshServiceOrchestratorTest {
     @Test
     fun testConnectedWhileStoppedDoesNotRestartWithoutExplicitStart() {
         val receivedData = MutableSharedFlow<ByteArray>(extraBufferCapacity = 8)
-        val connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
+        val connectionState = MutableStateFlow(ConnectionState.Disconnected)
         val orchestrator = createOrchestrator(receivedData = receivedData, connectionState = connectionState)
         every { nodeManager.myNodeNum } returns MutableStateFlow(null)
 

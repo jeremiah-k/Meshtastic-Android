@@ -37,7 +37,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import org.koin.android.ext.android.inject
 import org.meshtastic.core.common.hasLocationPermission
-import org.meshtastic.core.common.util.normalizeAddress
+import org.meshtastic.core.common.util.isValidDeviceAddress
 import org.meshtastic.core.model.DeviceVersion
 import org.meshtastic.core.repository.MeshConnectionManager
 import org.meshtastic.core.repository.MeshNotificationManager
@@ -189,18 +189,6 @@ class MeshService : Service() {
                     stopSelf()
                 }
             }
-    }
-
-    /**
-     * Returns true iff [address] refers to a real device. Delegates sentinel detection to [normalizeAddress] so this
-     * stays perfectly consistent with `buildDbName` / `DEFAULT_DB_NAME`: any input that normalizes to `"DEFAULT"`
-     * (null, blank, `"N"`, `"NULL"`, case-insensitive) or to the legacy `".N"` sentinel is rejected; everything else is
-     * treated as a real address. Gates the foreground-service stay-alive decision in [onStartCommand] and
-     * [scheduleDeviceAddressResolution].
-     */
-    private fun isValidDeviceAddress(address: String?): Boolean {
-        val normalized = normalizeAddress(address)
-        return normalized != "DEFAULT" && normalized != ".N"
     }
 
     private fun startForegroundSafely(notification: android.app.Notification, foregroundServiceType: Int) {
