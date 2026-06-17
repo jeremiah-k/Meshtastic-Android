@@ -304,7 +304,10 @@ class SharedRadioInterfaceService(
             transportMutex.withLock {
                 // Explicit device selection is a connect() equivalent: mark the lifecycle active
                 // before the stop/start swap so listeners cannot race the rebind into a "down" state.
-                connectionRequested = true
+                // Only arm the gate when a real address was selected — setDeviceAddress(null)/("n")
+                // is a deselect, not a connect, so connectionRequested must NOT stick at true and
+                // block a later explicit connect() or environmental recovery.
+                if (sanitized != null) connectionRequested = true
                 ignoreExceptionSuspend { stopTransportLocked() }
                 startTransportLocked()
             }
@@ -431,6 +434,12 @@ class SharedRadioInterfaceService(
                 // liveness recovery is self-healing — surfacing a modal dialog for a transient
                 // condition the app already handled is confusing UX. The warning log above
                 // remains the observability surface for this event.
+                //
+                // Ordering note (pre-existing): onDisconnect fires here, BEFORE the launched
+                // restart coroutine's `connectionRequested` check below. If an explicit disconnect()
+                // races this timeout, a spurious DeviceSleep emission can leak to observers. The
+                // connectionRequested gate still prevents the worse outcome — transport resurrection
+                // — so this is a benign UI-level transient, not a state-machine bug.
                 onDisconnect(isPermanent = false)
                 processLifecycle.coroutineScope.launch {
                     try {
