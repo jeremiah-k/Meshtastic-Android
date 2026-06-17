@@ -11,7 +11,7 @@ appfunctions = "1.0.0-alpha09"
 # androidx
 datastore = "1.2.1"
 glance = "1.2.0-rc01"
-lifecycle = "2.10.0"
+lifecycle = "2.11.0"
 jetbrains-lifecycle = "2.11.0-beta02"
 navigation3 = "1.1.1"
 paging = "3.5.0"
@@ -56,7 +56,7 @@ compose-multiplatform-material3 = "1.11.0-alpha07"
 # current `compose-multiplatform` release maps to (see CMP release notes).
 # AndroidCompose.kt's resolutionStrategy force-aligns these groups to *this* version
 # at resolution time, so it is the source of truth for the Android target.
-androidx-compose-bom-aligned = "1.11.2"
+androidx-compose-bom-aligned = "1.11.3"
 # `androidx-compose-material` (M2) is independent of CMP. Pinned because
 # maps-compose-widgets requests `androidx.compose.material:material` without
 # a version (relying on a BOM that we exclude). M2 is frozen at 1.7.8.
@@ -128,7 +128,7 @@ androidx-car-app-projected = { module = "androidx.car.app:app-projected", versio
 androidx-car-app-automotive = { module = "androidx.car.app:app-automotive", version.ref = "car-app" }
 androidx-car-app-testing = { module = "androidx.car.app:app-testing", version.ref = "car-app" }
 androidx-core-ktx = { module = "androidx.core:core-ktx", version = "1.19.0" }
-androidx-core-location-altitude = { module = "androidx.core:core-location-altitude", version = "1.0.0-rc01" }
+androidx-core-location-altitude = { module = "androidx.core:core-location-altitude", version = "1.0.0" }
 androidx-core-splashscreen = { module = "androidx.core:core-splashscreen", version = "1.2.0" }
 androidx-datastore = { module = "androidx.datastore:datastore", version.ref = "datastore" }
 androidx-datastore-preferences = { module = "androidx.datastore:datastore-preferences", version.ref = "datastore" }
