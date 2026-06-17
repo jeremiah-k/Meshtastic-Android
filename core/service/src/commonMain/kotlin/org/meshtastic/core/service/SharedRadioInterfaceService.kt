@@ -128,6 +128,17 @@ class SharedRadioInterfaceService(
      */
     @Volatile private var isStopping = false
 
+    /**
+     * True while an explicit connection lifecycle is active (set by [connect]/[setDeviceAddress], cleared by
+     * [disconnect]). The hardware ([bluetoothRepository.state]) and network ([networkRepository.networkAvailable])
+     * listeners and the [checkLiveness] zombie-recovery path consult this to avoid starting a transport the user has
+     * torn down — without it, BT/network recovery emissions can wake a transport after explicit disconnect, leaving the
+     * app "connected" with no orchestrator collector and an unloaded NodeDB/channels.
+     *
+     * Guarded by [transportMutex]; every read/write site holds the lock. The @Volatile keeps diagnostic reads honest.
+     */
+    @Volatile private var connectionRequested = false
+
     /** Prevents concurrent liveness-induced transport restarts from stacking. */
     private val isRestarting = atomic(false)
 
@@ -204,7 +215,13 @@ class SharedRadioInterfaceService(
                     .onEach { state ->
                         transportMutex.withLock {
                             if (state.enabled) {
-                                startTransportLocked()
+                                // Environmental recovery only: don't wake a transport the user has
+                                // explicitly disconnected from. stopTransportLocked() below still fires on
+                                // BLE-disabled to tear down a running BLE link, but we deliberately do NOT
+                                // clear connectionRequested here — that is disconnect()'s job.
+                                if (connectionRequested) {
+                                    startTransportLocked()
+                                }
                             } else if (runningTransportId == InterfaceId.BLUETOOTH) {
                                 stopTransportLocked()
                             }
@@ -217,7 +234,10 @@ class SharedRadioInterfaceService(
                     .onEach { state ->
                         transportMutex.withLock {
                             if (state) {
-                                startTransportLocked()
+                                // Environmental recovery only — see the BLE listener above for rationale.
+                                if (connectionRequested) {
+                                    startTransportLocked()
+                                }
                             } else if (runningTransportId == InterfaceId.TCP) {
                                 stopTransportLocked()
                             }
@@ -230,12 +250,24 @@ class SharedRadioInterfaceService(
     }
 
     override fun connect() {
-        processLifecycle.coroutineScope.launch { transportMutex.withLock { startTransportLocked() } }
+        processLifecycle.coroutineScope.launch {
+            transportMutex.withLock {
+                // Mark the connection lifecycle as active BEFORE starting so concurrent
+                // hardware/network listeners observe the gate as open.
+                connectionRequested = true
+                startTransportLocked()
+            }
+        }
         initStateListeners()
     }
 
     override suspend fun disconnect() {
-        transportMutex.withLock { ignoreExceptionSuspend { stopTransportLocked() } }
+        transportMutex.withLock {
+            // Tear the gate down BEFORE stopTransportLocked() so a concurrent state-listener
+            // emission arriving while we wait for the mutex cannot re-start the transport.
+            connectionRequested = false
+            ignoreExceptionSuspend { stopTransportLocked() }
+        }
     }
 
     override fun isMockTransport(): Boolean = transportFactory.isMockTransport()
@@ -270,6 +302,9 @@ class SharedRadioInterfaceService(
 
         processLifecycle.coroutineScope.launch {
             transportMutex.withLock {
+                // Explicit device selection is a connect() equivalent: mark the lifecycle active
+                // before the stop/start swap so listeners cannot race the rebind into a "down" state.
+                connectionRequested = true
                 ignoreExceptionSuspend { stopTransportLocked() }
                 startTransportLocked()
             }
@@ -400,6 +435,14 @@ class SharedRadioInterfaceService(
                 processLifecycle.coroutineScope.launch {
                     try {
                         transportMutex.withLock {
+                            // Defense against a race between checkLiveness() firing and a
+                            // concurrent disconnect(): if the user has torn the connection down
+                            // since the heartbeat scheduled this restart, leave it down. The
+                            // transport is already null after disconnect()'s stopTransportLocked().
+                            if (!connectionRequested) {
+                                Logger.d { "Skipping liveness restart: connection no longer requested" }
+                                return@withLock
+                            }
                             ignoreExceptionSuspend {
                                 stopTransportLocked(notifyPermanent = false, sendPoliteDisconnect = false)
                             }

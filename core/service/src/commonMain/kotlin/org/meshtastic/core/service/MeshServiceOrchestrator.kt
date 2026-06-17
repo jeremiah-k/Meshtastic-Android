@@ -137,6 +137,10 @@ class MeshServiceOrchestrator(
         newScope.handledLaunch {
             val address = radioInterfaceService.currentDeviceAddressFlow.first(::isValidDeviceAddress)
             databaseManager.switchActiveDatabase(address)
+            // Load cached nodes from the now-active per-device DB before connect() so the firmware
+            // handshake doesn't see a stale/empty node set. Previously this ran synchronously in
+            // start() and raced ahead of the DB switch, reading the default (or null) DB.
+            nodeManager.loadCachedNodeDB()
             Logger.i { "Per-device database initialized, connecting radio" }
             radioInterfaceService.connect()
         }
@@ -166,8 +170,6 @@ class MeshServiceOrchestrator(
         radioInterfaceService.connectionError
             .onEach { errorMessage -> serviceStateWriter.setErrorMessage(errorMessage, Severity.Warn) }
             .launchIn(newScope)
-
-        nodeManager.loadCachedNodeDB()
     }
 
     /**

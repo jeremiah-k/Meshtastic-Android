@@ -550,4 +550,94 @@ class SharedRadioInterfaceServiceLivenessTest {
             advanceTimeBy(1_000L)
         }
     }
+
+    // ─── connectionRequested gate: environmental recovery vs explicit disconnect ────────────
+
+    /**
+     * Regression: after an explicit [SharedRadioInterfaceService.disconnect], BT state emissions MUST NOT restart the
+     * transport. Without the `connectionRequested` gate, a subsequent `bluetoothRepository.state = enabled` emission
+     * would silently resurrect the transport the user tore down — leaving the app "connected" with no orchestrator
+     * collector, no NodeDB load, and no channels. Only [disconnect] clears the gate; the state listener checks it
+     * before calling `startTransportLocked()`.
+     */
+    @Test
+    fun `BLE state recovery does not restart transport after explicit disconnect`() = runTest(testDispatcher) {
+        clock = 0L
+        val service = createConnectedService("xAA:BB:CC:DD:EE:FF")
+        try {
+            assertEquals(1, createdTransports.size, "Initial connect should create one transport")
+
+            // Explicit user-initiated disconnect: clears the connectionRequested gate BEFORE
+            // stopTransportLocked() so a racing state-listener emission cannot re-arm the transport.
+            service.disconnect()
+            // Drain the polite-disconnect frame (production waits POLITE_DISCONNECT_DRAIN_MS = 500ms).
+            advanceTimeBy(1_000L)
+
+            val transportCountAfterDisconnect = createdTransports.size
+
+            // Force a fresh BLE state cycle (disabled → enabled). The initial listener subscription
+            // already consumed the default enabled=true emission during connect(), so toggling is
+            // required to deliver a NEW enabled=true emission that would trigger startTransportLocked().
+            bluetoothRepository.setBluetoothEnabled(false)
+            testDispatcher.scheduler.runCurrent()
+            bluetoothRepository.setBluetoothEnabled(true)
+            testDispatcher.scheduler.runCurrent()
+            advanceTimeBy(1_000L)
+
+            assertEquals(
+                transportCountAfterDisconnect,
+                createdTransports.size,
+                "BT-enabled emission after disconnect must NOT restart transport (connectionRequested gate)",
+            )
+            assertFalse(
+                service.connectionState.value == ConnectionState.Connected,
+                "State must remain Disconnected after post-disconnect BT recovery emission",
+            )
+        } finally {
+            service.disconnect()
+            advanceTimeBy(1_000L)
+        }
+    }
+
+    /**
+     * Counterpart to the disconnect-gate test: environmental recovery MUST still function while a connection is
+     * explicitly desired (connectionRequested == true). When the BT radio toggles off then back on (user toggled
+     * airplane mode, BT permission revoked/restored, etc.) the state listener must tear down and restart the transport.
+     * Only [disconnect] clears the gate; environmental stops via `stopTransportLocked()` do not.
+     */
+    @Test
+    fun `BLE environmental recovery restarts transport while connection is still desired`() = runTest(testDispatcher) {
+        clock = 0L
+        val service = createConnectedService("xAA:BB:CC:DD:EE:FF")
+        try {
+            assertEquals(1, createdTransports.size, "Initial connect should create one transport")
+
+            // Environmental stop: BT radio disabled while a connection is active.
+            // stopTransportLocked() fires but connectionRequested stays true (only disconnect() clears it).
+            bluetoothRepository.setBluetoothEnabled(false)
+            testDispatcher.scheduler.runCurrent()
+            // Drain the polite-disconnect frame inside the listener's stopTransportLocked() (500ms).
+            advanceTimeBy(1_000L)
+
+            assertTrue(
+                createdTransports.first().closeCalled,
+                "BLE-disabled should close the running transport via environmental stop",
+            )
+
+            // Environmental recovery: BT radio re-enabled. connectionRequested is still true, so the
+            // listener MUST call startTransportLocked() and bring the transport back.
+            bluetoothRepository.setBluetoothEnabled(true)
+            testDispatcher.scheduler.runCurrent()
+            advanceTimeBy(1_000L)
+
+            assertEquals(
+                2,
+                createdTransports.size,
+                "BLE-enabled should restart transport via environmental recovery (connectionRequested still true)",
+            )
+        } finally {
+            service.disconnect()
+            advanceTimeBy(1_000L)
+        }
+    }
 }

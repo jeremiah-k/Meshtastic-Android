@@ -168,13 +168,18 @@ class MeshServiceOrchestratorTest {
         orchestrator.start()
 
         verifySuspend { databaseManager.switchActiveDatabase("tcp:192.168.1.100") }
+        verify { nodeManager.loadCachedNodeDB() }
         verify { radioInterfaceService.connect() }
 
-        // Locks in the cold-start ordering invariant: DB switch must land before connect() so the
-        // firmware handshake writes into the correct per-device DB. `order` mode permits other
-        // calls in between but asserts these two happened in the listed sequence.
+        // Locks in the cold-start ordering invariant: DB switch → load cached NodeDB → connect.
+        // loadCachedNodeDB must run AFTER the DB switch (so it reads from the freshly-selected
+        // per-device DB) and BEFORE connect() (so the firmware handshake doesn't see a stale or
+        // empty node set). Previously loadCachedNodeDB ran synchronously in start() and raced
+        // ahead of the DB switch, reading the default/null DB. `order` mode permits other calls
+        // in between but asserts these three happened in the listed sequence.
         verifySuspend(order) {
             databaseManager.switchActiveDatabase("tcp:192.168.1.100")
+            nodeManager.loadCachedNodeDB()
             radioInterfaceService.connect()
         }
 
