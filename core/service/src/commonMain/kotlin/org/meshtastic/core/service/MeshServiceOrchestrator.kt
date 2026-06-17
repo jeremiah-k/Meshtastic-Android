@@ -131,6 +131,15 @@ class MeshServiceOrchestrator(
             radioInterfaceService.connect()
         }
 
+        // Observe device-address changes throughout this session so null->real and
+        // address->different-address transitions call switchActiveDatabase. DatabaseManager is
+        // idempotent, so the redundant initial replay (matching the getDeviceAddress() snapshot
+        // above) is a no-op. This catches mid-session address resolutions the one-shot switch
+        // would miss (e.g. late process-lifecycle devAddr propagation on Android).
+        radioInterfaceService.currentDeviceAddressFlow
+            .onEach { addr -> databaseManager.switchActiveDatabase(addr) }
+            .launchIn(newScope)
+
         radioInterfaceService.receivedData
             .onEach { bytes -> messageProcessor.handleFromRadio(bytes, nodeManager.myNodeNum.value) }
             .launchIn(newScope)
