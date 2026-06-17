@@ -311,8 +311,8 @@ class MeshServiceOrchestratorTest {
      * from [RadioInterfaceService.receivedData] in the background with no foreground service, no wake lock, and no UI.
      *
      * This also preserves the documented invariant that [MeshConnectionManagerImpl] is the only consumer of
-     * [RadioInterfaceService.connectionState]. Recovery after stop is the host's responsibility: it must call
-     * `start()` explicitly (e.g. via a fresh `MeshService.onCreate()`).
+     * [RadioInterfaceService.connectionState]. Recovery after stop is the host's responsibility: it must call `start()`
+     * explicitly (e.g. via a fresh `MeshService.onCreate()`).
      *
      * Replaces the previous "orphan-Connected recovery" behavior that was removed for violating both invariants.
      */
