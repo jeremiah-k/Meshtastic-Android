@@ -156,8 +156,8 @@ abstract class MeshtasticDatabase : RoomDatabase() {
          * may observe stale rows — making read-after-write assertions non-deterministically flaky (see
          * `DeviceLinkRepositoryImplTest`). A single connection serializes reads behind writes.
          *
-         * **JVM/iOS production may still use `true`** (the default) if their cancellation patterns don't trigger the
-         * permit-accounting wedge observed on Android. Revisit if desktop/iOS field logs show similar pool exhaustion.
+         * **JVM/iOS production uses `true`** (the default). Revisit if desktop/iOS field logs show similar
+         * pool-exhaustion patterns under cancellation churn.
          */
         fun <T : RoomDatabase> RoomDatabase.Builder<T>.configureCommon(
             multiConnection: Boolean = true,
