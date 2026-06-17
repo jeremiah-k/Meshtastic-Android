@@ -2,7 +2,10 @@ name: Pull Request CI
 
 on:
   pull_request:
-    branches: [ main, "release/**" ]
+    branches: [ main, "release/**", "**-dev", "**-review" ]
+  push:
+    branches: [ "**-dev", "**-review" ]
+  workflow_dispatch:
 
 permissions:
   contents: read
