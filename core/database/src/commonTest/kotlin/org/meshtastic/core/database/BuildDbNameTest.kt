@@ -19,6 +19,7 @@ package org.meshtastic.core.database
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotEquals
+import kotlin.test.assertTrue
 
 class BuildDbNameTest {
     @Test
@@ -49,6 +50,6 @@ class BuildDbNameTest {
         val realDb = buildDbName("AA:BB:CC:DD:EE:FF")
         assertNotEquals(DatabaseConstants.DEFAULT_DB_NAME, realDb)
         // Real device DB names are still scoped under the standard prefix.
-        assertEquals(true, realDb.startsWith("${DatabaseConstants.DB_PREFIX}_"))
+        assertTrue(realDb.startsWith("${DatabaseConstants.DB_PREFIX}_"))
     }
 }
