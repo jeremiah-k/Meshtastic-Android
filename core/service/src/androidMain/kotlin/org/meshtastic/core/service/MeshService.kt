@@ -191,13 +191,16 @@ class MeshService : Service() {
     }
 
     /**
-     * Returns true iff [address] refers to a real device. Normalizes the sentinel/empty cases used by legacy prefs and
-     * the "no device" markers: null, blank, `"n"`, and `".n"`.
+     * Returns true iff [address] refers to a real device. Rejects null/blank and the legacy no-device sentinels
+     * (`"n"`/`".n"`, case-insensitive) — the same set [org.meshtastic.core.common.util.normalizeAddress] and
+     * `buildDbName` collapse to DEFAULT_DB_NAME. Kept local and explicit because it gates the foreground-service
+     * stay-alive decision in [onStartCommand] and [scheduleDeviceAddressResolution]; correctness here is easier to
+     * read in isolation than a one-liner against `normalizeAddress`.
      */
     private fun isValidDeviceAddress(address: String?): Boolean {
         if (address.isNullOrBlank()) return false
-        // "n" / ".n" are legacy sentinel values meaning "no device selected".
-        return address != "n" && address != ".n"
+        val normalized = address.trim().lowercase()
+        return normalized != "n" && normalized != ".n"
     }
 
     private fun startForegroundSafely(notification: android.app.Notification, foregroundServiceType: Int) {
