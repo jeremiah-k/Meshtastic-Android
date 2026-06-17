@@ -91,3 +91,4 @@ offline-repository/
 !.claude/settings.json
 !.claude/agents/
 build-scan-*.scan
+.omo/*
