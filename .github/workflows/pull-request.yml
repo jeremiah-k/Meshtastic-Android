@@ -2,9 +2,7 @@ name: Pull Request CI
 
 on:
   pull_request:
-    branches: [ main, "release/**", "**-dev", "**-review" ]
-  push:
-    branches: [ "**-dev", "**-review" ]
+    branches: [ main, "release/**", "develop", "**-dev", "**-review" ]
   workflow_dispatch:
 
 permissions:
@@ -17,7 +15,6 @@ concurrency:
 jobs:
   # 1. CHANGE DETECTION: Prevents unnecessary builds
   check-changes:
-    if: github.repository == 'meshtastic/Meshtastic-Android' && !( github.head_ref == 'scheduled-updates' || github.head_ref == 'l10n_main' )
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 10
     outputs:
@@ -56,7 +53,6 @@ jobs:
 
   # 1b. FILTER DRIFT CHECK: Ensures check-changes stays aligned with module roots
   verify-check-changes-filter:
-    if: github.repository == 'meshtastic/Meshtastic-Android' && !( github.head_ref == 'scheduled-updates' || github.head_ref == 'l10n_main' )
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 10
     steps:
