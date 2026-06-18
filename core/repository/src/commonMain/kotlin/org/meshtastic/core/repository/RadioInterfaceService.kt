@@ -120,7 +120,9 @@ interface RadioInterfaceService : RadioTransportCallback {
      * - Does **NOT** bypass selected-device validation; the replacement transport is built from the same bonded address
      *   via the normal start path.
      * - Emits ordinary transport-level transitions through the existing [RadioTransportCallback] surface, so observers
-     *   see the same Connecting/Connected lifecycle as a fresh [connect].
+     *   see the transient [ConnectionState.DeviceSleep] state followed by [ConnectionState.Connected] when the
+     *   replacement transport connects. (No [ConnectionState.Connecting] is emitted at the transport layer — that is an
+     *   app-level state set by [MeshConnectionManager], not a transport callback.)
      *
      * Suspends until the teardown/restart cycle completes.
      */

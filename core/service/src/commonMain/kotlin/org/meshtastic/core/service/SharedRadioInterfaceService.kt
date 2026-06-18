@@ -291,7 +291,8 @@ class SharedRadioInterfaceService(
                 // WITHOUT clearing connectionRequested avoids the split-brain where setDeviceAddress's
                 // fast-path would otherwise block same-node reconnect. The caller (MeshConnectionManager)
                 // is responsible for the app-level Disconnected flip; this method only cycles the
-                // transport and emits the normal Connecting/Connected transitions via callbacks.
+                // transport and emits the transport-level DeviceSleep -> Connected transitions via
+                // callbacks (no Connecting — that is an app-level state, not a transport emission).
                 if (!connectionRequested) {
                     Logger.d { "restartTransport: skipped-not-requested" }
                     return@withLock
@@ -332,9 +333,10 @@ class SharedRadioInterfaceService(
                     Logger.d { "restartTransport: aborted, disconnect requested during stop" }
                     return@withLock
                 }
-                // startTransportLocked() re-validates the selected address (no-op if null) and
-                // emits Connecting -> Connected through the transport callbacks as a normal
-                // fresh connect would.
+                // startTransportLocked() re-validates the selected address (no-op if null) and emits
+                // Connected through the transport callbacks (via the new transport's onConnect) once
+                // the fresh transport comes up — there is no Connecting emission at the transport
+                // layer (that is an app-level state owned by MeshConnectionManager).
                 startTransportLocked()
                 Logger.i { "restartTransport: completed" }
             }

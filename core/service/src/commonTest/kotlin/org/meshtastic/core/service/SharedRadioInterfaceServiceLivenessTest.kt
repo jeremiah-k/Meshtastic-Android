@@ -790,12 +790,17 @@ class SharedRadioInterfaceServiceLivenessTest {
     //
     // [SharedRadioInterfaceService.restartTransport] is the app-level handshake-stall recovery
     // path. It mirrors BLE liveness silent recovery: stopTransportLocked(notifyPermanent=false,
-    // sendPoliteDisconnect=false) then startTransportLocked(), all under transportMutex. The gate
-    // contract has four early-return gates that MUST all hold for the cycle to fire:
-    //   1. connectionRequested == true  (cleared by disconnect() / setDeviceAddress(null)/("n"))
-    //   2. getBondedDeviceAddress() != null  (re-validates the selected address)
-    //   3. radioTransport != null  (defends against a stale restart after an environmental stop)
-    //   4. isRestarting.compareAndSet(false, true) succeeds  (reuses the liveness CAS)
+    // sendPoliteDisconnect=false) then startTransportLocked(). The isRestarting CAS runs
+    // synchronously BEFORE transportMutex (mirroring checkLiveness), then the remaining gates run
+    // inside the mutex. The gate contract has four early-return gates that MUST all hold for the
+    // cycle to fire, evaluated in this exact order:
+    //   1. isRestarting.compareAndSet(false, true) succeeds  (reuses the liveness CAS; synchronous,
+    //      BEFORE acquiring transportMutex — both restart paths serialize on this CAS first)
+    //   2. connectionRequested == true  (cleared by disconnect() / setDeviceAddress(null)/("n");
+    //      checked inside transportMutex)
+    //   3. getBondedDeviceAddress() != null  (re-validates the selected address; inside transportMutex)
+    //   4. radioTransport != null  (defends against a stale restart after an environmental stop;
+    //      inside transportMutex)
     // The cycle must also be address-preserving and silent (no permanent Disconnected, no
     // user-facing error). The tests below lock each leg of that contract.
 
@@ -812,6 +817,10 @@ class SharedRadioInterfaceServiceLivenessTest {
             assertEquals(1, createdTransports.size, "Initial connect should create one transport")
             val initialTransport = createdTransports.first()
 
+            // Lock the sendPoliteDisconnect=false contract: clear any bytes recorded during the
+            // initial connect so sentData reflects only writes performed during restartTransport.
+            initialTransport.sentData.clear()
+
             service.restartTransport()
             // sendPoliteDisconnect = false → no 500ms drain inside the cycle. Under
             // UnconfinedTestDispatcher the whole stop/start runs inline; runCurrent is
@@ -821,6 +830,10 @@ class SharedRadioInterfaceServiceLivenessTest {
             assertEquals(2, createdTransports.size, "restartTransport should create exactly one fresh transport")
             assertTrue(initialTransport.closeCalled, "Old transport must be closed by restartTransport")
             assertEquals(1, initialTransport.closeCount, "Old transport closed exactly once (no double-close)")
+            assertTrue(
+                initialTransport.sentData.isEmpty(),
+                "restartTransport must NOT write any bytes to the old transport (sendPoliteDisconnect=false)",
+            )
         } finally {
             service.disconnect()
             advanceTimeBy(1_000L)
@@ -1123,7 +1136,8 @@ class SharedRadioInterfaceServiceLivenessTest {
 
     /**
      * Regression for the `radioTransport == null` gate added to [SharedRadioInterfaceService.restartTransport] (the
-     * third early-return, before the `isRestarting` CAS and the `onDisconnect(isPermanent = false)` call).
+     * mutex-protected early-return, checked after the `isRestarting` CAS but before the `onDisconnect(isPermanent =
+     * false)` call).
      *
      * Scenario: a TCP transport has been torn down by an environmental stop (`networkAvailable = false`) but
      * `connectionRequested` is intentionally preserved so the network recovery listener can re-bring-up the transport

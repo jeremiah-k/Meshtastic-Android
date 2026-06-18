@@ -249,8 +249,15 @@ class MeshConnectionManagerImpl(
                         // now arrive from app-level Disconnected, bypass the redundant-Connecting guard, and re-enter
                         // handleConnected to restart the handshake cleanly.
                         scope.handledLaunch {
-                            onConnectionChanged(ConnectionState.Disconnected)
-                            radioInterfaceService.restartTransport()
+                            // Fresh Connecting re-check: this sibling runs asynchronously, so app
+                            // state may have advanced out of Connecting between the stall firing and
+                            // execution (e.g. config arrived just in time, or another transition
+                            // landed). Skip the teardown when the handshake has since completed —
+                            // otherwise we would tear down a healthy, fully-connected link.
+                            if (serviceRepository.connectionState.value is ConnectionState.Connecting) {
+                                onConnectionChanged(ConnectionState.Disconnected)
+                                radioInterfaceService.restartTransport()
+                            }
                         }
                         // Return without calling onConnectionChanged here. The sibling job owns both transitions.
                     }
