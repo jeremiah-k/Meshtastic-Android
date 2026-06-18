@@ -163,32 +163,38 @@ class MeshConnectionManagerImpl(
         onConnectionChanged(effectiveState)
     }
 
-    private suspend fun onConnectionChanged(c: ConnectionState) = connectionMutex.withLock {
-        val current = serviceRepository.connectionState.value
-        if (current == c) return@withLock
+    private suspend fun onConnectionChanged(c: ConnectionState, fromState: ConnectionState? = null): Boolean =
+        connectionMutex.withLock {
+            val current = serviceRepository.connectionState.value
+            if (fromState != null && current != fromState) {
+                Logger.d { "Skipping connection transition $current -> $c, expected current state $fromState" }
+                return@withLock false
+            }
+            if (current == c) return@withLock false
 
-        // If the transport reports 'Connected', but we are already in the middle of a handshake (Connecting)
-        if (c is ConnectionState.Connected && current is ConnectionState.Connecting) {
-            Logger.d { "Ignoring redundant transport connection signal while handshake is in progress" }
-            return@withLock
+            // If the transport reports 'Connected', but we are already in the middle of a handshake (Connecting)
+            if (c is ConnectionState.Connected && current is ConnectionState.Connecting) {
+                Logger.d { "Ignoring redundant transport connection signal while handshake is in progress" }
+                return@withLock false
+            }
+
+            Logger.i { "onConnectionChanged: $current -> $c" }
+
+            sleepTimeout?.cancel()
+            sleepTimeout = null
+            preHandshakeJob?.cancel()
+            preHandshakeJob = null
+            handshakeTimeout?.cancel()
+            handshakeTimeout = null
+
+            when (c) {
+                is ConnectionState.Connecting -> serviceRepository.setConnectionState(ConnectionState.Connecting)
+                is ConnectionState.Connected -> handleConnected()
+                is ConnectionState.DeviceSleep -> handleDeviceSleep()
+                is ConnectionState.Disconnected -> handleDisconnected()
+            }
+            true
         }
-
-        Logger.i { "onConnectionChanged: $current -> $c" }
-
-        sleepTimeout?.cancel()
-        sleepTimeout = null
-        preHandshakeJob?.cancel()
-        preHandshakeJob = null
-        handshakeTimeout?.cancel()
-        handshakeTimeout = null
-
-        when (c) {
-            is ConnectionState.Connecting -> serviceRepository.setConnectionState(ConnectionState.Connecting)
-            is ConnectionState.Connected -> handleConnected()
-            is ConnectionState.DeviceSleep -> handleDeviceSleep()
-            is ConnectionState.Disconnected -> handleDisconnected()
-        }
-    }
 
     private fun handleConnected() {
         // Track whether this connection was restored from device sleep (vs. a fresh connect),
@@ -241,21 +247,23 @@ class MeshConnectionManagerImpl(
                         // ignore the fresh Connected emission. That leaves the app Disconnected while transport is
                         // Connected — the same split-brain this restart path is meant to break.
                         //
-                        // Inside the sibling: (1) flip app state to Disconnected first. By the time the sibling runs,
-                        // handshakeTimeout has already completed naturally (it launched the sibling and returned), so
-                        // the cancellation onConnectionChanged would attempt is a no-op on an already-completed job —
-                        // and because the sibling is parented to `scope`, not to handshakeTimeout, it survives
-                        // independently. (2) THEN call restartTransport(), whose emissions (DeviceSleep → Connected)
-                        // now arrive from app-level Disconnected, bypass the redundant-Connecting guard, and re-enter
-                        // handleConnected to restart the handshake cleanly.
+                        // Inside the sibling: (1) flip app state from Connecting to Disconnected first, guarded by the
+                        // connection mutex so a just-completed handshake cannot be torn down after winning the race.
+                        // By the time the sibling runs, handshakeTimeout has already completed naturally (it launched
+                        // the sibling and returned), so the cancellation onConnectionChanged would attempt is a no-op
+                        // on an already-completed job — and because the sibling is parented to `scope`, not to
+                        // handshakeTimeout, it survives independently. (2) THEN call restartTransport(), whose
+                        // emissions (DeviceSleep → Connected) now arrive from app-level Disconnected, bypass the
+                        // redundant-Connecting guard, and re-enter handleConnected to restart the handshake cleanly.
                         scope.handledLaunch {
-                            // Fresh Connecting re-check: this sibling runs asynchronously, so app
-                            // state may have advanced out of Connecting between the stall firing and
-                            // execution (e.g. config arrived just in time, or another transition
-                            // landed). Skip the teardown when the handshake has since completed —
-                            // otherwise we would tear down a healthy, fully-connected link.
-                            if (serviceRepository.connectionState.value is ConnectionState.Connecting) {
-                                onConnectionChanged(ConnectionState.Disconnected)
+                            val disconnected =
+                                onConnectionChanged(
+                                    ConnectionState.Disconnected,
+                                    fromState = ConnectionState.Connecting,
+                                )
+                            if (
+                                disconnected && serviceRepository.connectionState.value is ConnectionState.Disconnected
+                            ) {
                                 radioInterfaceService.restartTransport()
                             }
                         }

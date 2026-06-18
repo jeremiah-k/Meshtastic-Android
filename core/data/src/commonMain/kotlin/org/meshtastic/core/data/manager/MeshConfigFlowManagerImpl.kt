@@ -323,4 +323,11 @@ class MeshConfigFlowManagerImpl(
     }
 }
 
-private fun List<NodeInfo>.withNodeInfo(info: NodeInfo): List<NodeInfo> = filterNot { it.num == info.num } + info
+private fun List<NodeInfo>.withNodeInfo(info: NodeInfo): List<NodeInfo> {
+    val index = indexOfFirst { it.num == info.num }
+    return if (index >= 0) {
+        toMutableList().apply { this[index] = info }
+    } else {
+        this + info
+    }
+}
