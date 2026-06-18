@@ -44,6 +44,7 @@ import org.koin.core.annotation.Named
 import org.koin.core.annotation.Single
 import org.meshtastic.core.common.util.nowMillis
 import org.meshtastic.core.di.CoroutineDispatchers
+import kotlin.concurrent.Volatile
 import org.meshtastic.core.common.database.DatabaseManager as SharedDatabaseManager
 
 /** Manages per-device Room database instances for node data, with LRU eviction. */
@@ -63,6 +64,12 @@ open class DatabaseManager(
     private val legacyCleanedKey = booleanPreferencesKey(DatabaseConstants.LEGACY_DB_CLEANED_KEY)
 
     private fun lastUsedKey(dbName: String) = longPreferencesKey("db_last_used:$dbName")
+
+    companion object {
+        private const val BACKFILL_COLD_START_DELAY_MS = 2_000L
+    }
+
+    @Volatile private var hasSwitchedOnce = false
 
     override val cacheLimit: StateFlow<Int> =
         datastore.data
@@ -150,8 +157,15 @@ open class DatabaseManager(
         // One-time cleanup: remove legacy DB if present and not active
         managerScope.launch(dispatchers.io) { cleanupLegacyDbIfNeeded(activeDbName = dbName) }
 
-        // Backfill FTS search index for any text messages missing messageText
-        managerScope.launch(dispatchers.io) { backfillSearchIndexIfNeeded(db) }
+        // Backfill FTS search index for any text messages missing messageText.
+        // On cold start, defer this so it does not starve the single DB connection while
+        // the UI is collecting startup flows. Mid-session switches keep fire-and-forget behavior.
+        val isFirstSwitch = !hasSwitchedOnce
+        hasSwitchedOnce = true
+        managerScope.launch(dispatchers.io) {
+            if (isFirstSwitch) delay(BACKFILL_COLD_START_DELAY_MS)
+            backfillSearchIndexIfNeeded(db)
+        }
 
         Logger.i { "Switched active DB to ${anonymizeDbName(dbName)} for address ${anonymizeAddress(address)}" }
     }
