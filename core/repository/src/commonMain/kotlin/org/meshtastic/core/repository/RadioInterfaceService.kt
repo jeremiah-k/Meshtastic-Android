@@ -101,6 +101,33 @@ interface RadioInterfaceService : RadioTransportCallback {
      */
     suspend fun disconnect()
 
+    /**
+     * Silent recovery for WiFi/TCP handshake stalls: tears down the active transport and re-establishes it in place,
+     * without touching the connection-request gate or the selected device address.
+     *
+     * Invoked by [MeshConnectionManager][org.meshtastic.core.repository.MeshConnectionManager] when the app-level mesh
+     * handshake has stalled past its retry window. The transport itself may still be physically
+     * [ConnectionState.Connected] (e.g. a TCP socket whose radio firmware has stopped responding to `want_config_id`),
+     * so flipping app-level state to [ConnectionState.Disconnected] alone leaves a split-brain: transport Connected +
+     * `connectionRequested=true` + a live `RadioTransport` handle, which then blocks same-node reconnect via
+     * [setDeviceAddress]'s fast-path. This method breaks that deadlock by cycling the transport in place.
+     *
+     * Contract:
+     * - Preserves the selected device address (does not modify [currentDeviceAddressFlow]).
+     * - Preserves the `connectionRequested` gate; **MUST NOT** clear it. Safe to call concurrently with an explicit
+     *   [disconnect] — the internal gate check makes it a no-op in that case.
+     * - Safe to call when no transport is running — implementations must no-op.
+     * - Does **NOT** bypass selected-device validation; the replacement transport is built from the same bonded address
+     *   via the normal start path.
+     * - Emits ordinary transport-level transitions through the existing [RadioTransportCallback] surface, so observers
+     *   see the transient [ConnectionState.DeviceSleep] state followed by [ConnectionState.Connected] when the
+     *   replacement transport connects. (No [ConnectionState.Connecting] is emitted at the transport layer — that is an
+     *   app-level state set by [MeshConnectionManager], not a transport callback.)
+     *
+     * Suspends until the teardown/restart cycle completes.
+     */
+    suspend fun restartTransport()
+
     /** Returns the current device address. */
     fun getDeviceAddress(): String?
 
