@@ -953,10 +953,13 @@ class SharedRadioInterfaceServiceLivenessTest {
     }
 
     /**
-     * Regression: [SharedRadioInterfaceService.restartTransport] mirrors BLE liveness silent recovery —
-     * `notifyPermanent=false` so no user-facing Disconnected state is emitted. The caller drives app-level state
-     * transitions separately; surfacing a permanent disconnect for a self-healing cycle would pop a confusing modal for
-     * a transient condition.
+     * Regression: [SharedRadioInterfaceService.restartTransport] mirrors BLE liveness silent recovery. It MUST emit a
+     * transient DeviceSleep (via onDisconnect(isPermanent = false)) BEFORE the stop/start cycle so the subsequent
+     * onConnect() produces a real Connected transition (StateFlow is idempotent on same-value — without the DeviceSleep
+     * flip, Connected -> Connected is a no-op and MeshConnectionManager stays stuck on its app-level Disconnected
+     * state). It MUST NOT emit a permanent user-facing Disconnected state — the caller drives app-level state
+     * transitions separately, and surfacing a permanent disconnect for a self-healing cycle would pop a confusing modal
+     * for a transient condition.
      */
     @Test
     fun `restartTransport does not emit permanent Disconnected`() = runTest(testDispatcher) {
@@ -971,6 +974,12 @@ class SharedRadioInterfaceServiceLivenessTest {
 
             collectJob.cancel()
 
+            // The DeviceSleep emission is the intended transport-level transition that lets
+            // MeshConnectionManager observe a real Connected transition on the fresh transport.
+            assertTrue(
+                ConnectionState.DeviceSleep in stateEmissions,
+                "restartTransport must emit transient DeviceSleep so the post-restart onConnect() re-triggers handleConnected() (emitted: $stateEmissions)",
+            )
             assertFalse(
                 ConnectionState.Disconnected in stateEmissions,
                 "restartTransport must not emit permanent Disconnected state (emitted: $stateEmissions)",

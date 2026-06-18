@@ -232,8 +232,8 @@ class MeshConnectionManagerImpl(
                         // CRITICAL ordering: onConnectionChanged() below cancels `handshakeTimeout`,
                         // which IS the coroutine running this code — any work chained AFTER the state
                         // flip is not guaranteed to run. Launch the transport restart as a sibling
-                        // Job on the long-lived ServiceScope (SupervisorJob, survives
-                        // handshakeTimeout cancellation) BEFORE the state transition so the WiFi/TCP
+                        // Job on the long-lived ServiceScope (cancelling handshakeTimeout does not
+                        // cascade to siblings) BEFORE the state transition so the WiFi/TCP
                         // split-brain (transport Connected + connectionRequested=true + radioTransport
                         // non-null, which setDeviceAddress's fast-path then blocks against) is broken
                         // even after this coroutine is torn down. restartTransport() is silent

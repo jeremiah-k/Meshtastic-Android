@@ -296,14 +296,24 @@ class SharedRadioInterfaceService(
             }
             Logger.w { "restartTransport: restarting transport for ${getDeviceAddress()?.anonymize}" }
             try {
-                // Mirror BLE liveness silent recovery: notifyPermanent=false (no user-facing
-                // Disconnected modal — the app-level state machine drives that separately) and
-                // sendPoliteDisconnect=false (firmware is unresponsive, writing a goodbye frame
-                // into a dead link only delays teardown).
+                // Mirror BLE liveness silent recovery: emit the transport-level Connected ->
+                // DeviceSleep transition BEFORE the stop/start cycle. MeshConnectionManager
+                // observes connectionState and re-triggers handleConnected() when the fresh
+                // transport's onConnect() fires — but StateFlow is idempotent on same-value,
+                // so without this DeviceSleep emission the subsequent Connected signal would be
+                // a no-op (Connected -> Connected) and the manager would stay stuck on its
+                // app-level Disconnected state. checkLiveness() relies on the same ordering:
+                // it calls onDisconnect(isPermanent = false) before launching its restart
+                // coroutine. This is silent (transient DeviceSleep, not permanent Disconnected).
+                onDisconnect(isPermanent = false)
+                // notifyPermanent=false below (no user-facing Disconnected modal — the app-level
+                // state machine drives that separately) and sendPoliteDisconnect=false (firmware
+                // is unresponsive, writing a goodbye frame into a dead link only delays teardown).
                 ignoreExceptionSuspend { stopTransportLocked(notifyPermanent = false, sendPoliteDisconnect = false) }
-                // Race window: an explicit disconnect() may have arrived between the gate check
-                // above and the stop. Re-check before restarting so we do not resurrect a
-                // transport the user has torn down. This mirrors the BLE liveness recovery gate.
+                // Defense-in-depth mirroring the liveness recovery gate; today all
+                // connectionRequested mutators (connect/disconnect/setDeviceAddress) hold
+                // transportMutex so this re-check is unreachable, but it guards against future
+                // refactors that mutate the gate without serialization.
                 if (!connectionRequested) {
                     Logger.d { "restartTransport: aborted, disconnect requested during stop" }
                     return@withLock
