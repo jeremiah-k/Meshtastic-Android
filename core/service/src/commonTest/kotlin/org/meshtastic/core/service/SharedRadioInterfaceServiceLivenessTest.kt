@@ -791,10 +791,11 @@ class SharedRadioInterfaceServiceLivenessTest {
     // [SharedRadioInterfaceService.restartTransport] is the app-level handshake-stall recovery
     // path. It mirrors BLE liveness silent recovery: stopTransportLocked(notifyPermanent=false,
     // sendPoliteDisconnect=false) then startTransportLocked(), all under transportMutex. The gate
-    // contract has three legs that MUST hold for the cycle to fire:
+    // contract has four early-return gates (in order) that MUST hold for the cycle to fire:
     //   1. connectionRequested == true  (cleared by disconnect() / setDeviceAddress(null)/("n"))
     //   2. getBondedDeviceAddress() != null  (re-validates the selected address)
-    //   3. isRestarting.compareAndSet(false, true) succeeds  (reuses the liveness CAS)
+    //   3. radioTransport != null  (defends against a stale restart after an environmental stop)
+    //   4. isRestarting.compareAndSet(false, true) succeeds  (reuses the liveness CAS)
     // The cycle must also be address-preserving and silent (no permanent Disconnected, no
     // user-facing error). The tests below lock each leg of that contract.
 
@@ -1025,12 +1026,16 @@ class SharedRadioInterfaceServiceLivenessTest {
      * observes `isRestarting == true` and defers to the in-flight cycle, preventing a double stop/start race on the
      * transport.
      *
+     * restartTransport performs the isRestarting CAS synchronously BEFORE acquiring transportMutex (mirroring
+     * checkLiveness). Under this pattern, a concurrent liveness restart and a handshake-induced restart serialize on
+     * the CAS first — the loser returns immediately without touching the mutex. This is deterministic on all
+     * dispatchers, not just UnconfinedTestDispatcher.
+     *
      * Deterministic in-flight overlap: a [GatedFakeRadioTransport] suspends the liveness restart genuinely inside
-     * stopTransportLocked → close() (awaiting closeGate). Under UnconfinedTestDispatcher, when the liveness coroutine's
-     * `transportMutex.withLock {}` exits and calls `unlock()`, the queued restartTransport coroutine is resumed inline
-     * BEFORE the liveness coroutine's outer `finally { isRestarting.value = false }` runs — so restartTransport's CAS
-     * observes `isRestarting == true` and returns without another cycle. A stacking bug (CAS ignored, or finally
-     * ordering inverted) would produce 3 transports.
+     * stopTransportLocked → close() (awaiting closeGate). While the liveness coroutine holds `isRestarting == true`
+     * inside its restart cycle, a concurrent `restartTransport()` call CAS-fails on `isRestarting` and returns
+     * immediately without ever acquiring `transportMutex`. A stacking bug (CAS ignored, or CAS performed inside the
+     * mutex) would produce 3 transports.
      */
     @Test
     fun `restartTransport coordinates with in-flight liveness restart via isRestarting`() = runTest(testDispatcher) {
@@ -1058,14 +1063,16 @@ class SharedRadioInterfaceServiceLivenessTest {
             clock = 65_000L
             service.checkLiveness()
 
-            // Issue restartTransport() while the liveness restart is suspended. It will
-            // suspend waiting for transportMutex; the body cannot run until liveness releases.
+            // Issue restartTransport() while the liveness restart is in-flight. Under the refactored
+            // CAS-before-mutex pattern, restartTransport's CAS fails immediately (isRestarting is already
+            // true from checkLiveness's synchronous CAS). It returns without acquiring the mutex.
             val restartJob = backgroundScope.launch { service.restartTransport() }
             testDispatcher.scheduler.runCurrent()
 
             try {
                 // Pre-release: liveness still in-flight (close() suspended on closeGate),
-                // restartTransport still queued on mutex. No fresh transport, no stacking.
+                // but restartTransport already returned via CAS-fail on isRestarting (it never
+                // touched transportMutex). No fresh transport from restartTransport, no stacking.
                 assertEquals(
                     1,
                     gatedTransports.size,
@@ -1077,9 +1084,10 @@ class SharedRadioInterfaceServiceLivenessTest {
                     initialTransport.closeCompletedCount,
                     "Liveness restart close() must still be suspended (gate not yet released)",
                 )
-                assertFalse(
+                assertTrue(
                     restartJob.isCompleted,
-                    "restartTransport should be queued on transportMutex, not completed",
+                    "restartTransport should CAS-fail immediately when liveness already holds isRestarting, " +
+                        "not queue on transportMutex",
                 )
             } finally {
                 // Release the gate unconditionally so the suspended liveness restart can
@@ -1088,11 +1096,8 @@ class SharedRadioInterfaceServiceLivenessTest {
                 closeGate.complete(Unit)
             }
 
-            // Resume the liveness restart: close() returns, startTransportLocked creates the
-            // single fresh transport, mutex is released and restartTransport resumes inline.
-            // Under UnconfinedTestDispatcher the inline resume runs BEFORE the liveness
-            // coroutine's outer finally resets isRestarting, so restartTransport's CAS fails
-            // and it returns without another cycle.
+            // Release the gate: liveness restart completes (close + startTransport).
+            // restartTransport already returned via CAS-fail, so no second cycle. Exactly 2 transports.
             testDispatcher.scheduler.runCurrent()
             advanceTimeBy(1_000L)
             restartJob.join()

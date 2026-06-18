@@ -271,40 +271,45 @@ class SharedRadioInterfaceService(
     }
 
     override suspend fun restartTransport() {
-        transportMutex.withLock {
-            // Silent recovery for app-level handshake stalls. The transport may still be physically
-            // up (TCP socket alive, firmware unresponsive to want_config_id), so cycling it in place
-            // WITHOUT clearing connectionRequested avoids the split-brain where setDeviceAddress's
-            // fast-path would otherwise block same-node reconnect. The caller (MeshConnectionManager)
-            // is responsible for the app-level Disconnected flip; this method only cycles the
-            // transport and emits the normal Connecting/Connected transitions via callbacks.
-            if (!connectionRequested) {
-                Logger.d { "restartTransport: skipped-not-requested" }
-                return@withLock
-            }
-            if (getBondedDeviceAddress() == null) {
-                Logger.d { "restartTransport: skipped-no-address" }
-                return@withLock
-            }
-            // Honor the documented "safe no-op when no transport running" contract: environmental
-            // stops (network unavailable, BLE disabled) intentionally preserve
-            // connectionRequested=true so the recovery listeners above can re-bring-up the
-            // transport later. A stale restart job running after such a stop must NOT bypass that
-            // recovery path by creating a transport directly via startTransportLocked().
-            if (radioTransport == null) {
-                Logger.d { "restartTransport: skipped-no-transport" }
-                return@withLock
-            }
-            // Reuse the liveness CAS so a concurrent BLE zombie-recovery restart cannot stack with
-            // this handshake-induced restart — the loser observes isRestarting == true and defers
-            // to the in-flight cycle. startTransportLocked() is idempotent w.r.t. an existing
-            // transport, but the CAS also prevents a double stop/stop race on the teardown side.
-            if (!isRestarting.compareAndSet(expect = false, update = true)) {
-                Logger.d { "restartTransport: skipped, concurrent restart in progress" }
-                return@withLock
-            }
-            Logger.w { "restartTransport: restarting transport for ${getDeviceAddress()?.anonymize}" }
-            try {
+        // CAS BEFORE the mutex, mirroring checkLiveness()'s coordination structure: both
+        // restart paths CAS synchronously, one wins, one loses immediately. Performing the
+        // CAS inside transportMutex.withLock races checkLiveness's outer
+        // `finally { isRestarting = false }` (which runs AFTER mutex release): a queued
+        // restartTransport that resumes from mutex.wait can observe isRestarting == false,
+        // win the CAS, and produce an extra transport cycle (3 instead of 2) under the JVM's
+        // real dispatcher. The loser here observes isRestarting == true and defers to the
+        // in-flight cycle. startTransportLocked() is idempotent w.r.t. an existing transport,
+        // but the CAS also prevents a double stop/stop race on the teardown side.
+        if (!isRestarting.compareAndSet(expect = false, update = true)) {
+            Logger.d { "restartTransport: skipped, concurrent restart in progress" }
+            return
+        }
+        try {
+            transportMutex.withLock {
+                // Silent recovery for app-level handshake stalls. The transport may still be physically
+                // up (TCP socket alive, firmware unresponsive to want_config_id), so cycling it in place
+                // WITHOUT clearing connectionRequested avoids the split-brain where setDeviceAddress's
+                // fast-path would otherwise block same-node reconnect. The caller (MeshConnectionManager)
+                // is responsible for the app-level Disconnected flip; this method only cycles the
+                // transport and emits the normal Connecting/Connected transitions via callbacks.
+                if (!connectionRequested) {
+                    Logger.d { "restartTransport: skipped-not-requested" }
+                    return@withLock
+                }
+                if (getBondedDeviceAddress() == null) {
+                    Logger.d { "restartTransport: skipped-no-address" }
+                    return@withLock
+                }
+                // Honor the documented "safe no-op when no transport running" contract: environmental
+                // stops (network unavailable, BLE disabled) intentionally preserve
+                // connectionRequested=true so the recovery listeners above can re-bring-up the
+                // transport later. A stale restart job running after such a stop must NOT bypass that
+                // recovery path by creating a transport directly via startTransportLocked().
+                if (radioTransport == null) {
+                    Logger.d { "restartTransport: skipped-no-transport" }
+                    return@withLock
+                }
+                Logger.w { "restartTransport: restarting transport for ${getDeviceAddress()?.anonymize}" }
                 // Mirror BLE liveness silent recovery: emit the transport-level Connected ->
                 // DeviceSleep transition BEFORE the stop/start cycle. MeshConnectionManager
                 // observes connectionState and re-triggers handleConnected() when the fresh
@@ -332,9 +337,9 @@ class SharedRadioInterfaceService(
                 // fresh connect would.
                 startTransportLocked()
                 Logger.i { "restartTransport: completed" }
-            } finally {
-                isRestarting.value = false
             }
+        } finally {
+            isRestarting.value = false
         }
     }
 

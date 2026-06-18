@@ -229,21 +229,28 @@ class MeshConnectionManagerImpl(
                     action()
                     delay(HANDSHAKE_RETRY_TIMEOUT)
                     if (serviceRepository.connectionState.value is ConnectionState.Connecting) {
-                        // CRITICAL ordering: onConnectionChanged() below cancels `handshakeTimeout`,
-                        // which IS the coroutine running this code — any work chained AFTER the state
-                        // flip is not guaranteed to run. Launch the transport restart as a sibling
-                        // Job on the long-lived ServiceScope (cancelling handshakeTimeout does not
-                        // cascade to siblings) BEFORE the state transition so the WiFi/TCP
-                        // split-brain (transport Connected + connectionRequested=true + radioTransport
-                        // non-null, which setDeviceAddress's fast-path then blocks against) is broken
-                        // even after this coroutine is torn down. restartTransport() is silent
-                        // recovery: it preserves the selected address and the connectionRequested
-                        // gate, re-validates the device address before bringing the transport back
-                        // up, and reuses the isRestarting CAS so it cannot stack with a concurrent
-                        // BLE liveness restart.
                         Logger.e { "Handshake still stalled after retry, requesting forced transport restart" }
-                        scope.handledLaunch { radioInterfaceService.restartTransport() }
-                        onConnectionChanged(ConnectionState.Disconnected)
+                        // Launch a sibling recovery job that performs BOTH the app-level Disconnected transition
+                        // AND the transport restart, in deterministic order. We MUST NOT call onConnectionChanged
+                        // from this handshakeTimeout coroutine after launching the sibling: onConnectionChanged
+                        // cancels handshakeTimeout (the very job running this code), and any work chained after
+                        // the launch is not guaranteed to run. We MUST ALSO NOT leave the explicit Disconnected
+                        // call in this coroutine after the sibling launch — otherwise the sibling's restart
+                        // emissions (DeviceSleep, then Connected) can arrive while the app-level state is still
+                        // Connecting, causing onConnectionChanged's redundant-Connected-while-Connecting guard to
+                        // ignore the fresh Connected emission. That leaves the app Disconnected while transport is
+                        // Connected — the same split-brain this restart path is meant to break.
+                        //
+                        // Inside the sibling: (1) flip app state to Disconnected first — this cancels handshakeTimeout
+                        // (the OUTER timeout job, not this sibling, so the sibling keeps running). (2) THEN call
+                        // restartTransport(), whose emissions (DeviceSleep → Connected) now arrive from app-level
+                        // Disconnected, bypass the redundant-Connecting guard, and re-enter handleConnected to
+                        // restart the handshake cleanly.
+                        scope.handledLaunch {
+                            onConnectionChanged(ConnectionState.Disconnected)
+                            radioInterfaceService.restartTransport()
+                        }
+                        // Return without calling onConnectionChanged here. The sibling job owns both transitions.
                     }
                 }
             }
