@@ -258,7 +258,7 @@ class ScannerViewModelTest {
             val itemsAfterDevice2 = awaitItem()
             assertEquals(3, itemsAfterDevice2.size)
             assertEquals(bondedDevice.address, (itemsAfterDevice2[0] as DeviceListEntry.Ble).address)
-            assertEquals(device1.address, (itemsAfterDevice1[1] as DeviceListEntry.Ble).address)
+            assertEquals(device1.address, (itemsAfterDevice2[1] as DeviceListEntry.Ble).address)
             assertEquals(device2.address, (itemsAfterDevice2[2] as DeviceListEntry.Ble).address)
 
             // 4. Device 1 RSSI updates to -20dBm (strongest) - should NOT re-sort
