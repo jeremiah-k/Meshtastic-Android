@@ -19,6 +19,7 @@ package org.meshtastic.core.data.manager
 import co.touchlab.kermit.Logger
 import kotlinx.atomicfu.atomic
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import org.koin.core.annotation.Named
 import org.koin.core.annotation.Single
@@ -26,6 +27,7 @@ import org.meshtastic.core.common.util.handledLaunch
 import org.meshtastic.core.model.ConnectionState
 import org.meshtastic.core.model.DeviceVersion
 import org.meshtastic.core.repository.CommandSender
+import org.meshtastic.core.repository.ConnectionStateProvider
 import org.meshtastic.core.repository.HandshakeConstants
 import org.meshtastic.core.repository.MeshConfigFlowManager
 import org.meshtastic.core.repository.MeshConnectionManager
@@ -40,6 +42,8 @@ import org.meshtastic.proto.FileInfo
 import org.meshtastic.proto.FirmwareEdition
 import org.meshtastic.proto.HardwareModel
 import org.meshtastic.proto.NodeInfo
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.seconds
 import org.meshtastic.core.model.MyNodeInfo as SharedMyNodeInfo
 import org.meshtastic.proto.MyNodeInfo as ProtoMyNodeInfo
 
@@ -51,6 +55,7 @@ class MeshConfigFlowManagerImpl(
     private val nodeRepository: NodeRepository,
     private val radioConfigRepository: RadioConfigRepository,
     private val serviceStateWriter: ServiceStateWriter,
+    private val connectionStateProvider: ConnectionStateProvider,
     private val analytics: PlatformAnalytics,
     private val commandSender: CommandSender,
     private val heartbeatSender: DataLayerHeartbeatSender,
@@ -58,9 +63,13 @@ class MeshConfigFlowManagerImpl(
     @Named("ServiceScope") private val scope: CoroutineScope,
 ) : MeshConfigFlowManager {
     private val wantConfigDelay = 100L
+    private val nodeInfoEmptyRetryDelay: Duration = 5.seconds
+    private val nodeInfoIdleCompleteDelay: Duration = 10.seconds
 
     /** Monotonically increasing generation so async clears from a stale handshake are discarded. */
     private val handshakeGeneration = atomic(0L)
+    private var nodeInfoIdleJob: Job? = null
+    private var nodeInfoRetrySent = false
 
     /**
      * Type-safe handshake state machine. Each state carries exactly the data that is valid during that phase,
@@ -77,10 +86,14 @@ class MeshConfigFlowManagerImpl(
          * Stage 1: receiving device config, module config, channels, and metadata.
          *
          * [rawMyNodeInfo] arrives first (my_info packet); [metadata] may arrive shortly after. Both are consumed
-         * together by [buildMyNodeInfo] at Stage 1 completion.
+         * together by [buildMyNodeInfo] at Stage 1 completion. Some firmware/network paths can deliver NodeInfo before
+         * the Stage 2 request; keep those packets so the later node-list phase can still make progress.
          */
-        data class ReceivingConfig(val rawMyNodeInfo: ProtoMyNodeInfo, val metadata: DeviceMetadata? = null) :
-            HandshakeState()
+        data class ReceivingConfig(
+            val rawMyNodeInfo: ProtoMyNodeInfo,
+            val metadata: DeviceMetadata? = null,
+            val earlyNodes: List<NodeInfo> = emptyList(),
+        ) : HandshakeState()
 
         /**
          * Stage 2: receiving node-info packets from the firmware.
@@ -98,7 +111,12 @@ class MeshConfigFlowManagerImpl(
     private var handshakeState: HandshakeState = HandshakeState.Idle
 
     override val newNodeCount: Int
-        get() = (handshakeState as? HandshakeState.ReceivingNodeInfo)?.nodes?.size ?: 0
+        get() =
+            when (val state = handshakeState) {
+                is HandshakeState.ReceivingConfig -> state.earlyNodes.size
+                is HandshakeState.ReceivingNodeInfo -> state.nodes.size
+                else -> 0
+            }
 
     override fun handleConfigComplete(configCompleteId: Int) {
         val state = handshakeState
@@ -130,6 +148,7 @@ class MeshConfigFlowManagerImpl(
         if (finalizedInfo == null) {
             Logger.w { "Stage 1 failed: could not build MyNodeInfo, retrying Stage 1" }
             handshakeState = HandshakeState.Idle
+            cancelNodeInfoIdleJob()
             scope.handledLaunch {
                 delay(wantConfigDelay)
                 connectionManager.value.startConfigOnly()
@@ -149,9 +168,11 @@ class MeshConfigFlowManagerImpl(
             }
         }
 
-        handshakeState = HandshakeState.ReceivingNodeInfo(myNodeInfo = finalizedInfo)
+        handshakeState = HandshakeState.ReceivingNodeInfo(myNodeInfo = finalizedInfo, nodes = state.earlyNodes)
+        nodeInfoRetrySent = false
         Logger.i { "myNodeInfo committed (nodeNum=${finalizedInfo.myNodeNum})" }
         connectionManager.value.onRadioConfigLoaded()
+        serviceStateWriter.setConnectionProgress("Loading node list")
 
         scope.handledLaunch {
             delay(wantConfigDelay)
@@ -159,11 +180,13 @@ class MeshConfigFlowManagerImpl(
             delay(wantConfigDelay)
             Logger.i { "Requesting NodeInfo (Stage 2)" }
             connectionManager.value.startNodeInfoOnly()
+            scheduleNodeInfoIdleRecovery()
         }
     }
 
     private fun handleNodeInfoComplete(state: HandshakeState.ReceivingNodeInfo) {
         Logger.i { "NodeInfo complete (Stage 2)" }
+        cancelNodeInfoIdleJob()
 
         val info = state.myNodeInfo
 
@@ -197,6 +220,8 @@ class MeshConfigFlowManagerImpl(
         Logger.i { "MyNodeInfo received: ${myInfo.my_node_num}" }
 
         // Transition to Stage 1, discarding any stale data from a prior interrupted handshake.
+        cancelNodeInfoIdleJob()
+        nodeInfoRetrySent = false
         handshakeState = HandshakeState.ReceivingConfig(rawMyNodeInfo = myInfo)
         nodeManager.setMyNodeNum(myInfo.my_node_num)
         nodeManager.setFirmwareEdition(myInfo.firmware_edition)
@@ -239,10 +264,18 @@ class MeshConfigFlowManagerImpl(
 
     override fun handleNodeInfo(info: NodeInfo) {
         val state = handshakeState
-        if (state is HandshakeState.ReceivingNodeInfo) {
-            handshakeState = state.copy(nodes = state.nodes + info)
-        } else {
-            Logger.w { "Ignoring NodeInfo outside Stage 2 (state=$state)" }
+        when (state) {
+            is HandshakeState.ReceivingConfig -> {
+                Logger.d { "Buffering NodeInfo received during Stage 1" }
+                handshakeState = state.copy(earlyNodes = state.earlyNodes.withNodeInfo(info))
+            }
+
+            is HandshakeState.ReceivingNodeInfo -> {
+                handshakeState = state.copy(nodes = state.nodes.withNodeInfo(info))
+                scheduleNodeInfoIdleRecovery()
+            }
+
+            else -> Logger.w { "Ignoring NodeInfo outside active handshake (state=$state)" }
         }
     }
 
@@ -253,6 +286,51 @@ class MeshConfigFlowManagerImpl(
 
     override fun triggerWantConfig() {
         connectionManager.value.startConfigOnly()
+    }
+
+    private fun scheduleNodeInfoIdleRecovery() {
+        val generation = handshakeGeneration.value
+        val state = handshakeState as? HandshakeState.ReceivingNodeInfo ?: return
+        nodeInfoIdleJob?.cancel()
+        launchNodeInfoIdleRecovery(generation, state)
+    }
+
+    private fun launchNodeInfoIdleRecovery(generation: Long, state: HandshakeState.ReceivingNodeInfo) {
+        nodeInfoIdleJob =
+            scope.handledLaunch {
+                val idleDelay = if (state.nodes.isEmpty()) nodeInfoEmptyRetryDelay else nodeInfoIdleCompleteDelay
+                delay(idleDelay)
+                if (!isNodeInfoRecoveryActive(generation)) return@handledLaunch
+
+                val current = handshakeState as? HandshakeState.ReceivingNodeInfo ?: return@handledLaunch
+                if (current.nodes.isEmpty() && !nodeInfoRetrySent) {
+                    nodeInfoRetrySent = true
+                    Logger.w { "No NodeInfo received after Stage 2 request; retrying NodeInfo request" }
+                    serviceStateWriter.setConnectionProgress("Loading node list")
+                    heartbeatSender.sendHeartbeat("node-info-retry")
+                    delay(wantConfigDelay)
+                    connectionManager.value.startNodeInfoOnly()
+                    if (isNodeInfoRecoveryActive(generation)) {
+                        launchNodeInfoIdleRecovery(generation, current)
+                    } else {
+                        nodeInfoIdleJob = null
+                    }
+                    return@handledLaunch
+                }
+
+                Logger.w { "NodeInfo idle in Stage 2; completing with ${current.nodes.size} node(s)" }
+                serviceStateWriter.setConnectionProgress("Finishing connection")
+                nodeInfoIdleJob = null
+                handleNodeInfoComplete(current)
+            }
+    }
+
+    private fun isNodeInfoRecoveryActive(generation: Long): Boolean = handshakeGeneration.value == generation &&
+        connectionStateProvider.connectionState.value is ConnectionState.Connecting
+
+    private fun cancelNodeInfoIdleJob() {
+        nodeInfoIdleJob?.cancel()
+        nodeInfoIdleJob = null
     }
 
     /**
@@ -305,3 +383,5 @@ class MeshConfigFlowManagerImpl(
         }
     }
 }
+
+private fun List<NodeInfo>.withNodeInfo(info: NodeInfo): List<NodeInfo> = filterNot { it.num == info.num } + info
