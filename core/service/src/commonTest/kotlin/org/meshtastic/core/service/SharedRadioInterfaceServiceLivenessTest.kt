@@ -1186,8 +1186,9 @@ class SharedRadioInterfaceServiceLivenessTest {
                 )
 
                 // Stale handshake-stall restart fired in the window where radioTransport == null but
-                // connectionRequested is still true. The new gate must short-circuit BEFORE the
-                // isRestarting CAS and BEFORE the onDisconnect(isPermanent=false) DeviceSleep emission.
+                // connectionRequested is still true. The new gate must short-circuit AFTER the
+                // isRestarting CAS (inside transportMutex) but BEFORE the onDisconnect(isPermanent=false) DeviceSleep
+                // emission.
                 service.restartTransport()
                 testDispatcher.scheduler.runCurrent()
                 advanceTimeBy(1_000L)
