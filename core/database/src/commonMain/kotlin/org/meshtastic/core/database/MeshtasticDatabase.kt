@@ -23,6 +23,7 @@ import androidx.room3.DeleteColumn
 import androidx.room3.DeleteTable
 import androidx.room3.RoomDatabase
 import androidx.room3.migration.AutoMigrationSpec
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import org.meshtastic.core.common.util.ioDispatcher
 import org.meshtastic.core.database.dao.DeviceHardwareDao
 import org.meshtastic.core.database.dao.DeviceLinkDao
@@ -160,6 +161,7 @@ abstract class MeshtasticDatabase : RoomDatabase() {
          * **JVM/iOS production uses `true`** (the default). Revisit if desktop/iOS field logs show similar
          * pool-exhaustion patterns under cancellation churn.
          */
+        @OptIn(ExperimentalCoroutinesApi::class)
         fun <T : RoomDatabase> RoomDatabase.Builder<T>.configureCommon(
             multiConnection: Boolean = true,
         ): RoomDatabase.Builder<T> = this.fallbackToDestructiveMigration(dropAllTables = false)

@@ -26,9 +26,11 @@ import co.touchlab.kermit.Logger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -65,11 +67,9 @@ open class DatabaseManager(
 
     private fun lastUsedKey(dbName: String) = longPreferencesKey("db_last_used:$dbName")
 
-    companion object {
-        private const val BACKFILL_COLD_START_DELAY_MS = 2_000L
-    }
+    private var backfillJob: Job? = null
 
-    @Volatile private var hasSwitchedOnce = false
+    @Volatile private var hasDelayedFirstDeviceBackfill = false
 
     override val cacheLimit: StateFlow<Int> =
         datastore.data
@@ -158,14 +158,23 @@ open class DatabaseManager(
         managerScope.launch(dispatchers.io) { cleanupLegacyDbIfNeeded(activeDbName = dbName) }
 
         // Backfill FTS search index for any text messages missing messageText.
-        // On cold start, defer this so it does not starve the single DB connection while
-        // the UI is collecting startup flows. Mid-session switches keep fire-and-forget behavior.
-        val isFirstSwitch = !hasSwitchedOnce
-        hasSwitchedOnce = true
-        managerScope.launch(dispatchers.io) {
-            if (isFirstSwitch) delay(BACKFILL_COLD_START_DELAY_MS)
-            backfillSearchIndexIfNeeded(db)
-        }
+        // On the first real device DB, defer this so it does not starve the single DB connection while
+        // the UI is collecting startup flows. The default DB should not consume the cold-start delay.
+        val shouldDelayBackfill = dbName != DatabaseConstants.DEFAULT_DB_NAME && !hasDelayedFirstDeviceBackfill
+        if (shouldDelayBackfill) hasDelayedFirstDeviceBackfill = true
+        backfillJob?.cancel()
+        backfillJob =
+            managerScope.launch(dispatchers.io) {
+                try {
+                    if (shouldDelayBackfill) delay(BACKFILL_COLD_START_DELAY_MS)
+                    if (_currentDb.value !== db) return@launch
+                    backfillSearchIndexIfNeeded(db)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Logger.w(e) { "Failed to backfill search index for ${anonymizeDbName(dbName)}" }
+                }
+            }
 
         Logger.i { "Switched active DB to ${anonymizeDbName(dbName)} for address ${anonymizeAddress(address)}" }
     }
@@ -222,6 +231,7 @@ open class DatabaseManager(
         }
 
     private companion object {
+        private const val BACKFILL_COLD_START_DELAY_MS = 2_000L
         val DB_TERMS = listOf("pool", "database", "connection", "sqlite")
     }
 
@@ -347,6 +357,8 @@ open class DatabaseManager(
 
     /** Closes all open databases and cancels background work. */
     fun close() {
+        backfillJob?.cancel()
+        backfillJob = null
         managerScope.cancel()
         dbCache.values.forEach { it.close() }
         dbCache.clear()
