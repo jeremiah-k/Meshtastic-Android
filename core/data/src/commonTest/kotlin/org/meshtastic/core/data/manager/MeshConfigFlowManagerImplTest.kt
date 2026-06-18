@@ -57,6 +57,13 @@ import org.meshtastic.proto.MyNodeInfo as ProtoMyNodeInfo
 @OptIn(ExperimentalCoroutinesApi::class)
 class MeshConfigFlowManagerImplTest {
 
+    private companion object {
+        // Production issues two sequential delay(wantConfigDelay) calls (100ms each = 200ms)
+        // plus scheduler slack for the inter-stage heartbeat and startNodeInfoOnly(); bump in
+        // lockstep with wantConfigDelay if it changes.
+        const val STAGE_TRANSITION_ADVANCE_MS = 250L
+    }
+
     private val nodeManager = mock<NodeManager>(MockMode.autofill)
     private val connectionManager = mock<MeshConnectionManager>(MockMode.autofill)
     private val nodeRepository = mock<NodeRepository>(MockMode.autofill)
@@ -175,7 +182,7 @@ class MeshConfigFlowManagerImplTest {
         advanceUntilIdle()
 
         manager.handleConfigComplete(HandshakeConstants.CONFIG_NONCE)
-        advanceTimeBy(250)
+        advanceTimeBy(STAGE_TRANSITION_ADVANCE_MS)
         runCurrent()
 
         verify { connectionManager.onRadioConfigLoaded() }
@@ -197,7 +204,7 @@ class MeshConfigFlowManagerImplTest {
 
         sentPackets.clear() // Clear any packets from prior phases
         manager.handleConfigComplete(HandshakeConstants.CONFIG_NONCE)
-        advanceTimeBy(250)
+        advanceTimeBy(STAGE_TRANSITION_ADVANCE_MS)
         runCurrent()
 
         val heartbeats = sentPackets.filter { it.heartbeat != null }
@@ -219,7 +226,7 @@ class MeshConfigFlowManagerImplTest {
         advanceUntilIdle()
 
         manager.handleConfigComplete(HandshakeConstants.CONFIG_NONCE)
-        advanceTimeBy(250)
+        advanceTimeBy(STAGE_TRANSITION_ADVANCE_MS)
         runCurrent()
 
         // Handshake should still progress despite old firmware
@@ -247,7 +254,8 @@ class MeshConfigFlowManagerImplTest {
         advanceUntilIdle()
 
         manager.handleConfigComplete(HandshakeConstants.CONFIG_NONCE)
-        advanceUntilIdle()
+        advanceTimeBy(STAGE_TRANSITION_ADVANCE_MS)
+        runCurrent()
 
         verify { serviceRepository.setConnectionProgress("Loading node list") }
     }
@@ -268,12 +276,13 @@ class MeshConfigFlowManagerImplTest {
         advanceUntilIdle()
 
         manager.handleConfigComplete(HandshakeConstants.CONFIG_NONCE)
-        advanceTimeBy(250)
+        advanceTimeBy(STAGE_TRANSITION_ADVANCE_MS)
         runCurrent()
 
         // Now in ReceivingNodeInfo — a second Stage 1 complete should be ignored
         manager.handleConfigComplete(HandshakeConstants.CONFIG_NONCE)
-        advanceUntilIdle()
+        advanceTimeBy(STAGE_TRANSITION_ADVANCE_MS)
+        runCurrent()
     }
 
     // ---------- handleNodeInfo ----------
@@ -286,7 +295,7 @@ class MeshConfigFlowManagerImplTest {
         manager.handleLocalMetadata(metadata)
         advanceUntilIdle()
         manager.handleConfigComplete(HandshakeConstants.CONFIG_NONCE)
-        advanceTimeBy(250)
+        advanceTimeBy(STAGE_TRANSITION_ADVANCE_MS)
         runCurrent()
 
         // Now in ReceivingNodeInfo
@@ -310,7 +319,8 @@ class MeshConfigFlowManagerImplTest {
         manager.handleLocalMetadata(metadata)
         advanceUntilIdle()
         manager.handleConfigComplete(HandshakeConstants.CONFIG_NONCE)
-        advanceUntilIdle()
+        advanceTimeBy(STAGE_TRANSITION_ADVANCE_MS)
+        runCurrent()
         manager.handleConfigComplete(HandshakeConstants.NODE_INFO_NONCE)
         advanceUntilIdle()
 
@@ -339,7 +349,7 @@ class MeshConfigFlowManagerImplTest {
         manager.handleLocalMetadata(metadata)
         advanceUntilIdle()
         manager.handleConfigComplete(HandshakeConstants.CONFIG_NONCE)
-        advanceTimeBy(250)
+        advanceTimeBy(STAGE_TRANSITION_ADVANCE_MS)
         runCurrent()
 
         manager.handleNodeInfo(NodeInfo(num = 100))
@@ -366,7 +376,7 @@ class MeshConfigFlowManagerImplTest {
         manager.handleLocalMetadata(metadata)
         advanceUntilIdle()
         manager.handleConfigComplete(HandshakeConstants.CONFIG_NONCE)
-        advanceTimeBy(250)
+        advanceTimeBy(STAGE_TRANSITION_ADVANCE_MS)
         runCurrent()
 
         // No handleNodeInfo calls — empty node list
@@ -430,7 +440,7 @@ class MeshConfigFlowManagerImplTest {
 
         // Stage 1 complete
         manager.handleConfigComplete(HandshakeConstants.CONFIG_NONCE)
-        advanceTimeBy(250)
+        advanceTimeBy(STAGE_TRANSITION_ADVANCE_MS)
         runCurrent()
         verify { connectionManager.onRadioConfigLoaded() }
 
