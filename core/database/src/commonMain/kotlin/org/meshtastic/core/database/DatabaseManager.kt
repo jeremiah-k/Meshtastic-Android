@@ -119,7 +119,6 @@ open class DatabaseManager(
         dbCache.getOrPut(dbName) { getDatabaseBuilder(dbName).build() }
 
     /** Switch active database to the one associated with [address]. Serialized via mutex. */
-    @Suppress("TooGenericExceptionCaught")
     override suspend fun switchActiveDatabase(address: String?) = mutex.withLock {
         val dbName = buildDbName(address)
 
@@ -163,19 +162,7 @@ open class DatabaseManager(
         // the UI is collecting startup flows. The default DB should not consume the cold-start delay.
         val shouldDelayBackfill = dbName != DatabaseConstants.DEFAULT_DB_NAME && !hasDelayedFirstDeviceBackfill
         if (shouldDelayBackfill) hasDelayedFirstDeviceBackfill = true
-        backfillJob?.cancel()
-        backfillJob =
-            managerScope.launch(dispatchers.io) {
-                try {
-                    if (shouldDelayBackfill) delay(BACKFILL_COLD_START_DELAY_MS)
-                    if (_currentDb.value !== db) return@launch
-                    backfillSearchIndexIfNeeded(db)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    Logger.w(e) { "Failed to backfill search index for ${anonymizeDbName(dbName)}" }
-                }
-            }
+        scheduleSearchIndexBackfill(dbName = dbName, db = db, shouldDelayBackfill = shouldDelayBackfill)
 
         Logger.i { "Switched active DB to ${anonymizeDbName(dbName)} for address ${anonymizeAddress(address)}" }
     }
@@ -332,6 +319,23 @@ open class DatabaseManager(
                 .onFailure { Logger.w(it) { "Failed to delete legacy database ${anonymizeDbName(legacy)}" } }
         }
         datastore.edit { it[legacyCleanedKey] = true }
+    }
+
+    @Suppress("TooGenericExceptionCaught")
+    private fun scheduleSearchIndexBackfill(dbName: String, db: MeshtasticDatabase, shouldDelayBackfill: Boolean) {
+        backfillJob?.cancel()
+        backfillJob =
+            managerScope.launch(dispatchers.io) {
+                try {
+                    if (shouldDelayBackfill) delay(BACKFILL_COLD_START_DELAY_MS)
+                    if (_currentDb.value !== db) return@launch
+                    backfillSearchIndexIfNeeded(db)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Logger.w(e) { "Failed to backfill search index for ${anonymizeDbName(dbName)}" }
+                }
+            }
     }
 
     /**
