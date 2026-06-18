@@ -93,3 +93,4 @@ offline-repository/
 build-scan-*.scan
 # burningmesh capture replay assets (private data — generated via replay_server.py --export)
 *.fromradio
+.omo/*
