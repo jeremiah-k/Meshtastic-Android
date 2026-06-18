@@ -286,6 +286,15 @@ class SharedRadioInterfaceService(
                 Logger.d { "restartTransport: skipped-no-address" }
                 return@withLock
             }
+            // Honor the documented "safe no-op when no transport running" contract: environmental
+            // stops (network unavailable, BLE disabled) intentionally preserve
+            // connectionRequested=true so the recovery listeners above can re-bring-up the
+            // transport later. A stale restart job running after such a stop must NOT bypass that
+            // recovery path by creating a transport directly via startTransportLocked().
+            if (radioTransport == null) {
+                Logger.d { "restartTransport: skipped-no-transport" }
+                return@withLock
+            }
             // Reuse the liveness CAS so a concurrent BLE zombie-recovery restart cannot stack with
             // this handshake-induced restart — the loser observes isRestarting == true and defers
             // to the in-flight cycle. startTransportLocked() is idempotent w.r.t. an existing

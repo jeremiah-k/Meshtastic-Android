@@ -1115,4 +1115,93 @@ class SharedRadioInterfaceServiceLivenessTest {
             advanceTimeBy(1_000L)
         }
     }
+
+    /**
+     * Regression for the `radioTransport == null` gate added to [SharedRadioInterfaceService.restartTransport] (the
+     * third early-return, before the `isRestarting` CAS and the `onDisconnect(isPermanent = false)` call).
+     *
+     * Scenario: a TCP transport has been torn down by an environmental stop (`networkAvailable = false`) but
+     * `connectionRequested` is intentionally preserved so the network recovery listener can re-bring-up the transport
+     * when connectivity returns. A stale handshake-stall restart fired in that window MUST be a no-op:
+     * - It MUST NOT create a fresh transport via `startTransportLocked()` (that would bypass the recovery listener,
+     *   which owns the re-bring-up).
+     * - It MUST NOT emit `DeviceSleep` via `onDisconnect(isPermanent = false)` (the gate returns before that call), so
+     *   the recovery path's later transitions stay meaningful.
+     *
+     * Counter-assertion: the recovery listener itself MUST still function after the gate fires — toggling
+     * `networkAvailable` back to `true` MUST create the second transport, proving the gate did not break the documented
+     * re-bring-up path.
+     */
+    @Test
+    fun `restartTransport is a no-op when transport is environmentally stopped but connection remains requested`() =
+        runTest(testDispatcher) {
+            clock = 0L
+            val networkAvailability = MutableStateFlow<Boolean>(true)
+            val service = createConnectedService("t192.168.1.100", networkAvailability = networkAvailability)
+            try {
+                assertEquals(1, createdTransports.size, "Initial connect should create one transport")
+                val initialTransport = createdTransports.first()
+
+                // Subscribe BEFORE the environmental stop so we capture every state transition through
+                // the stop, the gated restartTransport, and the recovery. _connectionState is a StateFlow
+                // (replays current value to late collectors), so the launch's first emission is Connected.
+                val stateEmissions = mutableListOf<ConnectionState>()
+                val collectJob = backgroundScope.launch { service.connectionState.collect { stateEmissions.add(it) } }
+                testDispatcher.scheduler.runCurrent()
+
+                // Environmental stop: network drops while a TCP transport is running. The network
+                // listener (see initStateListeners) calls stopTransportLocked() with defaults
+                // (notifyPermanent=true → onDisconnect(isPermanent=true) → Disconnected). The transport
+                // is closed and radioTransport becomes null, but connectionRequested STAYS true so the
+                // recovery listener can re-bring-up later.
+                networkAvailability.value = false
+                testDispatcher.scheduler.runCurrent()
+                // Drain the polite-disconnect frame (POLITE_DISCONNECT_DRAIN_MS = 500ms).
+                advanceTimeBy(1_000L)
+
+                assertTrue(initialTransport.closeCalled, "Environmental stop must close the running TCP transport")
+                assertEquals(
+                    1,
+                    createdTransports.size,
+                    "Environmental stop must not create a new transport (only teardown)",
+                )
+
+                // Stale handshake-stall restart fired in the window where radioTransport == null but
+                // connectionRequested is still true. The new gate must short-circuit BEFORE the
+                // isRestarting CAS and BEFORE the onDisconnect(isPermanent=false) DeviceSleep emission.
+                service.restartTransport()
+                testDispatcher.scheduler.runCurrent()
+                advanceTimeBy(1_000L)
+
+                assertEquals(
+                    1,
+                    createdTransports.size,
+                    "restartTransport must be a no-op when radioTransport == null (gate fired)",
+                )
+                assertFalse(
+                    ConnectionState.DeviceSleep in stateEmissions,
+                    "Gated restartTransport must NOT emit DeviceSleep " +
+                        "(returned before onDisconnect(isPermanent=false)); emitted: $stateEmissions",
+                )
+
+                // Environmental recovery: networkAvailable flips back to true. connectionRequested is
+                // still true (neither the environmental stop nor the gated restart cleared it), so the
+                // recovery listener MUST call startTransportLocked() and create the second transport.
+                // This proves the new gate did not break the documented re-bring-up path.
+                networkAvailability.value = true
+                testDispatcher.scheduler.runCurrent()
+                advanceTimeBy(1_000L)
+
+                collectJob.cancel()
+
+                assertEquals(
+                    2,
+                    createdTransports.size,
+                    "Network recovery must re-bring-up the transport after the gated no-op restart (gate still set)",
+                )
+            } finally {
+                service.disconnect()
+                advanceTimeBy(1_000L)
+            }
+        }
 }
