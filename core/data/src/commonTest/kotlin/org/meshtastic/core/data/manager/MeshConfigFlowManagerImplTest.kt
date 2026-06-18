@@ -24,7 +24,6 @@ import dev.mokkery.matcher.any
 import dev.mokkery.mock
 import dev.mokkery.verify
 import dev.mokkery.verify.VerifyMode
-import dev.mokkery.verify.VerifyMode.Companion.exactly
 import dev.mokkery.verifySuspend
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -35,7 +34,6 @@ import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import okio.ByteString.Companion.encodeUtf8
-import org.meshtastic.core.model.ConnectionState
 import org.meshtastic.core.repository.CommandSender
 import org.meshtastic.core.repository.HandshakeConstants
 import org.meshtastic.core.repository.MeshConnectionManager
@@ -71,7 +69,6 @@ class MeshConfigFlowManagerImplTest {
 
     private val testDispatcher = StandardTestDispatcher()
     private val testScope = TestScope(testDispatcher)
-    private val connectionState = MutableStateFlow(ConnectionState.Connecting)
 
     private lateinit var manager: MeshConfigFlowManagerImpl
 
@@ -90,14 +87,12 @@ class MeshConfigFlowManagerImplTest {
 
     @BeforeTest
     fun setUp() {
-        connectionState.value = ConnectionState.Connecting
         every { commandSender.getCurrentPacketId() } returns 100
         every { packetHandler.sendToRadio(any<org.meshtastic.proto.ToRadio>()) } returns Unit
         every { nodeManager.nodeDBbyNodeNum } returns emptyMap()
         every { nodeManager.myNodeNum } returns MutableStateFlow(null)
         every { notificationPrefs.nodeEventsAutoDisabledForEvent } returns MutableStateFlow(false)
         every { notificationPrefs.nodeEventsEnabled } returns MutableStateFlow(true)
-        every { serviceRepository.connectionState } returns connectionState
 
         manager =
             MeshConfigFlowManagerImpl(
@@ -106,7 +101,6 @@ class MeshConfigFlowManagerImplTest {
                 nodeRepository = nodeRepository,
                 radioConfigRepository = radioConfigRepository,
                 serviceStateWriter = serviceRepository,
-                connectionStateProvider = serviceRepository,
                 analytics = analytics,
                 commandSender = commandSender,
                 heartbeatSender = DataLayerHeartbeatSender(packetHandler),
@@ -317,6 +311,8 @@ class MeshConfigFlowManagerImplTest {
         advanceUntilIdle()
         manager.handleConfigComplete(HandshakeConstants.CONFIG_NONCE)
         advanceUntilIdle()
+        manager.handleConfigComplete(HandshakeConstants.NODE_INFO_NONCE)
+        advanceUntilIdle()
 
         verify { nodeManager.installNodeInfo(NodeInfo(num = 100)) }
         verifySuspend { connectionManager.onNodeDbReady() }
@@ -378,60 +374,6 @@ class MeshConfigFlowManagerImplTest {
         advanceUntilIdle()
 
         verify { nodeManager.setNodeDbReady(true) }
-        verifySuspend { connectionManager.onNodeDbReady() }
-    }
-
-    @Test
-    fun `Stage 2 idle with no nodes retries once then completes`() = testScope.runTest {
-        manager.handleMyInfo(protoMyNodeInfo)
-        advanceUntilIdle()
-        manager.handleLocalMetadata(metadata)
-        advanceUntilIdle()
-
-        manager.handleConfigComplete(HandshakeConstants.CONFIG_NONCE)
-        advanceUntilIdle()
-
-        verify(exactly(2)) { connectionManager.startNodeInfoOnly() }
-        verify { serviceRepository.setConnectionProgress("Finishing connection") }
-        verify { serviceRepository.setConnectionState(ConnectionState.Connected) }
-        verifySuspend { connectionManager.onNodeDbReady() }
-    }
-
-    @Test
-    fun `Stage 2 idle does not complete after disconnect`() = testScope.runTest {
-        manager.handleMyInfo(protoMyNodeInfo)
-        advanceUntilIdle()
-        manager.handleLocalMetadata(metadata)
-        advanceUntilIdle()
-
-        manager.handleConfigComplete(HandshakeConstants.CONFIG_NONCE)
-        advanceTimeBy(250)
-        runCurrent()
-
-        connectionState.value = ConnectionState.Disconnected
-        advanceUntilIdle()
-
-        verify(exactly(1)) { connectionManager.startNodeInfoOnly() }
-        verify(mode = VerifyMode.not) { serviceRepository.setConnectionState(any()) }
-        verifySuspend(mode = VerifyMode.not) { connectionManager.onNodeDbReady() }
-    }
-
-    @Test
-    fun `Stage 2 idle with buffered nodes completes without empty retry`() = testScope.runTest {
-        val testNode = org.meshtastic.core.testing.TestDataFactory.createTestNode(num = 100)
-        every { nodeManager.nodeDBbyNodeNum } returns mapOf(100 to testNode)
-
-        manager.handleMyInfo(protoMyNodeInfo)
-        advanceUntilIdle()
-        manager.handleNodeInfo(NodeInfo(num = 100))
-        manager.handleLocalMetadata(metadata)
-        advanceUntilIdle()
-
-        manager.handleConfigComplete(HandshakeConstants.CONFIG_NONCE)
-        advanceUntilIdle()
-
-        verify(exactly(1)) { connectionManager.startNodeInfoOnly() }
-        verify { nodeManager.installNodeInfo(NodeInfo(num = 100)) }
         verifySuspend { connectionManager.onNodeDbReady() }
     }
 
