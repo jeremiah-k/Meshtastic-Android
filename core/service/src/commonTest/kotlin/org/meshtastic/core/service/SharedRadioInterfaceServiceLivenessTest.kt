@@ -791,7 +791,7 @@ class SharedRadioInterfaceServiceLivenessTest {
     // [SharedRadioInterfaceService.restartTransport] is the app-level handshake-stall recovery
     // path. It mirrors BLE liveness silent recovery: stopTransportLocked(notifyPermanent=false,
     // sendPoliteDisconnect=false) then startTransportLocked(), all under transportMutex. The gate
-    // contract has four early-return gates (in order) that MUST hold for the cycle to fire:
+    // contract has four early-return gates that MUST all hold for the cycle to fire:
     //   1. connectionRequested == true  (cleared by disconnect() / setDeviceAddress(null)/("n"))
     //   2. getBondedDeviceAddress() != null  (re-validates the selected address)
     //   3. radioTransport != null  (defends against a stale restart after an environmental stop)

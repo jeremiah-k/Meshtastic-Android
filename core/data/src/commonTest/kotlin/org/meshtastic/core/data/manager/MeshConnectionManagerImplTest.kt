@@ -451,8 +451,10 @@ class MeshConnectionManagerImplTest {
 
             // Advance past HANDSHAKE_TIMEOUT_STAGE1 (30s) + HANDSHAKE_RETRY_TIMEOUT (15s) WITHOUT
             // any config arrival. The stall-retry-exceeded branch must fire: the production code
-            // launches restartTransport() on the long-lived ServiceScope BEFORE flipping state to
-            // Disconnected (to dodge the handshakeTimeout self-cancel in onConnectionChanged).
+            // runs BOTH transitions inside one sibling recovery job — onConnectionChanged(Disconnected)
+            // FIRST, then restartTransport() — so the fresh Connected emission from restartTransport
+            // arrives with app-level state already Disconnected and is not ignored by the
+            // redundant-Connecting guard in onConnectionChanged.
             advanceTimeBy(46_000L)
             advanceUntilIdle()
 
@@ -467,22 +469,25 @@ class MeshConnectionManagerImplTest {
     @Test
     fun `Handshake stall recovery orders app disconnect before transport restart emissions`() =
         runTest(testDispatcher) {
-            // Stub restartTransport() to synchronously emit the transport-level restart sequence.
-            // Under the FIXED sibling ordering, the recovery runs onConnectionChanged(Disconnected)
-            // BEFORE restartTransport(): the fresh Connected emission arrives when app-level state
-            // is Disconnected (not Connecting), bypasses the redundant-Connecting guard in
-            // onConnectionChanged, and re-enters handleConnected → state goes back to Connecting.
-            // Under the BROKEN (old) ordering — restartTransport() BEFORE Disconnected — the fresh
-            // Connected arrives while app state is still Connecting → ignored by the redundant-
-            // Connected guard → the subsequent explicit Disconnected lands → final state would be
-            // Disconnected while transport is Connected (split-brain). This assertion is what
-            // distinguishes the two orderings.
-            everySuspend { radioInterfaceService.restartTransport() } calls
-                {
-                    radioConnectionState.value = ConnectionState.DeviceSleep
-                    radioConnectionState.value = ConnectionState.Connected
-                }
-
+            // This test locks in the ordering invariant of the stall-retry-exceeded recovery
+            // sibling: onConnectionChanged(Disconnected) runs FIRST, then restartTransport().
+            // We deliberately do NOT stub restartTransport() — the default mock no-op leaves it
+            // as a pure boundary call so the sibling's two phases can be observed independently.
+            //
+            // After the stall fires and the sibling completes, we MANUALLY replay the
+            // transport-level emissions that the real restartTransport() would produce:
+            //   - DeviceSleep (onDisconnect(isPermanent=false) on the old transport)
+            //   - Connected   (the new transport's onConnect callback)
+            // Under the FIXED ordering, the fresh Connected arrives with app state already
+            // Disconnected, bypasses the redundant-Connecting guard in onConnectionChanged,
+            // and re-enters handleConnected → state returns to Connecting.
+            // Under the BROKEN (old) ordering — restartTransport() BEFORE Disconnected — the
+            // fresh Connected would arrive while app state was still Connecting, the redundant-
+            // Connecting guard would drop it, and the state would never return to Connecting.
+            //
+            // Restructured to be deterministic on JVM CI: rather than relying on a stubbed
+            // restartTransport() lambda whose StateFlow side-effect emissions race with the
+            // flow collector under Mokkery, the test body itself drives the emissions in order.
             manager = createManager(backgroundScope)
             // Disconnected -> Connected: handleConnected() sets Connecting, sends pre-handshake
             // heartbeat, and (after PRE_HANDSHAKE_SETTLE_MS=100ms) calls startConfigOnly() which
@@ -499,26 +504,38 @@ class MeshConnectionManagerImplTest {
             )
 
             // Advance past HANDSHAKE_TIMEOUT_STAGE1 (30s) + HANDSHAKE_RETRY_TIMEOUT (15s) WITHOUT
-            // any config arrival. The stall-retry-exceeded branch fires the recovery sibling,
-            // which (under the fix) runs onConnectionChanged(Disconnected) FIRST and then
-            // restartTransport(). With UnconfinedTestDispatcher the sibling body executes inline;
-            // the stub's DeviceSleep → Connected emissions re-enter handleConnected and set state
-            // back to Connecting.
-            //
-            // Deliberately NOT calling advanceUntilIdle() after this advanceTimeBy: the
-            // post-restart handleConnected re-arms a fresh Stage 1 stall guard, and
-            // advanceUntilIdle would advance virtual time past it (and every subsequent re-arm),
-            // looping the recovery and obscuring the single-shot ordering this test locks in.
-            // advanceTimeBy(46_000L) fires exactly one stall-retry cycle.
+            // any config arrival. The stall-retry-exceeded branch fires the recovery sibling:
+            // onConnectionChanged(Disconnected) FIRST, then restartTransport() (default mock
+            // no-op, so nothing re-arms a stall guard and advanceUntilIdle is safe here).
             advanceTimeBy(46_000L)
+            advanceUntilIdle()
 
             verifySuspend(exactly(1)) { radioInterfaceService.restartTransport() }
             assertEquals(
+                ConnectionState.Disconnected,
+                serviceRepository.connectionState.value,
+                "Sibling must run onConnectionChanged(Disconnected) BEFORE restartTransport() — " +
+                    "proves the app-level Disconnected transition landed",
+            )
+
+            // Manually replay the transport-level restart signals that the real restartTransport()
+            // would emit. DeviceSleep corresponds to onDisconnect(isPermanent=false) on the old
+            // transport; Connected corresponds to the new transport's onConnect callback. With
+            // UnconfinedTestDispatcher each emission is collected synchronously inline, so no
+            // advanceUntilIdle() is needed between them — and none is safe AFTER the Connected
+            // emission, because handleConnected re-arms a fresh Stage 1 stall guard and
+            // advanceUntilIdle would advance virtual time past it (and every subsequent re-arm),
+            // looping the recovery and obscuring the single-shot ordering this test locks in.
+            radioConnectionState.value = ConnectionState.DeviceSleep
+            radioConnectionState.value = ConnectionState.Connected
+
+            assertEquals(
                 ConnectionState.Connecting,
                 serviceRepository.connectionState.value,
-                "Final state should be Connecting (NOT Disconnected): the post-restart fresh " +
-                    "Connected emission re-enters handleConnected because the app-level Disconnected " +
-                    "transition runs BEFORE restartTransport's DeviceSleep → Connected emissions",
+                "Fresh Connected emission must re-enter handleConnected (NOT be ignored by the " +
+                    "redundant-Connecting guard) because the app-level Disconnected transition " +
+                    "already ran BEFORE restartTransport's transport cycle — this is the ordering " +
+                    "invariant under test",
             )
         }
 

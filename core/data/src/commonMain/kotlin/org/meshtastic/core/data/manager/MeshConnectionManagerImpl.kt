@@ -241,11 +241,13 @@ class MeshConnectionManagerImpl(
                         // ignore the fresh Connected emission. That leaves the app Disconnected while transport is
                         // Connected — the same split-brain this restart path is meant to break.
                         //
-                        // Inside the sibling: (1) flip app state to Disconnected first — this cancels handshakeTimeout
-                        // (the OUTER timeout job, not this sibling, so the sibling keeps running). (2) THEN call
-                        // restartTransport(), whose emissions (DeviceSleep → Connected) now arrive from app-level
-                        // Disconnected, bypass the redundant-Connecting guard, and re-enter handleConnected to
-                        // restart the handshake cleanly.
+                        // Inside the sibling: (1) flip app state to Disconnected first. By the time the sibling runs,
+                        // handshakeTimeout has already completed naturally (it launched the sibling and returned), so
+                        // the cancellation onConnectionChanged would attempt is a no-op on an already-completed job —
+                        // and because the sibling is parented to `scope`, not to handshakeTimeout, it survives
+                        // independently. (2) THEN call restartTransport(), whose emissions (DeviceSleep → Connected)
+                        // now arrive from app-level Disconnected, bypass the redundant-Connecting guard, and re-enter
+                        // handleConnected to restart the handshake cleanly.
                         scope.handledLaunch {
                             onConnectionChanged(ConnectionState.Disconnected)
                             radioInterfaceService.restartTransport()
