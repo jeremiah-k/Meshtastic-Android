@@ -229,7 +229,20 @@ class MeshConnectionManagerImpl(
                     action()
                     delay(HANDSHAKE_RETRY_TIMEOUT)
                     if (serviceRepository.connectionState.value is ConnectionState.Connecting) {
-                        Logger.e { "Handshake still stalled after retry, forcing reconnect" }
+                        // CRITICAL ordering: onConnectionChanged() below cancels `handshakeTimeout`,
+                        // which IS the coroutine running this code — any work chained AFTER the state
+                        // flip is not guaranteed to run. Launch the transport restart as a sibling
+                        // Job on the long-lived ServiceScope (SupervisorJob, survives
+                        // handshakeTimeout cancellation) BEFORE the state transition so the WiFi/TCP
+                        // split-brain (transport Connected + connectionRequested=true + radioTransport
+                        // non-null, which setDeviceAddress's fast-path then blocks against) is broken
+                        // even after this coroutine is torn down. restartTransport() is silent
+                        // recovery: it preserves the selected address and the connectionRequested
+                        // gate, re-validates the device address before bringing the transport back
+                        // up, and reuses the isRestarting CAS so it cannot stack with a concurrent
+                        // BLE liveness restart.
+                        Logger.e { "Handshake still stalled after retry, requesting forced transport restart" }
+                        scope.handledLaunch { radioInterfaceService.restartTransport() }
                         onConnectionChanged(ConnectionState.Disconnected)
                     }
                 }

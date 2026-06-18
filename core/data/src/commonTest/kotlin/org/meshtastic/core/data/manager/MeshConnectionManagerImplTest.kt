@@ -24,6 +24,7 @@ import dev.mokkery.everySuspend
 import dev.mokkery.matcher.any
 import dev.mokkery.mock
 import dev.mokkery.verify
+import dev.mokkery.verify.VerifyMode.Companion.exactly
 import dev.mokkery.verifySuspend
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -425,5 +426,102 @@ class MeshConnectionManagerImplTest {
                 "Connected should cancel the sleep timeout; final state should be Connecting",
             )
         }
+    }
+
+    @Test
+    fun `Stage 1 config stall after retry timeout triggers transport restart and ends Disconnected`() =
+        runTest(testDispatcher) {
+            manager = createManager(backgroundScope)
+            // Disconnected -> Connected: handleConnected() sets Connecting, sends pre-handshake
+            // heartbeat, and (after PRE_HANDSHAKE_SETTLE_MS=100ms) calls startConfigOnly() which
+            // arms the Stage 1 stall guard (HANDSHAKE_TIMEOUT_STAGE1 = 30s).
+            radioConnectionState.value = ConnectionState.Connected
+            advanceTimeBy(200)
+            advanceUntilIdle()
+
+            // Pre-condition: Stage 1 is in flight — manager is Connecting and a ToRadio has been sent
+            // (heartbeat + want_config_id). Use at-least-one here so the test isn't brittle on the
+            // exact packet count.
+            assertEquals(
+                ConnectionState.Connecting,
+                serviceRepository.connectionState.value,
+                "Manager should be Connecting after radio Connected",
+            )
+            verify { packetHandler.sendToRadio(any<org.meshtastic.proto.ToRadio>()) }
+
+            // Advance past HANDSHAKE_TIMEOUT_STAGE1 (30s) + HANDSHAKE_RETRY_TIMEOUT (15s) WITHOUT
+            // any config arrival. The stall-retry-exceeded branch must fire: the production code
+            // launches restartTransport() on the long-lived ServiceScope BEFORE flipping state to
+            // Disconnected (to dodge the handshakeTimeout self-cancel in onConnectionChanged).
+            advanceTimeBy(46_000L)
+            advanceUntilIdle()
+
+            verifySuspend(exactly(1)) { radioInterfaceService.restartTransport() }
+            assertEquals(
+                ConnectionState.Disconnected,
+                serviceRepository.connectionState.value,
+                "Stage 1 stall should end in Disconnected after restart is requested",
+            )
+        }
+
+    @Test
+    fun `Stage 2 node-info stall after retry timeout triggers transport restart`() = runTest(testDispatcher) {
+        manager = createManager(backgroundScope)
+        radioConnectionState.value = ConnectionState.Connected
+        // Pre-handshake settle completes; Stage 1 stall guard armed.
+        advanceTimeBy(200)
+        advanceUntilIdle()
+
+        // Drive the connection into Stage 2. In production this is done by the config-flow
+        // manager once Stage 1 config arrives; here we invoke it directly. startNodeInfoOnly()
+        // cancels the Stage 1 stall guard and arms Stage 2 (HANDSHAKE_TIMEOUT_STAGE2 = 60s).
+        manager.startNodeInfoOnly()
+        advanceUntilIdle()
+
+        assertEquals(
+            ConnectionState.Connecting,
+            serviceRepository.connectionState.value,
+            "Manager should still be Connecting entering Stage 2",
+        )
+
+        // Advance past HANDSHAKE_TIMEOUT_STAGE2 (60s) + HANDSHAKE_RETRY_TIMEOUT (15s) WITHOUT
+        // invoking onNodeDbReady(). The stall-retry-exceeded branch must fire.
+        advanceTimeBy(76_000L)
+        advanceUntilIdle()
+
+        verifySuspend(exactly(1)) { radioInterfaceService.restartTransport() }
+        assertEquals(
+            ConnectionState.Disconnected,
+            serviceRepository.connectionState.value,
+            "Stage 2 stall should end in Disconnected after restart is requested",
+        )
+    }
+
+    @Test
+    fun `Handshake completing before stall timeout does not trigger transport restart`() = runTest(testDispatcher) {
+        // Stubs required by onNodeDbReady() (full handshake completion path).
+        everySuspend { commandSender.requestTelemetry(any(), any(), any()) } returns Unit
+        every { nodeManager.myNodeNum } returns MutableStateFlow(123)
+        every { mqttManager.startProxy(any(), any()) } returns Unit
+        everySuspend { historyManager.requestHistoryReplay(any(), any(), any(), any()) } returns Unit
+        every { nodeManager.getMyNodeInfo() } returns null
+
+        manager = createManager(backgroundScope)
+        radioConnectionState.value = ConnectionState.Connected
+        // Pre-handshake settle completes; Stage 1 stall guard armed.
+        advanceTimeBy(200)
+        advanceUntilIdle()
+
+        // Simulate the full handshake completing (config arrives + NodeDB becomes ready).
+        // onNodeDbReady() cancels handshakeTimeout, so the stall-retry-exceeded branch can
+        // never run even if virtual time later crosses the stage windows.
+        manager.onNodeDbReady()
+        advanceUntilIdle()
+
+        // Advance well past BOTH stage windows + retry (Stage 1: 30s+15s, Stage 2: 60s+15s).
+        advanceTimeBy(120_000L)
+        advanceUntilIdle()
+
+        verifySuspend(exactly(0)) { radioInterfaceService.restartTransport() }
     }
 }

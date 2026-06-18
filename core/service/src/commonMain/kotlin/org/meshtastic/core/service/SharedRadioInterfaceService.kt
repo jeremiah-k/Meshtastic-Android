@@ -270,6 +270,55 @@ class SharedRadioInterfaceService(
         }
     }
 
+    override suspend fun restartTransport() {
+        transportMutex.withLock {
+            // Silent recovery for app-level handshake stalls. The transport may still be physically
+            // up (TCP socket alive, firmware unresponsive to want_config_id), so cycling it in place
+            // WITHOUT clearing connectionRequested avoids the split-brain where setDeviceAddress's
+            // fast-path would otherwise block same-node reconnect. The caller (MeshConnectionManager)
+            // is responsible for the app-level Disconnected flip; this method only cycles the
+            // transport and emits the normal Connecting/Connected transitions via callbacks.
+            if (!connectionRequested) {
+                Logger.d { "restartTransport: skipped-not-requested" }
+                return@withLock
+            }
+            if (getBondedDeviceAddress() == null) {
+                Logger.d { "restartTransport: skipped-no-address" }
+                return@withLock
+            }
+            // Reuse the liveness CAS so a concurrent BLE zombie-recovery restart cannot stack with
+            // this handshake-induced restart — the loser observes isRestarting == true and defers
+            // to the in-flight cycle. startTransportLocked() is idempotent w.r.t. an existing
+            // transport, but the CAS also prevents a double stop/stop race on the teardown side.
+            if (!isRestarting.compareAndSet(expect = false, update = true)) {
+                Logger.d { "restartTransport: skipped, concurrent restart in progress" }
+                return@withLock
+            }
+            Logger.w { "restartTransport: restarting transport for ${getDeviceAddress()?.anonymize}" }
+            try {
+                // Mirror BLE liveness silent recovery: notifyPermanent=false (no user-facing
+                // Disconnected modal — the app-level state machine drives that separately) and
+                // sendPoliteDisconnect=false (firmware is unresponsive, writing a goodbye frame
+                // into a dead link only delays teardown).
+                ignoreExceptionSuspend { stopTransportLocked(notifyPermanent = false, sendPoliteDisconnect = false) }
+                // Race window: an explicit disconnect() may have arrived between the gate check
+                // above and the stop. Re-check before restarting so we do not resurrect a
+                // transport the user has torn down. This mirrors the BLE liveness recovery gate.
+                if (!connectionRequested) {
+                    Logger.d { "restartTransport: aborted, disconnect requested during stop" }
+                    return@withLock
+                }
+                // startTransportLocked() re-validates the selected address (no-op if null) and
+                // emits Connecting -> Connected through the transport callbacks as a normal
+                // fresh connect would.
+                startTransportLocked()
+                Logger.i { "restartTransport: completed" }
+            } finally {
+                isRestarting.value = false
+            }
+        }
+    }
+
     override fun isMockTransport(): Boolean = transportFactory.isMockTransport()
 
     override fun toInterfaceAddress(interfaceId: InterfaceId, rest: String): String =
