@@ -119,6 +119,7 @@ open class DatabaseManager(
         dbCache.getOrPut(dbName) { getDatabaseBuilder(dbName).build() }
 
     /** Switch active database to the one associated with [address]. Serialized via mutex. */
+    @Suppress("TooGenericExceptionCaught")
     override suspend fun switchActiveDatabase(address: String?) = mutex.withLock {
         val dbName = buildDbName(address)
 
