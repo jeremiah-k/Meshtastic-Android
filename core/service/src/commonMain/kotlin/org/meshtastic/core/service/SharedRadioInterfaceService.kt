@@ -311,15 +311,14 @@ class SharedRadioInterfaceService(
                     return@withLock
                 }
                 Logger.w { "restartTransport: restarting transport for ${getDeviceAddress()?.anonymize}" }
-                // Mirror BLE liveness silent recovery: emit the transport-level Connected ->
-                // DeviceSleep transition BEFORE the stop/start cycle. MeshConnectionManager
-                // observes connectionState and re-triggers handleConnected() when the fresh
-                // transport's onConnect() fires — but StateFlow is idempotent on same-value,
-                // so without this DeviceSleep emission the subsequent Connected signal would be
-                // a no-op (Connected -> Connected) and the manager would stay stuck on its
-                // app-level Disconnected state. checkLiveness() relies on the same ordering:
-                // it calls onDisconnect(isPermanent = false) before launching its restart
-                // coroutine. This is silent (transient DeviceSleep, not permanent Disconnected).
+                // Mirror checkLiveness()'s coordination contract: emit a transport-level
+                // Connected -> DeviceSleep transition before the stop/start cycle so
+                // transport-level observers see a full DeviceSleep -> Connected cycle when
+                // the fresh transport's onConnect() fires and can re-trigger their onConnected
+                // logic. The caller (runSiblingHandshakeRecovery) flips the app-level state to
+                // Disconnected before invoking restartTransport(), so this emission exists for
+                // transport-level coordination, not for app-level StateFlow dedupe. Silent:
+                // transient DeviceSleep, not a permanent Disconnected.
                 onDisconnect(isPermanent = false)
                 // notifyPermanent=false below (no user-facing Disconnected modal — the app-level
                 // state machine drives that separately) and sendPoliteDisconnect=false (firmware

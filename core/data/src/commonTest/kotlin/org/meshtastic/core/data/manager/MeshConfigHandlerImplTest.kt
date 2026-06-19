@@ -70,7 +70,7 @@ class MeshConfigHandlerImplTest {
         radioConfigRepository = radioConfigRepository,
         serviceStateWriter = serviceRepository,
         nodeManager = nodeManager,
-        connectionManager = lazy { connectionManager },
+        connectionManager = lazy { this.connectionManager },
         scope = scope,
     )
 
