@@ -170,6 +170,7 @@ class MeshConfigFlowManagerImpl(
             Logger.i { "Requesting NodeInfo (Stage 2)" }
             connectionManager.value.startNodeInfoOnly()
         }
+        connectionManager.value.onHandshakeProgress()
     }
 
     private fun handleNodeInfoComplete(state: HandshakeState.ReceivingNodeInfo) {
@@ -201,6 +202,10 @@ class MeshConfigFlowManagerImpl(
             serviceStateWriter.setConnectionState(ConnectionState.Connected)
             connectionManager.value.onNodeDbReady()
         }
+        // Note: onHandshakeProgress() is intentionally NOT called here. By this point the
+        // handshake has reached HandshakeState.Complete and onNodeDbReady() (above) cancels
+        // the watchdog microseconds later, so an extra rearm would be both semantically wrong
+        // and wasted work. The remaining onHandshakeProgress sites cover all genuine progress.
     }
 
     override fun handleMyInfo(myInfo: ProtoMyNodeInfo) {
@@ -230,6 +235,7 @@ class MeshConfigFlowManagerImpl(
             radioConfigRepository.clearDeviceUIConfig()
             radioConfigRepository.clearFileManifest()
         }
+        connectionManager.value.onHandshakeProgress()
     }
 
     override fun handleLocalMetadata(metadata: DeviceMetadata) {
@@ -242,6 +248,7 @@ class MeshConfigFlowManagerImpl(
             if (metadata != DeviceMetadata()) {
                 scope.handledLaunch { nodeRepository.insertMetadata(state.rawMyNodeInfo.my_node_num, metadata) }
             }
+            connectionManager.value.onHandshakeProgress()
         } else {
             Logger.w { "Ignoring metadata outside Stage 1 (state=$state)" }
         }
@@ -253,10 +260,12 @@ class MeshConfigFlowManagerImpl(
             is HandshakeState.ReceivingConfig -> {
                 Logger.d { "Buffering NodeInfo received during Stage 1" }
                 handshakeState = state.copy(earlyNodes = state.earlyNodes.withNodeInfo(info))
+                connectionManager.value.onHandshakeProgress()
             }
 
             is HandshakeState.ReceivingNodeInfo -> {
                 handshakeState = state.copy(nodes = state.nodes.withNodeInfo(info))
+                connectionManager.value.onHandshakeProgress()
             }
 
             else -> Logger.w { "Ignoring NodeInfo outside active handshake (state=$state)" }
@@ -266,6 +275,7 @@ class MeshConfigFlowManagerImpl(
     override fun handleFileInfo(info: FileInfo) {
         Logger.d { "FileInfo received: ${info.file_name} (${info.size_bytes} bytes)" }
         scope.handledLaunch { radioConfigRepository.addFileInfo(info) }
+        connectionManager.value.onHandshakeProgress()
     }
 
     override fun triggerWantConfig() {

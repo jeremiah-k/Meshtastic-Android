@@ -1172,6 +1172,7 @@
     <string name="rebroadcast_mode_local_only_desc">Ignores observed messages from foreign meshes that are open or those which it cannot decrypt. Only rebroadcasts message on the nodes local primary / secondary channels.</string>
     <string name="rebroadcast_mode_none_desc">Only permitted for SENSOR, TRACKER and TAK_TRACKER roles, this will inhibit all rebroadcasts, not unlike CLIENT_MUTE role.</string>
     <string name="recent_network_devices">Recent Network Devices</string>
+    <string name="reconnecting">Reconnecting…</string>
     <string name="red">Red</string>
     <string name="refresh">Refresh</string>
     <string name="refresh_metadata">Refresh metadata</string>

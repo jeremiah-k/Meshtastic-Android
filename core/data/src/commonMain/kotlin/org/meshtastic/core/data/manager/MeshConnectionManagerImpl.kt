@@ -221,56 +221,89 @@ class MeshConnectionManagerImpl(
 
     private fun startHandshakeStallGuard(stage: Int, timeout: Duration, action: () -> Unit) {
         handshakeTimeout?.cancel()
+        val fastTransport = isFastRecoveryTransport()
+        // On TCP/USB the firmware handshake completes in roughly 1s when healthy (logs show),
+        // while a wedged socket takes the full ~30s transport read timeout without any further
+        // progress. The aggressive 12s fast timeout recovers a stuck session quickly; BLE keeps
+        // the original generous budget because its GATT latency is high and variable.
+        val effectiveTimeout = if (fastTransport) FAST_HANDSHAKE_TIMEOUT else timeout
         handshakeTimeout =
             scope.handledLaunch {
-                delay(timeout)
+                delay(effectiveTimeout)
+                if (serviceRepository.connectionState.value !is ConnectionState.Connecting) {
+                    return@handledLaunch
+                }
+                if (fastTransport) {
+                    // Fast transports recover more reliably by re-establishing the transport
+                    // than by re-sending want_config_id on a wedged socket — the firmware's
+                    // per-connection dedup would silently drop the retry. Skip the retry branch
+                    // and go straight to the deterministic two-phase recovery sibling.
+                    Logger.e {
+                        "Handshake stall detected at Stage $stage on fast transport — " +
+                            "requesting forced transport restart"
+                    }
+                    runSiblingHandshakeRecovery()
+                    return@handledLaunch
+                }
+                // BLE path: attempt one retry. Note: the firmware silently drops identical
+                // consecutive writes (per-connection dedup). If the first want_config_id was
+                // received and the stall is on our side, the retry will be dropped and the
+                // reconnect below will trigger instead — which is the right recovery in that
+                // case.
+                Logger.w { "Handshake stall detected at Stage $stage — retrying, then reconnecting if still stalled" }
+                action()
+                delay(HANDSHAKE_RETRY_TIMEOUT)
                 if (serviceRepository.connectionState.value is ConnectionState.Connecting) {
-                    // Attempt one retry. Note: the firmware silently drops identical consecutive
-                    // writes (per-connection dedup). If the first want_config_id was received and
-                    // the stall is on our side, the retry will be dropped and the reconnect below
-                    // will trigger instead — which is the right recovery in that case.
-                    Logger.w {
-                        "Handshake stall detected at Stage $stage — retrying, then reconnecting if still stalled"
-                    }
-                    action()
-                    delay(HANDSHAKE_RETRY_TIMEOUT)
-                    if (serviceRepository.connectionState.value is ConnectionState.Connecting) {
-                        Logger.e { "Handshake still stalled after retry, requesting forced transport restart" }
-                        // Launch a sibling recovery job that performs BOTH the app-level Disconnected transition
-                        // AND the transport restart, in deterministic order. We MUST NOT call onConnectionChanged
-                        // from this handshakeTimeout coroutine after launching the sibling: onConnectionChanged
-                        // cancels handshakeTimeout (the very job running this code), and any work chained after
-                        // the launch is not guaranteed to run. We MUST ALSO NOT leave the explicit Disconnected
-                        // call in this coroutine after the sibling launch — otherwise the sibling's restart
-                        // emissions (DeviceSleep, then Connected) can arrive while the app-level state is still
-                        // Connecting, causing onConnectionChanged's redundant-Connected-while-Connecting guard to
-                        // ignore the fresh Connected emission. That leaves the app Disconnected while transport is
-                        // Connected — the same split-brain this restart path is meant to break.
-                        //
-                        // Inside the sibling: (1) flip app state from Connecting to Disconnected first, guarded by the
-                        // connection mutex so a just-completed handshake cannot be torn down after winning the race.
-                        // By the time the sibling runs, handshakeTimeout has already completed naturally (it launched
-                        // the sibling and returned), so the cancellation onConnectionChanged would attempt is a no-op
-                        // on an already-completed job — and because the sibling is parented to `scope`, not to
-                        // handshakeTimeout, it survives independently. (2) THEN call restartTransport(), whose
-                        // emissions (DeviceSleep → Connected) now arrive from app-level Disconnected, bypass the
-                        // redundant-Connecting guard, and re-enter handleConnected to restart the handshake cleanly.
-                        scope.handledLaunch {
-                            val disconnected =
-                                onConnectionChanged(
-                                    ConnectionState.Disconnected,
-                                    fromState = ConnectionState.Connecting,
-                                )
-                            if (
-                                disconnected && serviceRepository.connectionState.value is ConnectionState.Disconnected
-                            ) {
-                                radioInterfaceService.restartTransport()
-                            }
-                        }
-                        // Return without calling onConnectionChanged here. The sibling job owns both transitions.
-                    }
+                    Logger.e { "Handshake still stalled after retry, requesting forced transport restart" }
+                    runSiblingHandshakeRecovery()
                 }
             }
+    }
+
+    /**
+     * Launches the deterministic two-phase stall-recovery sibling used by both the BLE retry-exceeded branch and the
+     * TCP/USB fast-recovery branch of [startHandshakeStallGuard].
+     *
+     * Phase 1 flips the app-level state from Connecting to Disconnected first, guarded by the connection mutex so a
+     * just-completed handshake cannot be torn down after winning the race. Phase 2 then calls
+     * [RadioInterfaceService.restartTransport], whose emissions (DeviceSleep → Connected) now arrive from app-level
+     * Disconnected, bypass the redundant-Connecting guard in [onConnectionChanged], and re-enter [handleConnected] to
+     * restart the handshake cleanly.
+     *
+     * We MUST NOT call [onConnectionChanged] from the [handshakeTimeout] coroutine after launching the sibling:
+     * [onConnectionChanged] cancels handshakeTimeout (the very job running this code), and any work chained after the
+     * launch is not guaranteed to run. We MUST ALSO NOT leave the explicit Disconnected call in this coroutine after
+     * the sibling launch — otherwise the sibling's restart emissions (DeviceSleep, then Connected) can arrive while the
+     * app-level state is still Connecting, causing [onConnectionChanged]'s redundant-Connected-while-Connecting guard
+     * to ignore the fresh Connected emission. That leaves the app Disconnected while transport is Connected — the same
+     * split-brain this restart path is meant to break.
+     *
+     * By the time the sibling runs, handshakeTimeout has already completed naturally (it launched the sibling and
+     * returned), so the cancellation [onConnectionChanged] would attempt is a no-op on an already-completed job — and
+     * because the sibling is parented to `scope`, not to handshakeTimeout, it survives independently.
+     */
+    private fun runSiblingHandshakeRecovery() {
+        scope.handledLaunch {
+            // Surface the forced-recovery progress to the UI before the app-level Disconnected
+            // transition lands, so the user sees "Reconnecting…" rather than a stale
+            // "Loading node list" while the transport is being torn down and re-established.
+            //
+            // This progress is intentionally NOT cleared on the recovery's Disconnected window
+            // (i.e. NOT in handleDisconnected or this sibling). If recovery fails permanently,
+            // "Reconnecting…" may persist on the Disconnected screen until the user retries or
+            // navigates away. That leak is semantically accurate UX — the app is genuinely
+            // still attempting to reconnect — and clearing it here would race the deliberate
+            // UX signal: handleDisconnected runs synchronously after this call inside the same
+            // onConnectionChanged transition, so any clear there would clobber the signal before
+            // restartTransport runs. Clearing stale progress is instead left to the next genuine
+            // connection attempt's Connecting transition (handleConnected), avoiding any conflict
+            // with the recovery's RECONNECTING indicator.
+            serviceRepository.setConnectionProgress("Reconnecting…")
+            val disconnected = onConnectionChanged(ConnectionState.Disconnected, fromState = ConnectionState.Connecting)
+            if (disconnected && serviceRepository.connectionState.value is ConnectionState.Disconnected) {
+                radioInterfaceService.restartTransport()
+            }
+        }
     }
 
     private fun tearDownConnection() {
@@ -415,6 +448,41 @@ class MeshConnectionManagerImpl(
         updateStatusNotification(t)
     }
 
+    /**
+     * True when the active transport is a TCP or USB serial connection — i.e. a transport whose firmware handshake
+     * reliably completes in roughly 1s when healthy and therefore benefits from aggressive silent-restart on stall.
+     * Uses the same [DeviceType.fromAddress] pattern as [reportConnection] for transport classification. BLE is
+     * excluded because its GATT latency budget is high and variable enough that the long-and-retry stall-guard budgets
+     * remain the right trade-off.
+     */
+    private fun isFastRecoveryTransport(): Boolean =
+        radioInterfaceService.getDeviceAddress()?.let { DeviceType.fromAddress(it) } in
+            setOf(DeviceType.TCP, DeviceType.USB)
+
+    override fun onHandshakeProgress() {
+        // No-op outside the fast-recovery envelope: BLE retains the long stall-guard budget
+        // because its GATT latency is variable enough that progress signals are unreliable.
+        if (!isFastRecoveryTransport()) return
+        // Only re-arm while a handshake is in flight. Once Connected/Disconnected/Sleep the
+        // caller has missed the window and the watchdog should not be (re-)armed.
+        if (serviceRepository.connectionState.value !is ConnectionState.Connecting) return
+        // Cancel any in-flight fast watchdog and re-arm it with the full fast timeout. This
+        // keeps the watchdog quiet as long as meaningful progress keeps arriving within the
+        // window, while a true stall still fires on schedule.
+        handshakeTimeout?.cancel()
+        handshakeTimeout =
+            scope.handledLaunch {
+                delay(FAST_HANDSHAKE_TIMEOUT)
+                if (serviceRepository.connectionState.value !is ConnectionState.Connecting) {
+                    return@handledLaunch
+                }
+                Logger.e {
+                    "Fast-handshake watchdog expired after progress stalled — " + "requesting forced transport restart"
+                }
+                runSiblingHandshakeRecovery()
+            }
+    }
+
     override fun updateStatusNotification(telemetry: Telemetry?) {
         serviceNotifications.updateServiceStateNotification(
             serviceRepository.connectionState.value,
@@ -452,6 +520,22 @@ class MeshConnectionManagerImpl(
         // first want_config_id the retry completes within a few seconds. Waiting another 30s
         // before reconnecting just delays recovery unnecessarily.
         private val HANDSHAKE_RETRY_TIMEOUT = 15.seconds
+
+        /**
+         * Transport-aware fast-recovery timeout for the handshake stall guard, applied only to TCP and USB serial
+         * transports.
+         *
+         * Production logs on TCP/USB show a healthy firmware handshake completes in roughly 1 second, while a wedged
+         * socket sits idle for the full transport-level read timeout (~30s) without any further progress. 12s sits
+         * comfortably above the healthy success envelope and well below the transport read timeout, so firing a silent
+         * [RadioInterfaceService.restartTransport] at 12s recovers a stuck TCP/USB session quickly without
+         * false-positiving on healthy connections.
+         *
+         * BLE is intentionally excluded — its GATT latency budget is variable enough that the existing
+         * [HANDSHAKE_TIMEOUT_STAGE1] (30s) + [HANDSHAKE_RETRY_TIMEOUT] (15s) and [HANDSHAKE_TIMEOUT_STAGE2]
+         * (60s) + [HANDSHAKE_RETRY_TIMEOUT] (15s) budgets remain the right trade-off.
+         */
+        private val FAST_HANDSHAKE_TIMEOUT = 12.seconds
 
         private const val EVENT_CONNECTED_SECONDS = "connected_seconds"
         private const val EVENT_MESH_DISCONNECT = "mesh_disconnect"

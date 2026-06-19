@@ -1133,6 +1133,7 @@ rebroadcast_mode_known_only_desc
 rebroadcast_mode_local_only_desc
 rebroadcast_mode_none_desc
 recent_network_devices
+reconnecting
 red
 refresh
 refresh_metadata

@@ -599,4 +599,288 @@ class MeshConnectionManagerImplTest {
 
         verifySuspend(exactly(0)) { radioInterfaceService.restartTransport() }
     }
+
+    @Test
+    fun `TCP Stage 1 stall fires restartTransport at 12s without retry`() = runTest(testDispatcher) {
+        // Address starting with 't' → DeviceType.TCP → fast recovery transport.
+        every { radioInterfaceService.getDeviceAddress() } returns "tcp://192.168.1.42"
+        val sentPackets = mutableListOf<org.meshtastic.proto.ToRadio>()
+        every { packetHandler.sendToRadio(any<org.meshtastic.proto.ToRadio>()) } calls
+            { call ->
+                sentPackets.add(call.arg(0))
+            }
+
+        manager = createManager(backgroundScope)
+        radioConnectionState.value = ConnectionState.Connected
+        // Pre-handshake settle (100ms): heartbeat + Stage 1 want_config_id sent, fast watchdog armed.
+        advanceTimeBy(200)
+        advanceUntilIdle()
+
+        assertEquals(
+            ConnectionState.Connecting,
+            serviceRepository.connectionState.value,
+            "Manager should be Connecting after radio Connected",
+        )
+
+        // Sanity: heartbeat + Stage 1 want_config_id have been sent; no retry yet.
+        val packetsBeforeStall = sentPackets.size
+
+        // Advance past FAST_HANDSHAKE_TIMEOUT (12s) WITHOUT any progress signal. The fast
+        // branch must fire the recovery sibling directly — no retry send, no 15s delay.
+        advanceTimeBy(13_000L)
+        advanceUntilIdle()
+
+        verifySuspend(exactly(1)) { radioInterfaceService.restartTransport() }
+        assertEquals(
+            ConnectionState.Disconnected,
+            serviceRepository.connectionState.value,
+            "Fast stall should end in Disconnected after restart is requested",
+        )
+        // The retry branch must be skipped on fast transports: no additional want_config_id
+        // packet may be sent between the initial arming and the restartTransport call.
+        assertEquals(
+            packetsBeforeStall,
+            sentPackets.size,
+            "Fast transport stall must NOT trigger a retry send of want_config_id",
+        )
+    }
+
+    @Test
+    fun `TCP Stage 1 meaningful progress resets watchdog without false restart`() = runTest(testDispatcher) {
+        every { radioInterfaceService.getDeviceAddress() } returns "tcp://192.168.1.42"
+        manager = createManager(backgroundScope)
+        radioConnectionState.value = ConnectionState.Connected
+        advanceTimeBy(200)
+        advanceUntilIdle()
+
+        // Trickle inbound progress signals — each lands well inside the 12s fast window, so
+        // each one re-arms the watchdog and no restart may fire across multiple resets.
+        repeat(5) {
+            advanceTimeBy(8_000L)
+            manager.onHandshakeProgress()
+            advanceUntilIdle()
+        }
+
+        verifySuspend(exactly(0)) { radioInterfaceService.restartTransport() }
+        assertEquals(
+            ConnectionState.Connecting,
+            serviceRepository.connectionState.value,
+            "Steady trickle of progress must keep the manager Connecting",
+        )
+    }
+
+    @Test
+    fun `TCP Stage 1 watchdog fires after progress stops`() = runTest(testDispatcher) {
+        every { radioInterfaceService.getDeviceAddress() } returns "tcp://192.168.1.42"
+        manager = createManager(backgroundScope)
+        radioConnectionState.value = ConnectionState.Connected
+        advanceTimeBy(200)
+        advanceUntilIdle()
+
+        // Two progress signals land inside the window.
+        advanceTimeBy(8_000L)
+        manager.onHandshakeProgress()
+        advanceUntilIdle()
+        advanceTimeBy(8_000L)
+        manager.onHandshakeProgress()
+        advanceUntilIdle()
+
+        // Progress stops; advance past the fast timeout from the last re-arm.
+        advanceTimeBy(13_000L)
+        advanceUntilIdle()
+
+        verifySuspend(exactly(1)) { radioInterfaceService.restartTransport() }
+        assertEquals(
+            ConnectionState.Disconnected,
+            serviceRepository.connectionState.value,
+            "Watchdog must fire once progress stops for longer than the fast timeout",
+        )
+    }
+
+    @Test
+    fun `TCP Stage 2 stall fires restartTransport at 12s`() = runTest(testDispatcher) {
+        every { radioInterfaceService.getDeviceAddress() } returns "tcp://192.168.1.42"
+        manager = createManager(backgroundScope)
+        radioConnectionState.value = ConnectionState.Connected
+        advanceTimeBy(200)
+        advanceUntilIdle()
+
+        // Drive the connection into Stage 2. In production this is done by the config-flow
+        // manager once Stage 1 config arrives; here we invoke it directly. startNodeInfoOnly()
+        // cancels the Stage 1 watchdog and arms Stage 2 with the fast timeout (12s on TCP).
+        manager.startNodeInfoOnly()
+        advanceUntilIdle()
+
+        assertEquals(
+            ConnectionState.Connecting,
+            serviceRepository.connectionState.value,
+            "Manager should still be Connecting entering Stage 2",
+        )
+
+        // Advance past the fast timeout WITHOUT invoking onNodeDbReady().
+        advanceTimeBy(13_000L)
+        advanceUntilIdle()
+
+        verifySuspend(exactly(1)) { radioInterfaceService.restartTransport() }
+        assertEquals(
+            ConnectionState.Disconnected,
+            serviceRepository.connectionState.value,
+            "Stage 2 fast stall should end in Disconnected after restart is requested",
+        )
+    }
+
+    @Test
+    fun `TCP Stage 2 NodeInfo progress resets watchdog`() = runTest(testDispatcher) {
+        every { radioInterfaceService.getDeviceAddress() } returns "tcp://192.168.1.42"
+        manager = createManager(backgroundScope)
+        radioConnectionState.value = ConnectionState.Connected
+        advanceTimeBy(200)
+        advanceUntilIdle()
+
+        manager.startNodeInfoOnly()
+        advanceUntilIdle()
+
+        // Stage 2 node-info burst packets arrive as a trickle; each resets the fast watchdog.
+        repeat(3) {
+            advanceTimeBy(7_000L)
+            manager.onHandshakeProgress()
+            advanceUntilIdle()
+        }
+
+        verifySuspend(exactly(0)) { radioInterfaceService.restartTransport() }
+        assertEquals(
+            ConnectionState.Connecting,
+            serviceRepository.connectionState.value,
+            "Stage 2 progress must keep the manager Connecting",
+        )
+    }
+
+    @Test
+    fun `TCP fast recovery preserves Disconnected-before-restartTransport ordering`() = runTest(testDispatcher) {
+        every { radioInterfaceService.getDeviceAddress() } returns "tcp://192.168.1.42"
+
+        val observed = mutableListOf<ConnectionState>()
+        var progressBeforeRestart: String? = null
+        var restartTransportCalls = 0
+        every { serviceRepository.setConnectionState(any()) } calls
+            { call ->
+                val state = call.arg<ConnectionState>(0)
+                observed.add(state)
+                connectionStateFlow.value = state
+            }
+        every { serviceRepository.setConnectionProgress(any()) } calls
+            { call ->
+                // Capture the most recent progress string at the moment restartTransport runs.
+                // This locks in that the "Reconnecting…" UX hook fires BEFORE the app-level
+                // Disconnected transition.
+                progressBeforeRestart = call.arg<String>(0)
+            }
+        everySuspend { radioInterfaceService.restartTransport() } calls
+            {
+                restartTransportCalls++
+                // At the moment restartTransport runs, the app-level state MUST already be
+                // Disconnected — otherwise the fresh transport Connected emission would be
+                // dropped by the redundant-Connecting guard and we would re-introduce the
+                // split-brain this recovery path exists to break.
+                assertEquals(
+                    ConnectionState.Disconnected,
+                    connectionStateFlow.value,
+                    "restartTransport must run AFTER app-level Disconnected transition",
+                )
+                assertEquals(
+                    "Reconnecting…",
+                    progressBeforeRestart,
+                    "setConnectionProgress(\"Reconnecting…\") must run before restartTransport",
+                )
+            }
+
+        manager = createManager(backgroundScope)
+        radioConnectionState.value = ConnectionState.Connected
+        advanceTimeBy(200)
+        advanceUntilIdle()
+
+        // Fire fast stall.
+        advanceTimeBy(13_000L)
+        advanceUntilIdle()
+
+        assertEquals(1, restartTransportCalls)
+        // Sanity: Connecting → Disconnected was the observed app-level transition path.
+        assertEquals(ConnectionState.Disconnected, observed.last(), "Last app-level state must be Disconnected")
+    }
+
+    @Test
+    fun `BLE transport unaffected by onHandshakeProgress regression`() = runTest(testDispatcher) {
+        // Explicit BLE address (starts with 'x') — must NOT engage the fast path.
+        every { radioInterfaceService.getDeviceAddress() } returns "xx:xx:xx:xx:xx:xx"
+        manager = createManager(backgroundScope)
+        radioConnectionState.value = ConnectionState.Connected
+        advanceTimeBy(200)
+        advanceUntilIdle()
+
+        // Spam progress signals — BLE must ignore them, so the 30s Stage 1 budget is unchanged.
+        repeat(10) {
+            manager.onHandshakeProgress()
+            advanceUntilIdle()
+        }
+
+        // Advance to 13s — would fire a fast watchdog if BLE were incorrectly included.
+        advanceTimeBy(13_000L)
+        advanceUntilIdle()
+
+        verifySuspend(exactly(0)) { radioInterfaceService.restartTransport() }
+        assertEquals(
+            ConnectionState.Connecting,
+            serviceRepository.connectionState.value,
+            "BLE must ignore onHandshakeProgress and stay Connecting through 13s",
+        )
+
+        // Now advance past the full BLE Stage 1 budget (30s) + retry (15s) = 45s total.
+        // We already advanced 13s, so 33s more crosses the 46s threshold the existing BLE
+        // stall-retry-exceeded branch fires at.
+        advanceTimeBy(33_000L)
+        advanceUntilIdle()
+
+        verifySuspend(exactly(1)) { radioInterfaceService.restartTransport() }
+    }
+
+    @Test
+    fun `onHandshakeProgress is a no-op when state is not Connecting`() = runTest(testDispatcher) {
+        every { radioInterfaceService.getDeviceAddress() } returns "tcp://192.168.1.42"
+        manager = createManager(backgroundScope)
+        // Manager starts in Disconnected (initial state, no radio Connected signal yet).
+        assertEquals(
+            ConnectionState.Disconnected,
+            serviceRepository.connectionState.value,
+            "Precondition: manager must start Disconnected",
+        )
+
+        // Calling onHandshakeProgress while not Connecting must not arm any watchdog.
+        manager.onHandshakeProgress()
+        advanceUntilIdle()
+        advanceTimeBy(60_000L)
+        advanceUntilIdle()
+
+        verifySuspend(exactly(0)) { radioInterfaceService.restartTransport() }
+    }
+
+    @Test
+    fun `USB serial transport engages fast path like TCP`() = runTest(testDispatcher) {
+        // Address starting with 's' → DeviceType.USB → fast recovery transport.
+        every { radioInterfaceService.getDeviceAddress() } returns "serial:///dev/ttyUSB0"
+        manager = createManager(backgroundScope)
+        radioConnectionState.value = ConnectionState.Connected
+        advanceTimeBy(200)
+        advanceUntilIdle()
+
+        // Fast timeout (12s) fires for USB just like TCP.
+        advanceTimeBy(13_000L)
+        advanceUntilIdle()
+
+        verifySuspend(exactly(1)) { radioInterfaceService.restartTransport() }
+        assertEquals(
+            ConnectionState.Disconnected,
+            serviceRepository.connectionState.value,
+            "USB fast stall should end in Disconnected after restart is requested",
+        )
+    }
 }

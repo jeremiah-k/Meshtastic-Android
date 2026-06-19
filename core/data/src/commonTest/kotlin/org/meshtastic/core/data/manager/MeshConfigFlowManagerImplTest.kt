@@ -523,4 +523,123 @@ class MeshConfigFlowManagerImplTest {
         verify(mode = VerifyMode.not) { notificationPrefs.setNodeEventsEnabled(any()) }
         verify(mode = VerifyMode.not) { notificationPrefs.setNodeEventsAutoDisabledForEvent(any()) }
     }
+
+    // ---------- onHandshakeProgress ----------
+
+    @Test
+    fun `handleMyInfo calls onHandshakeProgress`() = testScope.runTest {
+        manager.handleMyInfo(protoMyNodeInfo)
+        advanceUntilIdle()
+
+        verify { connectionManager.onHandshakeProgress() }
+    }
+
+    @Test
+    fun `handleLocalMetadata in ReceivingConfig calls onHandshakeProgress`() = testScope.runTest {
+        manager.handleMyInfo(protoMyNodeInfo)
+        advanceUntilIdle()
+        manager.handleLocalMetadata(metadata)
+        advanceUntilIdle()
+
+        // handleMyInfo fires one call; handleLocalMetadata adds exactly one more in ReceivingConfig.
+        verify(mode = VerifyMode.exactly(2)) { connectionManager.onHandshakeProgress() }
+    }
+
+    @Test
+    fun `handleLocalMetadata outside ReceivingConfig does not call onHandshakeProgress`() = testScope.runTest {
+        // State is Idle — metadata is ignored and must not reset the watchdog.
+        manager.handleLocalMetadata(metadata)
+        advanceUntilIdle()
+
+        verify(mode = VerifyMode.not) { connectionManager.onHandshakeProgress() }
+    }
+
+    @Test
+    fun `handleFileInfo calls onHandshakeProgress`() = testScope.runTest {
+        val fileInfo = FileInfo(file_name = "firmware.bin", size_bytes = 1024)
+        manager.handleFileInfo(fileInfo)
+        advanceUntilIdle()
+
+        verify { connectionManager.onHandshakeProgress() }
+    }
+
+    @Test
+    fun `handleNodeInfo during Stage 1 calls onHandshakeProgress`() = testScope.runTest {
+        manager.handleMyInfo(protoMyNodeInfo)
+        advanceUntilIdle()
+        manager.handleNodeInfo(NodeInfo(num = 100))
+
+        // handleMyInfo fires one call; handleNodeInfo in ReceivingConfig adds exactly one more.
+        verify(mode = VerifyMode.exactly(2)) { connectionManager.onHandshakeProgress() }
+    }
+
+    @Test
+    fun `handleNodeInfo during Stage 2 calls onHandshakeProgress`() = testScope.runTest {
+        manager.handleMyInfo(protoMyNodeInfo)
+        advanceUntilIdle()
+        manager.handleLocalMetadata(metadata)
+        advanceUntilIdle()
+        manager.handleConfigComplete(HandshakeConstants.CONFIG_NONCE)
+        advanceTimeBy(STAGE_TRANSITION_ADVANCE_MS)
+        runCurrent()
+
+        // Now in ReceivingNodeInfo — a NodeInfo packet must reset the watchdog.
+        manager.handleNodeInfo(NodeInfo(num = 100))
+
+        // Prior calls: handleMyInfo(1) + handleLocalMetadata(1) + handleConfigOnlyComplete(1) = 3.
+        // handleNodeInfo adds exactly one more.
+        verify(mode = VerifyMode.exactly(4)) { connectionManager.onHandshakeProgress() }
+    }
+
+    @Test
+    fun `Stage 1 complete calls onHandshakeProgress`() = testScope.runTest {
+        manager.handleMyInfo(protoMyNodeInfo)
+        advanceUntilIdle()
+        manager.handleLocalMetadata(metadata)
+        advanceUntilIdle()
+        manager.handleConfigComplete(HandshakeConstants.CONFIG_NONCE)
+        advanceTimeBy(STAGE_TRANSITION_ADVANCE_MS)
+        runCurrent()
+
+        // handleMyInfo(1) + handleLocalMetadata(1) + handleConfigOnlyComplete(1) = 3.
+        verify(mode = VerifyMode.exactly(3)) { connectionManager.onHandshakeProgress() }
+    }
+
+    @Test
+    fun `handleNodeInfo outside active handshake does not call onHandshakeProgress`() = testScope.runTest {
+        // State is Idle — NodeInfo is ignored and must not reset the watchdog.
+        manager.handleNodeInfo(NodeInfo(num = 999))
+
+        verify(mode = VerifyMode.not) { connectionManager.onHandshakeProgress() }
+    }
+
+    /**
+     * Regression guard: a full handshake must fire [MeshConnectionManager.onHandshakeProgress] exactly for meaningful
+     * handshake events only. Packet types not meaningful to the handshake — queueStatus, mqttClientProxyMessage,
+     * xmodemPacket, clientNotification, deviceuiConfig, and rebooted — are routed to sibling handlers
+     * (PacketHandlerImpl, MqttManagerImpl, FromRadioPacketHandlerImpl, MeshConfigHandlerImpl) and must never reset the
+     * watchdog from this manager. This test pins the exact count so any accidental wiring surfaces as a failure.
+     */
+    @Test
+    fun `full handshake fires onHandshakeProgress exactly for meaningful events only`() = testScope.runTest {
+        val testNode = org.meshtastic.core.testing.TestDataFactory.createTestNode(num = 100)
+        every { nodeManager.nodeDBbyNodeNum } returns mapOf(100 to testNode)
+
+        manager.handleMyInfo(protoMyNodeInfo)
+        advanceUntilIdle()
+        manager.handleLocalMetadata(metadata)
+        advanceUntilIdle()
+        manager.handleConfigComplete(HandshakeConstants.CONFIG_NONCE)
+        advanceTimeBy(STAGE_TRANSITION_ADVANCE_MS)
+        runCurrent()
+        manager.handleNodeInfo(NodeInfo(num = 100))
+        manager.handleConfigComplete(HandshakeConstants.NODE_INFO_NONCE)
+        advanceUntilIdle()
+
+        // handleMyInfo(1) + handleLocalMetadata(1) + handleConfigOnlyComplete(1)
+        //   + handleNodeInfo(1) = 4. handleNodeInfoComplete intentionally does NOT call
+        //   onHandshakeProgress: by that point the handshake is Complete and onNodeDbReady
+        //   (invoked above) cancels the watchdog microseconds later.
+        verify(mode = VerifyMode.exactly(4)) { connectionManager.onHandshakeProgress() }
+    }
 }

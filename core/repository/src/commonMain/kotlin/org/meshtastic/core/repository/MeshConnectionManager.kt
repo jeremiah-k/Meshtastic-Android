@@ -32,6 +32,17 @@ interface MeshConnectionManager {
     /** Called when the node database is ready and fully populated. */
     suspend fun onNodeDbReady()
 
+    /**
+     * Called when meaningful handshake progress is observed on the wire (e.g. an inbound packet related to the
+     * in-flight config or node-info exchange).
+     *
+     * On fast transports (TCP, USB serial) this re-arms the transport-aware handshake watchdog so a steady trickle of
+     * progress does not trip the aggressive fast-recovery timeout while a true stall still fires on schedule. On BLE
+     * this is a no-op: BLE keeps the original long-and-retry stall-guard budget because GATT latency is high and
+     * variable.
+     */
+    fun onHandshakeProgress()
+
     /** Updates the telemetry information for the local node. */
     fun updateTelemetry(t: Telemetry)
 

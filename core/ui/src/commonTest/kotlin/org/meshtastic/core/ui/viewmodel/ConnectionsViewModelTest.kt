@@ -16,6 +16,7 @@
  */
 package org.meshtastic.core.ui.viewmodel
 
+import app.cash.turbine.test
 import dev.mokkery.MockMode
 import dev.mokkery.answering.returns
 import dev.mokkery.every
@@ -27,7 +28,9 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
+import org.meshtastic.core.model.ConnectionState
 import org.meshtastic.core.repository.RadioConfigRepository
 import org.meshtastic.core.repository.UiPrefs
 import org.meshtastic.core.testing.FakeNodeRepository
@@ -59,7 +62,7 @@ class ConnectionsViewModelTest {
         viewModel =
             ConnectionsViewModel(
                 radioConfigRepository = radioConfigRepository,
-                connectionStateProvider = serviceRepository,
+                serviceRepository = serviceRepository,
                 nodeRepository = nodeRepository,
                 uiPrefs = uiPrefs,
             )
@@ -83,5 +86,68 @@ class ConnectionsViewModelTest {
 
         assertEquals(true, viewModel.hasShownNotPairedWarning.value)
         verify { uiPrefs.setHasShownNotPairedWarning(true) }
+    }
+
+    @Test
+    fun `Disconnected with Reconnecting progress maps to RECONNECTING`() = runTest {
+        viewModel.connectionStatus.test {
+            // Initial value from stateInWhileSubscribed.
+            assertEquals(ConnectionStatus.NOT_CONNECTED, awaitItem())
+
+            // Track A contract: progress is set BEFORE the Disconnected transition.
+            serviceRepository.setConnectionProgress(RECONNECTING_PROGRESS_TEXT)
+            assertEquals(ConnectionStatus.RECONNECTING, awaitItem())
+
+            // State catch-up: the Disconnected transition is a no-op because FakeServiceRepository
+            // starts Disconnected, and distinctUntilChanged suppresses the re-emission.
+            serviceRepository.setConnectionState(ConnectionState.Disconnected)
+            expectNoEvents()
+
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `Connecting state maps to CONNECTING regardless of progress text`() = runTest {
+        viewModel.connectionStatus.test {
+            assertEquals(ConnectionStatus.NOT_CONNECTED, awaitItem())
+
+            // Progress set first would transiently surface RECONNECTING while state is still Disconnected.
+            serviceRepository.setConnectionProgress(RECONNECTING_PROGRESS_TEXT)
+            assertEquals(ConnectionStatus.RECONNECTING, awaitItem())
+
+            // The Connecting transition overrides progress: Connecting always maps to CONNECTING.
+            serviceRepository.setConnectionState(ConnectionState.Connecting)
+            assertEquals(ConnectionStatus.CONNECTING, awaitItem())
+
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `Disconnected without Reconnecting progress stays NOT_CONNECTED`() = runTest {
+        viewModel.connectionStatus.test {
+            assertEquals(ConnectionStatus.NOT_CONNECTED, awaitItem())
+
+            serviceRepository.setConnectionProgress("Downloading Node DB...")
+            serviceRepository.setConnectionState(ConnectionState.Disconnected)
+            // No emission: state and progress resolve to NOT_CONNECTED, equal to the current value.
+            expectNoEvents()
+
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    /**
+     * Cross-track contract pin: Track A (MeshConnectionManagerImpl.runSiblingHandshakeRecovery) writes the literal
+     * "Reconnecting…" (with U+2026) to ServiceRepository.connectionProgress. This constant is what Track C compares
+     * against. If either side changes (e.g., localization, ASCII normalization), the UI would silently fall back to
+     * NOT_CONNECTED instead of RECONNECTING. This test pins the constant; combined with the existing ordering test in
+     * MeshConnectionManagerImplTest that asserts the literal "Reconnecting…" is set, this transitively enforces the
+     * contract without extracting a shared constant across modules.
+     */
+    @Test
+    fun `RECONNECTING_PROGRESS_TEXT pins the cross-track literal value`() {
+        assertEquals("Reconnecting\u2026", RECONNECTING_PROGRESS_TEXT)
     }
 }
