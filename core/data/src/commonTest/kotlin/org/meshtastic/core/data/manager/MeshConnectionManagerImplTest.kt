@@ -811,7 +811,7 @@ class MeshConnectionManagerImplTest {
     @Test
     fun `BLE transport unaffected by onHandshakeProgress regression`() = runTest(testDispatcher) {
         // Explicit BLE address (starts with 'x') — must NOT engage the fast path.
-        every { radioInterfaceService.getDeviceAddress() } returns "xx:xx:xx:xx:xx:xx"
+        every { radioInterfaceService.getDeviceAddress() } returns "xAA:BB:CC:DD:EE:FF"
         manager = createManager(backgroundScope)
         radioConnectionState.value = ConnectionState.Connected
         advanceTimeBy(200)
