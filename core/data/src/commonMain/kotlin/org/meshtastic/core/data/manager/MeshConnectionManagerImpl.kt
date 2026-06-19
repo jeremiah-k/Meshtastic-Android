@@ -387,7 +387,6 @@ class MeshConnectionManagerImpl(
         handshakeTimeout = null
 
         val myNodeNum = nodeManager.myNodeNum.value ?: 0
-
         // Set device time now that the full node picture is ready. Sending this during Stage 1
         // (onRadioConfigLoaded) introduced GATT write contention with the Stage 2 node-info burst.
         commandSender.sendAdmin(myNodeNum) { AdminMessage(set_time_only = nowSeconds.toInt()) }
@@ -420,6 +419,18 @@ class MeshConnectionManagerImpl(
         // Request immediate LocalStats and DeviceMetrics update on connection with proper request IDs
         commandSender.requestTelemetry(commandSender.generatePacketId(), myNodeNum, TelemetryType.LOCAL_STATS.ordinal)
         commandSender.requestTelemetry(commandSender.generatePacketId(), myNodeNum, TelemetryType.DEVICE.ordinal)
+    }
+
+    /**
+     * Synchronously cancels the transport-aware handshake watchdog the moment Stage 2 completes (NODE_INFO_NONCE
+     * received). Does NOT replicate [onNodeDbReady]'s post-NodeDB side effects (analytics, MQTT start, history replay,
+     * telemetry requests) — those remain gated on [onNodeDbReady] at the end of the async DB install block.
+     *
+     * See [MeshConnectionManager.onHandshakeComplete] for the full rationale.
+     */
+    override fun onHandshakeComplete() {
+        handshakeTimeout?.cancel()
+        handshakeTimeout = null
     }
 
     private fun reportConnection() {

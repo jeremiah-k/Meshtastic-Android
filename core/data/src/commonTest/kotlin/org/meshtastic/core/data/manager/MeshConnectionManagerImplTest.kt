@@ -883,4 +883,43 @@ class MeshConnectionManagerImplTest {
             "USB fast stall should end in Disconnected after restart is requested",
         )
     }
+
+    @Test
+    fun `onHandshakeComplete cancels armed Stage 2 fast watchdog`() = runTest(testDispatcher) {
+        // TCP address → DeviceType.TCP → fast recovery transport, 12s fast watchdog.
+        every { radioInterfaceService.getDeviceAddress() } returns "tcp://192.168.1.42"
+        manager = createManager(backgroundScope)
+        radioConnectionState.value = ConnectionState.Connected
+        // Pre-handshake settle (100ms) completes; Stage 1 fast watchdog armed.
+        advanceTimeBy(200)
+        advanceUntilIdle()
+
+        assertEquals(
+            ConnectionState.Connecting,
+            serviceRepository.connectionState.value,
+            "Manager should be Connecting after radio Connected",
+        )
+
+        // Drive into Stage 2. startNodeInfoOnly() cancels the Stage 1 watchdog and arms Stage 2
+        // with the 12s fast timeout. In production this is invoked by MeshConfigFlowManagerImpl
+        // after Stage 1 completes; here we drive it directly to isolate the watchdog path.
+        manager.startNodeInfoOnly()
+        advanceUntilIdle()
+
+        // Synchronously cancel the watchdog, exactly as MeshConfigFlowManagerImpl now does the
+        // instant NODE_INFO_NONCE arrives — BEFORE the async DB install work begins.
+        manager.onHandshakeComplete()
+
+        // Advance past the 12s fast timeout. With the watchdog cancelled, the stall-retry-
+        // exceeded branch must NOT fire: no restartTransport, no state transition.
+        advanceTimeBy(13_000L)
+        advanceUntilIdle()
+
+        verifySuspend(exactly(0)) { radioInterfaceService.restartTransport() }
+        assertEquals(
+            ConnectionState.Connecting,
+            serviceRepository.connectionState.value,
+            "Watchdog was cancelled by onHandshakeComplete — no restart, no state transition",
+        )
+    }
 }

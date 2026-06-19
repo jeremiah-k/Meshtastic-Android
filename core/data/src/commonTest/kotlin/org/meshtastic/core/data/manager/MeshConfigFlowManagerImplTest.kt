@@ -20,6 +20,7 @@ import dev.mokkery.MockMode
 import dev.mokkery.answering.calls
 import dev.mokkery.answering.returns
 import dev.mokkery.every
+import dev.mokkery.everySuspend
 import dev.mokkery.matcher.any
 import dev.mokkery.mock
 import dev.mokkery.verify
@@ -638,8 +639,87 @@ class MeshConfigFlowManagerImplTest {
 
         // handleMyInfo(1) + handleLocalMetadata(1) + handleConfigOnlyComplete(1)
         //   + handleNodeInfo(1) = 4. handleNodeInfoComplete intentionally does NOT call
-        //   onHandshakeProgress: by that point the handshake is Complete and onNodeDbReady
-        //   (invoked above) cancels the watchdog microseconds later.
+        //   onHandshakeProgress: by that point the handshake is Complete and the synchronous
+        //   onHandshakeComplete() call (verified in a separate test) cancels the watchdog.
         verify(mode = VerifyMode.exactly(4)) { connectionManager.onHandshakeProgress() }
+    }
+
+    /**
+     * Regression guard for the Stage 2 watchdog-cancellation race fixed by adding
+     * [MeshConnectionManager.onHandshakeComplete]. Stage 2 completion must synchronously fire the terminal callback
+     * exactly once so the transport-aware fast-recovery watchdog is cancelled before any async DB install work begins.
+     */
+    @Test
+    fun `Stage 2 complete fires onHandshakeComplete exactly once`() = testScope.runTest {
+        val testNode = org.meshtastic.core.testing.TestDataFactory.createTestNode(num = 100)
+        every { nodeManager.nodeDBbyNodeNum } returns mapOf(100 to testNode)
+
+        manager.handleMyInfo(protoMyNodeInfo)
+        advanceUntilIdle()
+        manager.handleLocalMetadata(metadata)
+        advanceUntilIdle()
+        manager.handleConfigComplete(HandshakeConstants.CONFIG_NONCE)
+        advanceTimeBy(STAGE_TRANSITION_ADVANCE_MS)
+        runCurrent()
+        manager.handleNodeInfo(NodeInfo(num = 100))
+        manager.handleConfigComplete(HandshakeConstants.NODE_INFO_NONCE)
+        advanceUntilIdle()
+
+        verify(mode = VerifyMode.exactly(1)) { connectionManager.onHandshakeComplete() }
+    }
+
+    /**
+     * Regression guard for the actual Stage 2 watchdog-cancellation race: the synchronous
+     * [MeshConnectionManager.onHandshakeComplete] call MUST land before the asynchronous NodeDB install work begins, so
+     * that a slow Room commit on a large mesh cannot trip the 12 s fast-recovery timeout after the firmware handshake
+     * has already succeeded.
+     *
+     * Under [StandardTestDispatcher] the async DB install coroutine does not run until the test dispatcher is advanced,
+     * so we can assert the call ordering deterministically without any suspension trick on
+     * [NodeRepository.installConfig].
+     */
+    @Test
+    fun `Stage 2 complete cancels watchdog synchronously before async DB install work`() = testScope.runTest {
+        val testNode = org.meshtastic.core.testing.TestDataFactory.createTestNode(num = 100)
+        every { nodeManager.nodeDBbyNodeNum } returns mapOf(100 to testNode)
+
+        // Record the order in which the synchronous watchdog-cancellation callback and the
+        // async DB install entry point are observed. The order is the invariant under test.
+        val callOrder = mutableListOf<String>()
+        every { connectionManager.onHandshakeComplete() } calls { callOrder.add("handshakeComplete") }
+        everySuspend { nodeRepository.installConfig(any(), any()) } calls { callOrder.add("installConfig") }
+
+        manager.handleMyInfo(protoMyNodeInfo)
+        advanceUntilIdle()
+        manager.handleLocalMetadata(metadata)
+        advanceUntilIdle()
+        manager.handleConfigComplete(HandshakeConstants.CONFIG_NONCE)
+        advanceTimeBy(STAGE_TRANSITION_ADVANCE_MS)
+        runCurrent()
+        manager.handleNodeInfo(NodeInfo(num = 100))
+
+        // Drive Stage 2 complete. handleNodeInfoComplete runs synchronously: state becomes
+        // Complete, onHandshakeComplete() fires (cancelling the watchdog), then the async DB
+        // install block is launched but not yet executed under StandardTestDispatcher.
+        manager.handleConfigComplete(HandshakeConstants.NODE_INFO_NONCE)
+
+        // Synchronous post-condition: the watchdog was cancelled BEFORE the async DB install
+        // block was scheduled to run. If this ordering invariant ever regresses, a slow Room
+        // commit on a large mesh would falsely trip the 12s fast-recovery timeout.
+        assertEquals(
+            listOf("handshakeComplete"),
+            callOrder,
+            "onHandshakeComplete() must fire synchronously at Stage 2 complete, BEFORE any " +
+                "async DB install work begins — this is the race this test guards against",
+        )
+
+        // Now let the async DB install block run.
+        advanceUntilIdle()
+        assertEquals(
+            listOf("handshakeComplete", "installConfig"),
+            callOrder,
+            "installConfig must run AFTER onHandshakeComplete, ensuring the watchdog is " +
+                "already cancelled before any DB work could trip the fast-recovery timeout",
+        )
     }
 }

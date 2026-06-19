@@ -33,6 +33,18 @@ interface MeshConnectionManager {
     suspend fun onNodeDbReady()
 
     /**
+     * Synchronously cancels the transport-aware handshake watchdog the moment the firmware signals Stage 2 completion
+     * (NODE_INFO_NONCE received).
+     *
+     * This MUST be invoked before the asynchronous NodeDB install work begins so that a slow DB commit on a large mesh
+     * cannot trip the 12 s fast-recovery timeout after the firmware handshake has already succeeded. The watchdog
+     * cancellation it performs is a strict subset of [onNodeDbReady]; the remaining post-NodeDB side effects
+     * (analytics, MQTT start, history replay, telemetry requests) stay gated on [onNodeDbReady] at the end of the DB
+     * install block.
+     */
+    fun onHandshakeComplete()
+
+    /**
      * Called when meaningful handshake progress is observed on the wire (e.g. an inbound packet related to the
      * in-flight config or node-info exchange).
      *

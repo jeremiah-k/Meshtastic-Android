@@ -184,6 +184,14 @@ class MeshConfigFlowManagerImpl(
         // Any stall-guard retry that re-enters handleNodeInfo will see Complete state and be ignored.
         handshakeState = HandshakeState.Complete(myNodeInfo = info)
 
+        // Cancel the transport-aware fast-recovery watchdog SYNCHRONOUSLY, before the async DB
+        // install work below is launched. The firmware handshake has already completed at this
+        // point (NODE_INFO_NONCE received); a slow Room commit on a large mesh would otherwise
+        // falsely trip the 12s fast-recovery timeout before onNodeDbReady() gets a chance to
+        // cancel it. onNodeDbReady() still performs the same cancel as part of its larger post-
+        // NodeDB side-effect set, but it runs only after the DB install block finishes.
+        connectionManager.value.onHandshakeComplete()
+
         val entities =
             state.nodes.mapNotNull { nodeInfo ->
                 nodeManager.installNodeInfo(nodeInfo)
@@ -203,9 +211,10 @@ class MeshConfigFlowManagerImpl(
             connectionManager.value.onNodeDbReady()
         }
         // Note: onHandshakeProgress() is intentionally NOT called here. By this point the
-        // handshake has reached HandshakeState.Complete and onNodeDbReady() (above) cancels
-        // the watchdog microseconds later, so an extra rearm would be both semantically wrong
-        // and wasted work. The remaining onHandshakeProgress sites cover all genuine progress.
+        // handshake has reached HandshakeState.Complete and the synchronous onHandshakeComplete()
+        // call above has already cancelled the watchdog. Re-arming via onHandshakeProgress()
+        // would be both semantically wrong and wasted work. The remaining onHandshakeProgress
+        // sites cover all genuine progress.
     }
 
     override fun handleMyInfo(myInfo: ProtoMyNodeInfo) {
