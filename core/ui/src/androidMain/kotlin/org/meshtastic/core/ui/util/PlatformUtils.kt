@@ -29,6 +29,7 @@ import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
@@ -290,32 +291,62 @@ actual fun isWifiUnavailable(): Boolean {
     return rememberObservedFlag(
         read = {
             val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
-            val capabilities = cm?.activeNetwork?.let { cm.getNetworkCapabilities(it) }
-            val onLocalNetwork =
-                capabilities != null &&
-                    (
-                        capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
-                            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
-                        )
-            !onLocalNetwork
+            // Scan every current network, not just `activeNetwork`: NSD/mDNS only needs *a* LAN, and
+            // Android often keeps cellular as the default route (or leaves Wi-Fi unvalidated), which
+            // previously stranded the banner "on" even after Wi-Fi returned.
+            cm?.hasLocalNetwork() != true
         },
         subscribe = { onChange ->
             val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-            val callback =
-                object : ConnectivityManager.NetworkCallback() {
-                    override fun onAvailable(network: Network) = onChange()
-
-                    override fun onLost(network: Network) = onChange()
-
-                    override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) =
-                        onChange()
-                }
-            // Main-thread Handler so the state write lands on the main thread (the API-26+ overload; minSdk is 26).
-            cm.registerDefaultNetworkCallback(callback, Handler(Looper.getMainLooper()))
-            val unregister = { cm.unregisterNetworkCallback(callback) }
+            val handler = Handler(Looper.getMainLooper())
+            // Two separate NetworkRequests are required because `NetworkRequest.addTransportType`
+            // ANDs its arguments — a single request with WIFI+ETHERNET would only match networks
+            // that simultaneously carry both transports. Registering per-transport callbacks fires
+            // `onChange` on gain/loss/capability-change of any Wi-Fi or Ethernet network.
+            val wifiRequest = NetworkRequest.Builder().addTransportType(NetworkCapabilities.TRANSPORT_WIFI).build()
+            val ethernetRequest =
+                NetworkRequest.Builder().addTransportType(NetworkCapabilities.TRANSPORT_ETHERNET).build()
+            val wifiCallback = localNetworkCallback(onChange)
+            val ethernetCallback = localNetworkCallback(onChange)
+            cm.registerNetworkCallback(wifiRequest, wifiCallback, handler)
+            cm.registerNetworkCallback(ethernetRequest, ethernetCallback, handler)
+            val unregister = {
+                cm.unregisterNetworkCallback(wifiCallback)
+                cm.unregisterNetworkCallback(ethernetCallback)
+            }
             unregister
         },
     )
+}
+
+/**
+ * Returns `true` if any currently-tracked network carries Wi-Fi or Ethernet transport. Backs the `read` side of
+ * `isWifiUnavailable`; extracted so the transport reduction can delegate to the platform-agnostic
+ * [anyLocalNetworkAvailable] helper (which is unit-tested in `commonTest`).
+ */
+private fun ConnectivityManager.hasLocalNetwork(): Boolean {
+    val transports =
+        allNetworks.mapNotNull { network ->
+            getNetworkCapabilities(network)?.let { caps ->
+                NetworkTransportInfo(
+                    hasWifi = caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI),
+                    hasEthernet = caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET),
+                )
+            }
+        }
+    return anyLocalNetworkAvailable(transports)
+}
+
+/**
+ * Bridges `ConnectivityManager` events to the `rememberObservedFlag` `onChange` trigger. Each callback registration
+ * gets its own instance so `unregisterNetworkCallback` is symmetric.
+ */
+private fun localNetworkCallback(onChange: () -> Unit) = object : ConnectivityManager.NetworkCallback() {
+    override fun onAvailable(network: Network) = onChange()
+
+    override fun onLost(network: Network) = onChange()
+
+    override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) = onChange()
 }
 
 @Composable
