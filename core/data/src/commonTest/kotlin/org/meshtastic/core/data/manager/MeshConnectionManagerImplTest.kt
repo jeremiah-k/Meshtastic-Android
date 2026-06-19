@@ -603,7 +603,7 @@ class MeshConnectionManagerImplTest {
     @Test
     fun `TCP Stage 1 stall fires restartTransport at 12s without retry`() = runTest(testDispatcher) {
         // Address starting with 't' → DeviceType.TCP → fast recovery transport.
-        every { radioInterfaceService.getDeviceAddress() } returns "tcp://192.168.1.42"
+        every { radioInterfaceService.getDeviceAddress() } returns "t192.168.1.42"
         val sentPackets = mutableListOf<org.meshtastic.proto.ToRadio>()
         every { packetHandler.sendToRadio(any<org.meshtastic.proto.ToRadio>()) } calls
             { call ->
@@ -647,7 +647,7 @@ class MeshConnectionManagerImplTest {
 
     @Test
     fun `TCP Stage 1 meaningful progress resets watchdog without false restart`() = runTest(testDispatcher) {
-        every { radioInterfaceService.getDeviceAddress() } returns "tcp://192.168.1.42"
+        every { radioInterfaceService.getDeviceAddress() } returns "t192.168.1.42"
         manager = createManager(backgroundScope)
         radioConnectionState.value = ConnectionState.Connected
         advanceTimeBy(200)
@@ -671,7 +671,7 @@ class MeshConnectionManagerImplTest {
 
     @Test
     fun `TCP Stage 1 watchdog fires after progress stops`() = runTest(testDispatcher) {
-        every { radioInterfaceService.getDeviceAddress() } returns "tcp://192.168.1.42"
+        every { radioInterfaceService.getDeviceAddress() } returns "t192.168.1.42"
         manager = createManager(backgroundScope)
         radioConnectionState.value = ConnectionState.Connected
         advanceTimeBy(200)
@@ -699,7 +699,7 @@ class MeshConnectionManagerImplTest {
 
     @Test
     fun `TCP Stage 2 stall fires restartTransport at 12s`() = runTest(testDispatcher) {
-        every { radioInterfaceService.getDeviceAddress() } returns "tcp://192.168.1.42"
+        every { radioInterfaceService.getDeviceAddress() } returns "t192.168.1.42"
         manager = createManager(backgroundScope)
         radioConnectionState.value = ConnectionState.Connected
         advanceTimeBy(200)
@@ -731,7 +731,7 @@ class MeshConnectionManagerImplTest {
 
     @Test
     fun `TCP Stage 2 NodeInfo progress resets watchdog`() = runTest(testDispatcher) {
-        every { radioInterfaceService.getDeviceAddress() } returns "tcp://192.168.1.42"
+        every { radioInterfaceService.getDeviceAddress() } returns "t192.168.1.42"
         manager = createManager(backgroundScope)
         radioConnectionState.value = ConnectionState.Connected
         advanceTimeBy(200)
@@ -757,7 +757,7 @@ class MeshConnectionManagerImplTest {
 
     @Test
     fun `TCP fast recovery preserves Disconnected-before-restartTransport ordering`() = runTest(testDispatcher) {
-        every { radioInterfaceService.getDeviceAddress() } returns "tcp://192.168.1.42"
+        every { radioInterfaceService.getDeviceAddress() } returns "t192.168.1.42"
 
         val observed = mutableListOf<ConnectionState>()
         var progressBeforeRestart: String? = null
@@ -845,7 +845,7 @@ class MeshConnectionManagerImplTest {
 
     @Test
     fun `onHandshakeProgress is a no-op when state is not Connecting`() = runTest(testDispatcher) {
-        every { radioInterfaceService.getDeviceAddress() } returns "tcp://192.168.1.42"
+        every { radioInterfaceService.getDeviceAddress() } returns "t192.168.1.42"
         manager = createManager(backgroundScope)
         // Manager starts in Disconnected (initial state, no radio Connected signal yet).
         assertEquals(
@@ -866,7 +866,7 @@ class MeshConnectionManagerImplTest {
     @Test
     fun `USB serial transport engages fast path like TCP`() = runTest(testDispatcher) {
         // Address starting with 's' → DeviceType.USB → fast recovery transport.
-        every { radioInterfaceService.getDeviceAddress() } returns "serial:///dev/ttyUSB0"
+        every { radioInterfaceService.getDeviceAddress() } returns "s/dev/ttyUSB0"
         manager = createManager(backgroundScope)
         radioConnectionState.value = ConnectionState.Connected
         advanceTimeBy(200)
@@ -887,7 +887,7 @@ class MeshConnectionManagerImplTest {
     @Test
     fun `onHandshakeComplete cancels armed Stage 2 fast watchdog`() = runTest(testDispatcher) {
         // TCP address → DeviceType.TCP → fast recovery transport, 12s fast watchdog.
-        every { radioInterfaceService.getDeviceAddress() } returns "tcp://192.168.1.42"
+        every { radioInterfaceService.getDeviceAddress() } returns "t192.168.1.42"
         manager = createManager(backgroundScope)
         radioConnectionState.value = ConnectionState.Connected
         // Pre-handshake settle (100ms) completes; Stage 1 fast watchdog armed.
