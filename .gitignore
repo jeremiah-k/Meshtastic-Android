@@ -99,3 +99,4 @@ build-scan-*.scan
 # craft pipeline scratch workpad (per-task working notes, not source)
 /workpad.md
 /workpad.*.md
+.omo/*
