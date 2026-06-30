@@ -18,6 +18,7 @@ package org.meshtastic.core.ui.util
 
 import androidx.compose.runtime.Composable
 import kotlinx.coroutines.flow.first
+import okio.ByteString
 import org.jetbrains.compose.resources.stringResource
 import org.meshtastic.core.common.util.DateFormatter
 import org.meshtastic.core.common.util.nowMillis
@@ -28,9 +29,11 @@ import org.meshtastic.core.resources.unknown_age
 import org.meshtastic.proto.Channel
 import org.meshtastic.proto.ChannelSet
 import org.meshtastic.proto.ChannelSettings
+import org.meshtastic.proto.Config
 import org.meshtastic.proto.MeshPacket
 import org.meshtastic.proto.Position
 import kotlin.time.Duration.Companion.days
+import org.meshtastic.core.model.Channel as ModelChannel
 
 private const val SECONDS_TO_MILLIS = 1000L
 
@@ -171,3 +174,43 @@ fun mergeChannelSettingsForAdd(
     existing: List<ChannelSettings>,
     incoming: List<ChannelSettings>,
 ): List<ChannelSettings> = existing + incoming
+
+/**
+ * Computes default checkbox selections for ADD-mode QR import. Existing channels are always selected. Incoming channels
+ * are selected unless they are an exact semantic duplicate (same effective name + effective PSK) of an existing or
+ * earlier incoming channel, or unless the firmware channel limit would be exceeded.
+ *
+ * The preview list remains non-lossy — every incoming channel stays visible regardless of its selection state.
+ *
+ * @param existing The current [ChannelSettings] list on the radio.
+ * @param incoming The imported [ChannelSettings] list.
+ * @param loraConfig The current [Config.LoRaConfig], used to resolve effective channel names.
+ * @param maxChannels Firmware channel limit. Incoming selections stop when this is reached.
+ * @return Selection list aligned with `[existing..., incoming...]`.
+ */
+fun getChannelSelectionsForAdd(
+    existing: List<ChannelSettings>,
+    incoming: List<ChannelSettings>,
+    loraConfig: Config.LoRaConfig,
+    maxChannels: Int,
+): List<Boolean> {
+    val seen = existing.map { it.channelIdentity(loraConfig) }.toMutableSet()
+    var remaining = (maxChannels - existing.size).coerceAtLeast(0)
+    return List(existing.size) { true } +
+        incoming.map { channel ->
+            val identity = channel.channelIdentity(loraConfig)
+            val isDuplicate = !seen.add(identity)
+            val shouldSelect = !isDuplicate && remaining > 0
+            if (shouldSelect) remaining--
+            shouldSelect
+        }
+}
+
+/** Semantic channel identity based on effective name and effective PSK. */
+private data class ChannelIdentity(val name: String, val psk: ByteString)
+
+/** Resolves the [ChannelIdentity] of this [ChannelSettings] under the given [Config.LoRaConfig]. */
+private fun ChannelSettings.channelIdentity(loraConfig: Config.LoRaConfig): ChannelIdentity {
+    val channel = ModelChannel(settings = this, loraConfig = loraConfig)
+    return ChannelIdentity(name = channel.name, psk = channel.psk)
+}

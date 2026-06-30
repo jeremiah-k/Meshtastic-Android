@@ -19,9 +19,12 @@ package org.meshtastic.core.ui.util
 import okio.ByteString.Companion.toByteString
 import org.meshtastic.proto.Channel
 import org.meshtastic.proto.ChannelSettings
+import org.meshtastic.proto.Config
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import org.meshtastic.core.model.Channel as ModelChannel
 
 /**
  * Coverage for [getChannelReplacementList]. The REPLACE helper must emit an authoritative slot list for QR imports:
@@ -211,5 +214,186 @@ class ProtoExtensionsTest {
         val result = mergeChannelSettingsForAdd(existing = emptyList(), incoming = emptyList())
 
         assertTrue(result.isEmpty())
+    }
+
+    // --- getChannelSelectionsForAdd tests ---
+
+    @Test
+    fun selections_existing_channels_are_always_selected() {
+        val existing = listOf(ChannelSettings(name = "A"), ChannelSettings(name = "B"))
+
+        val selections =
+            getChannelSelectionsForAdd(existing, emptyList(), ModelChannel.default.loraConfig, maxChannels = 8)
+
+        assertTrue(selections[0])
+        assertTrue(selections[1])
+    }
+
+    @Test
+    fun selections_unique_incoming_channels_are_selected() {
+        val incoming = listOf(ChannelSettings(name = "C"), ChannelSettings(name = "D"))
+
+        val selections =
+            getChannelSelectionsForAdd(emptyList(), incoming, ModelChannel.default.loraConfig, maxChannels = 8)
+
+        assertTrue(selections[0])
+        assertTrue(selections[1])
+    }
+
+    @Test
+    fun selections_incoming_duplicate_of_existing_is_unchecked() {
+        val channel = ChannelSettings(name = "Test", psk = byteArrayOf(1).toByteString())
+
+        val selections =
+            getChannelSelectionsForAdd(
+                listOf(channel),
+                listOf(channel),
+                ModelChannel.default.loraConfig,
+                maxChannels = 8,
+            )
+
+        assertFalse(selections[1])
+    }
+
+    @Test
+    fun selections_duplicate_inside_incoming_first_selected_second_unchecked() {
+        val a = ChannelSettings(name = "A", psk = byteArrayOf(1).toByteString())
+        val b = ChannelSettings(name = "B", psk = byteArrayOf(2).toByteString())
+
+        val selections =
+            getChannelSelectionsForAdd(emptyList(), listOf(a, a, b), ModelChannel.default.loraConfig, maxChannels = 8)
+
+        assertTrue(selections[0])
+        assertFalse(selections[1])
+        assertTrue(selections[2])
+    }
+
+    @Test
+    fun selections_same_name_different_psk_remains_selected() {
+        val existingChan = ChannelSettings(name = "A", psk = byteArrayOf(1).toByteString())
+        val incomingChan = ChannelSettings(name = "A", psk = byteArrayOf(2).toByteString())
+
+        val selections =
+            getChannelSelectionsForAdd(
+                listOf(existingChan),
+                listOf(incomingChan),
+                ModelChannel.default.loraConfig,
+                maxChannels = 8,
+            )
+
+        assertTrue(selections[1])
+    }
+
+    @Test
+    fun selections_same_psk_different_name_remains_selected() {
+        val psk = byteArrayOf(1, 2).toByteString()
+        val existingChan = ChannelSettings(name = "A", psk = psk)
+        val incomingChan = ChannelSettings(name = "B", psk = psk)
+
+        val selections =
+            getChannelSelectionsForAdd(
+                listOf(existingChan),
+                listOf(incomingChan),
+                ModelChannel.default.loraConfig,
+                maxChannels = 8,
+            )
+
+        assertTrue(selections[1])
+    }
+
+    @Test
+    fun selections_empty_name_default_matches_explicit_preset_name() {
+        val loraConfig = ModelChannel.default.loraConfig
+        val existingChan = ChannelSettings(psk = byteArrayOf(1).toByteString())
+        val incomingChan = ChannelSettings(name = "LongFast", psk = byteArrayOf(1).toByteString())
+
+        val selections =
+            getChannelSelectionsForAdd(listOf(existingChan), listOf(incomingChan), loraConfig, maxChannels = 8)
+
+        assertFalse(selections[1])
+    }
+
+    @Test
+    fun selections_explicit_preset_name_matches_empty_name_default() {
+        val loraConfig = ModelChannel.default.loraConfig
+        val existingChan = ChannelSettings(name = "LongFast", psk = byteArrayOf(1).toByteString())
+        val incomingChan = ChannelSettings(psk = byteArrayOf(1).toByteString())
+
+        val selections =
+            getChannelSelectionsForAdd(listOf(existingChan), listOf(incomingChan), loraConfig, maxChannels = 8)
+
+        assertFalse(selections[1])
+    }
+
+    @Test
+    fun selections_psk_marker_matches_expanded_default_key() {
+        val loraConfig = ModelChannel.default.loraConfig
+        val expandedPsk =
+            ModelChannel(settings = ChannelSettings(psk = byteArrayOf(1).toByteString()), loraConfig = loraConfig).psk
+        val markerChan = ChannelSettings(name = "Test", psk = byteArrayOf(1).toByteString())
+        val expandedChan = ChannelSettings(name = "Test", psk = expandedPsk)
+
+        val selections =
+            getChannelSelectionsForAdd(listOf(markerChan), listOf(expandedChan), loraConfig, maxChannels = 8)
+
+        assertFalse(selections[1])
+    }
+
+    @Test
+    fun selections_non_long_fast_preset_default_duplicate_is_unchecked() {
+        val loraConfig = Config.LoRaConfig(use_preset = true, modem_preset = Config.LoRaConfig.ModemPreset.MEDIUM_FAST)
+        val existingChan = ChannelSettings(psk = byteArrayOf(1).toByteString())
+        val incomingChan = ChannelSettings(name = "MediumFast", psk = byteArrayOf(1).toByteString())
+
+        val selections =
+            getChannelSelectionsForAdd(listOf(existingChan), listOf(incomingChan), loraConfig, maxChannels = 8)
+
+        assertFalse(selections[1])
+    }
+
+    @Test
+    fun selections_duplicates_do_not_consume_remaining_capacity() {
+        val existing = listOf(ChannelSettings(name = "A"), ChannelSettings(name = "B"))
+        val dup = ChannelSettings(name = "A")
+        val unique = listOf(ChannelSettings(name = "C"), ChannelSettings(name = "D"), ChannelSettings(name = "E"))
+
+        val selections =
+            getChannelSelectionsForAdd(existing, listOf(dup) + unique, ModelChannel.default.loraConfig, maxChannels = 5)
+
+        assertFalse(selections[2]) // duplicate A unchecked
+        assertTrue(selections[3]) // C selected
+        assertTrue(selections[4]) // D selected
+        assertTrue(selections[5]) // E selected because duplicate A did not consume capacity
+    }
+
+    @Test
+    fun selections_over_capacity_unique_incoming_after_limit_is_unchecked() {
+        val existing = listOf(ChannelSettings(name = "A"), ChannelSettings(name = "B"))
+        val incoming =
+            listOf(
+                ChannelSettings(name = "C"),
+                ChannelSettings(name = "D"),
+                ChannelSettings(name = "E"),
+                ChannelSettings(name = "F"),
+            )
+
+        val selections =
+            getChannelSelectionsForAdd(existing, incoming, ModelChannel.default.loraConfig, maxChannels = 4)
+
+        assertTrue(selections[2]) // C fits (3 total)
+        assertTrue(selections[3]) // D fits (4 total)
+        assertFalse(selections[4]) // E would exceed 4
+        assertFalse(selections[5]) // F would exceed 4
+    }
+
+    @Test
+    fun selections_existing_at_max_makes_all_incoming_unchecked() {
+        val existing = (1..8).map { ChannelSettings(name = "Ch$it") }
+        val incoming = listOf(ChannelSettings(name = "New"))
+
+        val selections =
+            getChannelSelectionsForAdd(existing, incoming, ModelChannel.default.loraConfig, maxChannels = 8)
+
+        assertFalse(selections[8])
     }
 }
