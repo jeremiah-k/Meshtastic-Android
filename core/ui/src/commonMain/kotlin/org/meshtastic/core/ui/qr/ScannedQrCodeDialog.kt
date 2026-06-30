@@ -63,6 +63,7 @@ import org.meshtastic.core.resources.replace
 import org.meshtastic.core.resources.replace_channels_and_settings_description
 import org.meshtastic.core.ui.component.ChannelSelection
 import org.meshtastic.core.ui.theme.AppTheme
+import org.meshtastic.core.ui.util.getChannelSelectionsForAdd
 import org.meshtastic.core.ui.util.mergeChannelSettingsForAdd
 import org.meshtastic.proto.ChannelSet
 
@@ -73,11 +74,13 @@ fun ScannedQrCodeDialog(
     viewModel: ScannedQrCodeViewModel = koinViewModel(),
 ) {
     val channels by viewModel.channels.collectAsStateWithLifecycle()
+    val maxChannels by viewModel.maxChannels.collectAsStateWithLifecycle()
 
     ScannedQrCodeDialog(
         channels = channels,
         incoming = incoming,
         onDismiss = onDismiss,
+        maxChannels = maxChannels,
         onConfirm = viewModel::setChannels,
     )
 }
@@ -90,6 +93,7 @@ fun ScannedQrCodeDialog(
     channels: ChannelSet,
     incoming: ChannelSet,
     onDismiss: () -> Unit,
+    maxChannels: Int = DEFAULT_MAX_CHANNELS,
     onConfirm: (ChannelSet) -> Unit,
 ) {
     var shouldReplace by rememberSaveable { mutableStateOf(incoming.lora_config != null) }
@@ -117,7 +121,27 @@ fun ScannedQrCodeDialog(
 
     /* Holds selections made by the user */
     val channelSelections =
-        remember(channelSet) { mutableStateListOf(elements = Array(size = channelSet.settings.size, init = { true })) }
+        remember(
+            shouldReplace,
+            channelSet.settings,
+            channels.settings,
+            incoming.settings,
+            channels.lora_config,
+            maxChannels,
+        ) {
+            val defaults =
+                if (shouldReplace) {
+                    List(channelSet.settings.size) { true }
+                } else {
+                    getChannelSelectionsForAdd(
+                        existing = channels.settings,
+                        incoming = incoming.settings,
+                        loraConfig = channels.lora_config ?: Channel.default.loraConfig,
+                        maxChannels = maxChannels,
+                    )
+                }
+            mutableStateListOf<Boolean>().apply { addAll(defaults) }
+        }
 
     val selectedChannelSet =
         if (shouldReplace) {
@@ -297,7 +321,7 @@ fun ScannedQrCodeDialog(
                                 onDismiss()
                                 onConfirm(selectedChannelSet)
                             },
-                            enabled = selectedChannelSet.settings.size in 1..8,
+                            enabled = selectedChannelSet.settings.size in 1..maxChannels,
                         ) {
                             Text(
                                 text = stringResource(Res.string.accept),
