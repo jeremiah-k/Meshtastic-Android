@@ -131,8 +131,10 @@ fun MeshtasticImportFAB(
             ),
             onDismiss = { showUrlDialog = false },
             onConfirm = { contents ->
-                normalizeImportContents(contents)?.let(onImport)
-                showUrlDialog = false
+                normalizeImportContents(contents)?.let {
+                    onImport(it)
+                    showUrlDialog = false
+                }
             },
         )
     }
