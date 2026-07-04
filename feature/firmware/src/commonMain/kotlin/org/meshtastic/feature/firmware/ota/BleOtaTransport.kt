@@ -73,7 +73,7 @@ class BleOtaTransport(
         }
     }
 
-    @Suppress("MagicNumber")
+    @Suppress("MagicNumber", "ThrowsCount") // distinct exception types for scan-miss, connect-fail, and timeout
     override suspend fun connect(): Result<Unit> = safeCatching {
         Logger.i { "BLE OTA: Waiting $REBOOT_DELAY for device to reboot into OTA mode..." }
         delay(REBOOT_DELAY)
