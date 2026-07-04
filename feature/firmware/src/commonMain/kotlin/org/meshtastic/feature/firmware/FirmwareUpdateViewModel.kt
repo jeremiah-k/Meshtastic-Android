@@ -62,6 +62,7 @@ import org.meshtastic.core.resources.UiText
 import org.meshtastic.core.resources.firmware_recovery_ble_failed
 import org.meshtastic.core.resources.firmware_update_archive_missing_target
 import org.meshtastic.core.resources.firmware_update_battery_low
+import org.meshtastic.core.resources.firmware_update_context_changed
 import org.meshtastic.core.resources.firmware_update_copying
 import org.meshtastic.core.resources.firmware_update_failed
 import org.meshtastic.core.resources.firmware_update_filename_unavailable
@@ -73,7 +74,9 @@ import org.meshtastic.core.resources.firmware_update_method_wifi
 import org.meshtastic.core.resources.firmware_update_missing_target
 import org.meshtastic.core.resources.firmware_update_no_device
 import org.meshtastic.core.resources.firmware_update_node_info_missing
+import org.meshtastic.core.resources.firmware_update_requires_bin
 import org.meshtastic.core.resources.firmware_update_requires_ota_zip
+import org.meshtastic.core.resources.firmware_update_requires_uf2
 import org.meshtastic.core.resources.firmware_update_unknown_error
 import org.meshtastic.core.resources.firmware_update_unknown_hardware
 import org.meshtastic.core.resources.firmware_update_unsupported_update_method
@@ -91,7 +94,7 @@ private val BLUETOOTH_ADDRESS_REGEX = Regex("([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}"
  * ViewModel driving the firmware update screen. Coordinates release checking, file retrieval, transport-specific update
  * execution, and post-update device verification.
  */
-@Suppress("LongParameterList", "TooManyFunctions")
+@Suppress("LongParameterList", "TooManyFunctions", "LargeClass")
 @KoinViewModel
 class FirmwareUpdateViewModel(
     private val firmwareReleaseRepository: FirmwareReleaseRepository,
@@ -153,7 +156,10 @@ class FirmwareUpdateViewModel(
         pendingLocalFirmwareArtifact = null
         applicationScope.launch(start = CoroutineStart.ATOMIC) {
             withContext(NonCancellable) {
-                tempFirmwareFile = cleanupTemporaryFiles(fileHandler, tempFirmwareFile ?: pendingArtifact)
+                tempFirmwareFile = cleanupTemporaryFiles(fileHandler, tempFirmwareFile)
+                if (pendingArtifact != null && pendingArtifact != tempFirmwareFile) {
+                    cleanupTemporaryFiles(fileHandler, pendingArtifact)
+                }
             }
         }
     }
@@ -463,7 +469,6 @@ class FirmwareUpdateViewModel(
     fun prepareLocalFirmwareFile(uri: CommonUri) {
         val currentState = _state.value as? FirmwareUpdateState.Ready ?: return
         clearPendingLocalFirmwareFile()
-        prepareJob?.cancel()
         prepareJob =
             viewModelScope.launch {
                 val fileName =
@@ -526,22 +531,15 @@ class FirmwareUpdateViewModel(
         state: FirmwareUpdateState.Ready,
     ): LocalFirmwareResolution {
         val validation = validateLocalFirmwareFileName(fileName, state.deviceHardware, state.updateMethod)
-        return when {
-            validation == LocalFirmwareFileValidation.Valid ->
-                LocalFirmwareResolution.Resolved(uri = uri, fileName = fileName)
+        return when (validation) {
+            LocalFirmwareFileValidation.Valid -> LocalFirmwareResolution.Resolved(uri = uri, fileName = fileName)
 
-            validation is LocalFirmwareFileValidation.Invalid &&
-                shouldTryLocalFirmwareBundle(fileName, validation.reason) ->
-                resolveLocalFirmwareBundle(uri, fileName, state, validation.reason)
-
-            validation is LocalFirmwareFileValidation.Invalid ->
-                LocalFirmwareResolution.Invalid(reason = validation.reason, fileName = fileName)
-
-            else ->
-                LocalFirmwareResolution.Invalid(
-                    reason = LocalFirmwareFileValidationReason.UnsupportedUpdateMethod,
-                    fileName = fileName,
-                )
+            is LocalFirmwareFileValidation.Invalid ->
+                if (shouldTryLocalFirmwareBundle(fileName, validation.reason)) {
+                    resolveLocalFirmwareBundle(uri, fileName, state, validation.reason)
+                } else {
+                    LocalFirmwareResolution.Invalid(reason = validation.reason, fileName = fileName)
+                }
         }
     }
 
@@ -611,8 +609,7 @@ class FirmwareUpdateViewModel(
                         uri = resolution.uri,
                         fileName = resolution.fileName,
                         deviceName = state.deviceHardware.displayName,
-                        platformioTarget =
-                        state.deviceHardware.platformioTarget.ifEmpty { state.deviceHardware.hwModelSlug },
+                        platformioTarget = state.deviceHardware.effectiveTarget,
                         updateMethod = state.updateMethod,
                         address = state.address,
                     )
@@ -668,6 +665,11 @@ class FirmwareUpdateViewModel(
                             firmwareUri = uri,
                         )
                     tempFirmwareFile = updateArtifact?.takeIf { it.isTemporary } ?: pendingArtifact
+                    // If the handler created its own temp copy (e.g. ESP32 importFromUri),
+                    // clean up the extracted bundle artifact to prevent a leak.
+                    if (pendingArtifact != null && pendingArtifact != tempFirmwareFile) {
+                        cleanupTemporaryFiles(fileHandler, pendingArtifact)
+                    }
 
                     when (val finalState = _state.value) {
                         is FirmwareUpdateState.Success ->
@@ -706,7 +708,7 @@ class FirmwareUpdateViewModel(
                 Res.string.firmware_update_archive_missing_target,
                 fileName,
                 state.deviceHardware.displayName,
-                state.deviceHardware.platformioTarget.ifEmpty { state.deviceHardware.hwModelSlug },
+                state.deviceHardware.effectiveTarget,
             )
 
         LocalFirmwareFileValidationReason.MissingTarget ->
@@ -718,15 +720,21 @@ class FirmwareUpdateViewModel(
         LocalFirmwareFileValidationReason.RequiresOtaZip ->
             UiText.Resource(Res.string.firmware_update_requires_ota_zip, state.deviceHardware.displayName)
 
-        LocalFirmwareFileValidationReason.RequiresBin,
-        LocalFirmwareFileValidationReason.RequiresUf2,
-        LocalFirmwareFileValidationReason.TargetMismatch,
-        ->
+        LocalFirmwareFileValidationReason.RequiresBin ->
+            UiText.Resource(Res.string.firmware_update_requires_bin, state.deviceHardware.displayName)
+
+        LocalFirmwareFileValidationReason.RequiresUf2 ->
+            UiText.Resource(Res.string.firmware_update_requires_uf2, state.deviceHardware.displayName)
+
+        LocalFirmwareFileValidationReason.ConfirmationContextChanged ->
+            UiText.Resource(Res.string.firmware_update_context_changed)
+
+        LocalFirmwareFileValidationReason.TargetMismatch ->
             UiText.Resource(
                 Res.string.firmware_update_invalid_local_file_detail,
                 fileName,
                 state.deviceHardware.displayName,
-                state.deviceHardware.platformioTarget.ifEmpty { state.deviceHardware.hwModelSlug },
+                state.deviceHardware.effectiveTarget,
             )
     }
 
@@ -827,6 +835,7 @@ private fun shouldTryLocalFirmwareBundle(fileName: String, reason: LocalFirmware
             LocalFirmwareFileValidationReason.MissingArchiveFirmware,
             LocalFirmwareFileValidationReason.MissingTarget,
             LocalFirmwareFileValidationReason.TargetMismatch,
+            LocalFirmwareFileValidationReason.ConfirmationContextChanged,
             LocalFirmwareFileValidationReason.UnsupportedUpdateMethod,
             -> false
         }

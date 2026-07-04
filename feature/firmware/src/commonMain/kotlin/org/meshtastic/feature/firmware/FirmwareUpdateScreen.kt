@@ -188,7 +188,7 @@ fun FirmwareUpdateScreen(onNavigateUp: () -> Unit, viewModel: FirmwareUpdateView
     val saveFileLauncher = rememberSaveFileLauncher { uri -> viewModel.saveDfuFile(uri) }
 
     val actions =
-        remember(viewModel, onNavigateUp, state) {
+        remember(viewModel, onNavigateUp) {
             FirmwareUpdateActions(
                 onReleaseTypeSelect = viewModel::setReleaseType,
                 onStartUpdate = viewModel::startUpdate,
