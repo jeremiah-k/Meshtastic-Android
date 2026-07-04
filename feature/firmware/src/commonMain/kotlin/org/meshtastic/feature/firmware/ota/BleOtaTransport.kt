@@ -17,6 +17,7 @@
 package org.meshtastic.feature.firmware.ota
 
 import co.touchlab.kermit.Logger
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -66,79 +67,110 @@ class BleOtaTransport(
     private suspend fun scanForOtaDevice(): BleDevice? {
         val otaAddress = calculateMacPlusOne(address)
         val targetAddresses = setOf(address, otaAddress)
-        Logger.i { "BLE OTA: Will match addresses: $targetAddresses" }
+        Logger.i { "BLE OTA: Will match addresses: ${targetAddresses.joinToString(", ") { maskMac(it) }}" }
 
         return scanForBleDevice(scanner = scanner, tag = "BLE OTA", serviceUuid = OTA_SERVICE_UUID) {
             it.address in targetAddresses
         }
     }
 
-    @Suppress("MagicNumber")
-    override suspend fun connect(): Result<Unit> = safeCatching {
-        Logger.i { "BLE OTA: Waiting $REBOOT_DELAY for device to reboot into OTA mode..." }
-        delay(REBOOT_DELAY)
+    @Suppress("MagicNumber", "ThrowsCount") // distinct exception types for scan-miss, connect-fail, and timeout
+    override suspend fun connect(): Result<Unit> {
+        val result = safeCatching {
+            Logger.i { "BLE OTA: Waiting $REBOOT_DELAY for device to reboot into OTA mode..." }
+            delay(REBOOT_DELAY)
 
-        Logger.i { "BLE OTA: Connecting to $address using Kable..." }
+            Logger.i { "BLE OTA: Connecting to ${maskMac(address)} using Kable..." }
 
-        val device =
-            scanForOtaDevice()
-                ?: throw OtaProtocolException.ConnectionFailed(
-                    "Device not found at address $address. " +
-                        "Ensure the device has rebooted into OTA mode and is advertising.",
-                )
+            val device =
+                scanForOtaDevice()
+                    ?: throw OtaProtocolException.ConnectionFailed(
+                        "Device not found at address $address. " +
+                            "Ensure the device has rebooted into OTA mode and is advertising.",
+                    )
 
-        bleConnection.connectionState
-            .onEach { state ->
-                Logger.d { "BLE OTA: Connection state changed to $state" }
-                isConnected = state is BleConnectionState.Connected
+            bleConnection.connectionState
+                .onEach { state ->
+                    Logger.d { "BLE OTA: Connection state changed to $state" }
+                    isConnected = state is BleConnectionState.Connected
+                }
+                .launchIn(transportScope)
+
+            try {
+                val finalState = bleConnection.connectAndAwait(device, CONNECTION_TIMEOUT)
+                if (finalState is BleConnectionState.Disconnected) {
+                    Logger.w { "BLE OTA: Failed to connect to ${maskMac(device.address)} (state=$finalState)" }
+                    throw OtaProtocolException.ConnectionFailed(
+                        "Failed to connect to device at address ${device.address}",
+                    )
+                }
+            } catch (@Suppress("SwallowedException") e: kotlinx.coroutines.TimeoutCancellationException) {
+                Logger.w { "BLE OTA: Timed out waiting to connect to ${maskMac(device.address)}. Error: ${e.message}" }
+                throw OtaProtocolException.Timeout("Timed out connecting to device at address ${device.address}")
             }
-            .launchIn(transportScope)
 
-        try {
-            val finalState = bleConnection.connectAndAwait(device, CONNECTION_TIMEOUT)
-            if (finalState is BleConnectionState.Disconnected) {
-                Logger.w { "BLE OTA: Failed to connect to ${device.address} (state=$finalState)" }
-                throw OtaProtocolException.ConnectionFailed("Failed to connect to device at address ${device.address}")
-            }
-        } catch (@Suppress("SwallowedException") e: kotlinx.coroutines.TimeoutCancellationException) {
-            Logger.w { "BLE OTA: Timed out waiting to connect to ${device.address}. Error: ${e.message}" }
-            throw OtaProtocolException.Timeout("Timed out connecting to device at address ${device.address}")
+            Logger.i { "BLE OTA: Connected to ${maskMac(device.address)}, discovering services..." }
+            prepareOtaProfile()
         }
+        if (result.isFailure) {
+            closeAfterFailedConnect()
+        }
+        return result
+    }
 
-        Logger.i { "BLE OTA: Connected to ${device.address}, discovering services..." }
+    private suspend fun closeAfterFailedConnect() {
+        try {
+            close()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (@Suppress("TooGenericExceptionCaught") e: Exception) {
+            Logger.w(e) { "BLE OTA: Failed to close after connection failure" }
+        }
+    }
 
-        bleConnection.profile(OTA_SERVICE_UUID) { service ->
-            // Log negotiated MTU for diagnostics
-            val maxLen = bleConnection.maximumWriteValueLength(BleWriteType.WITHOUT_RESPONSE)
-            Logger.i { "BLE OTA: Service ready. Max write value length: $maxLen bytes" }
+    private suspend fun prepareOtaProfile() {
+        try {
+            bleConnection.profile(OTA_SERVICE_UUID) { service ->
+                // Log negotiated MTU for diagnostics
+                val maxLen = bleConnection.maximumWriteValueLength(BleWriteType.WITHOUT_RESPONSE)
+                Logger.i { "BLE OTA: Service ready. Max write value length: $maxLen bytes" }
 
-            // Collect responses. onSubscription fires when the CCCD write completes — a precise readiness
-            // signal; the settle below is a conservative cushion.
-            val subscribed = CompletableDeferred<Unit>()
-            service
-                .observe(txChar) {
-                    Logger.d { "BLE OTA: TX characteristic subscribed" }
-                    subscribed.complete(Unit)
-                }
-                .onEach { notifyBytes ->
-                    try {
-                        val response = notifyBytes.decodeToString()
-                        Logger.d { "BLE OTA: Received response: $response" }
-                        responseChannel.trySend(response)
-                    } catch (@Suppress("TooGenericExceptionCaught") e: Exception) {
-                        Logger.e(e) { "BLE OTA: Failed to decode response bytes" }
+                // Collect responses. onSubscription fires when the CCCD write completes — a precise readiness
+                // signal; the settle below is a conservative cushion.
+                val subscribed = CompletableDeferred<Unit>()
+                service
+                    .observe(txChar) {
+                        Logger.d { "BLE OTA: TX characteristic subscribed" }
+                        subscribed.complete(Unit)
                     }
-                }
-                .catch { e ->
-                    if (!subscribed.isCompleted) subscribed.completeExceptionally(e)
-                    Logger.e(e) { "BLE OTA: Error in TX characteristic subscription" }
-                }
-                .launchIn(this)
+                    .onEach { notifyBytes ->
+                        try {
+                            val response = notifyBytes.decodeToString()
+                            Logger.d { "BLE OTA: Received response: $response" }
+                            responseChannel.trySend(response)
+                        } catch (@Suppress("TooGenericExceptionCaught") e: Exception) {
+                            Logger.e(e) { "BLE OTA: Failed to decode response bytes" }
+                        }
+                    }
+                    .catch { e ->
+                        if (!subscribed.isCompleted) subscribed.completeExceptionally(e)
+                        Logger.e(e) { "BLE OTA: Error in TX characteristic subscription" }
+                    }
+                    .launchIn(this)
 
-            subscribed.await()
-            // Conservative settle after CCCD confirmation before issuing commands.
-            delay(SUBSCRIPTION_SETTLE)
-            Logger.i { "BLE OTA: Service discovered and ready" }
+                subscribed.await()
+                // Conservative settle after CCCD confirmation before issuing commands.
+                delay(SUBSCRIPTION_SETTLE)
+                Logger.i { "BLE OTA: Service discovered and ready" }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (@Suppress("TooGenericExceptionCaught") e: Exception) {
+            Logger.w(e) { "BLE OTA: Connected over GATT but OTA service was not ready" }
+            throw OtaProtocolException.ConnectionFailed(
+                "Connected over BLE, but the OTA service was not available yet",
+                e,
+            )
         }
     }
 
@@ -263,10 +295,20 @@ class BleOtaTransport(
             OtaProtocolException.TransferFailed("Transfer failed: ${error.message}")
         }
 
+    /**
+     * Masks a BLE MAC address for logging: preserves the OUI (first 3 octets) and last octet for diagnostics while
+     * hiding the unique middle portion. Privacy rule: never log raw PII.
+     */
+    private fun maskMac(address: String): String =
+        address.takeIf { it.length >= 17 }?.let { "${it.substring(0, 8)}:**:**:**:${it.substring(15)}" } ?: address
+
     override suspend fun close() {
-        bleConnection.disconnect()
-        isConnected = false
-        transportScope.cancel()
+        try {
+            bleConnection.disconnect()
+        } finally {
+            isConnected = false
+            transportScope.cancel()
+        }
     }
 
     private suspend fun sendCommand(command: OtaCommand): Int {

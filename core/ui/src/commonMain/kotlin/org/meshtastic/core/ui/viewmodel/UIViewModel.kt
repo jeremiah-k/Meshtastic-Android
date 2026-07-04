@@ -256,6 +256,12 @@ class UIViewModel(
         serviceRepository.clientNotification
             .filterNotNull()
             .onEach { notification ->
+                // OTA status notifications (e.g. "Rebooting to WiFi OTA") are consumed by the firmware update
+                // preflight gate — don't show a popup dialog for them.
+                val msg = notification.message.trim()
+                if (msg.contains("OTA") && (msg.startsWith("Rebooting to") || msg.startsWith("Cannot start OTA"))) {
+                    return@onEach
+                }
                 val isCompromised = notification.low_entropy_key != null || notification.duplicated_public_key != null
                 showAlert(
                     titleRes = Res.string.client_notification,

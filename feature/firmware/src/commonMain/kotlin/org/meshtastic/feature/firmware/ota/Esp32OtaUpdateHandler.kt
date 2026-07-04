@@ -18,6 +18,7 @@ package org.meshtastic.feature.firmware.ota
 
 import co.touchlab.kermit.Logger
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
@@ -45,6 +46,7 @@ import org.meshtastic.core.resources.firmware_update_not_found_in_release
 import org.meshtastic.core.resources.firmware_update_ota_failed
 import org.meshtastic.core.resources.firmware_update_ota_timeout
 import org.meshtastic.core.resources.firmware_update_ota_unsupported_reason
+import org.meshtastic.core.resources.firmware_update_searching_device
 import org.meshtastic.core.resources.firmware_update_starting_ota
 import org.meshtastic.core.resources.firmware_update_uploading
 import org.meshtastic.core.resources.firmware_update_waiting_reboot
@@ -70,6 +72,9 @@ private const val OTA_PREFLIGHT_TIMEOUT_MS = 5000L
 
 // Time to wait for BLE GATT to fully release after disconnecting mesh service
 private const val GATT_RELEASE_DELAY_MS = 1000L
+
+// Wi-Fi OTA loader needs time to reboot, rejoin the network, and start its TCP OTA server after confirmation.
+private const val WIFI_OTA_READINESS_DELAY_MS = 8_000L
 
 // Firmware emits one of these human-readable messages via meshtastic.ClientNotification before rebooting.
 // "Rebooting to BLE OTA" / "Rebooting to WiFi OTA" → success. Any other OTA-containing message → rejection
@@ -104,6 +109,12 @@ class Esp32OtaUpdateHandler(
 ) : FirmwareUpdateHandler {
 
     internal var otaPreflightTimeoutMs: Long = OTA_PREFLIGHT_TIMEOUT_MS
+    internal var otaTransportRetryDelayMs: Long = RETRY_DELAY
+    internal var wifiOtaReadinessDelayMs: Long = WIFI_OTA_READINESS_DELAY_MS
+    internal var gattReleaseDelayMs: Long = GATT_RELEASE_DELAY_MS
+    internal var delayFn: suspend (Long) -> Unit = { delay(it) }
+    internal var bleTransportFactoryOverride: ((String) -> UnifiedOtaProtocol)? = null
+    internal var wifiTransportFactoryOverride: ((String) -> UnifiedOtaProtocol)? = null
 
     /** Entry point for FirmwareUpdateHandler interface. Routes to BLE (target is a MAC) or WiFi (anything else). */
     override suspend fun startUpdate(
@@ -129,9 +140,13 @@ class Esp32OtaUpdateHandler(
         hardware = hardware,
         updateState = updateState,
         firmwareUri = firmwareUri,
-        transportFactory = { BleOtaTransport(bleScanner, bleConnectionFactory, address, dispatchers.default) },
+        transportFactory = {
+            bleTransportFactoryOverride?.invoke(address)
+                ?: BleOtaTransport(bleScanner, bleConnectionFactory, address, dispatchers.default)
+        },
         rebootMode = REBOOT_MODE_BLE,
         connectionAttempts = 5,
+        postConfirmReadinessDelayMs = 0L,
     )
 
     private suspend fun startWifiUpdate(
@@ -145,9 +160,10 @@ class Esp32OtaUpdateHandler(
         hardware = hardware,
         updateState = updateState,
         firmwareUri = firmwareUri,
-        transportFactory = { WifiOtaTransport(deviceIp, WifiOtaTransport.DEFAULT_PORT) },
+        transportFactory = { wifiTransportFactoryOverride?.invoke(deviceIp) ?: WifiOtaTransport(deviceIp) },
         rebootMode = REBOOT_MODE_WIFI,
         connectionAttempts = 10,
+        postConfirmReadinessDelayMs = wifiOtaReadinessDelayMs,
     )
 
     private suspend fun performUpdate(
@@ -158,6 +174,7 @@ class Esp32OtaUpdateHandler(
         transportFactory: () -> UnifiedOtaProtocol,
         rebootMode: Int,
         connectionAttempts: Int,
+        postConfirmReadinessDelayMs: Long,
     ): FirmwareArtifact? {
         var cleanupArtifact: FirmwareArtifact? = null
         return try {
@@ -194,8 +211,14 @@ class Esp32OtaUpdateHandler(
                     return@withContext cleanupArtifact
                 }
 
-                val transport = transportFactory()
-                connectToDevice(transport, connectionAttempts, updateState)
+                val transport =
+                    connectToDevice(
+                        transportFactory = transportFactory,
+                        attempts = connectionAttempts,
+                        rebootMode = rebootMode,
+                        postConfirmReadinessDelayMs = postConfirmReadinessDelayMs,
+                        updateState = updateState,
+                    )
 
                 try {
                     executeOtaSequence(transport, firmwareBytes, sha256Hash, rebootMode, updateState)
@@ -296,30 +319,123 @@ class Esp32OtaUpdateHandler(
         }
     }
 
+    @Suppress("ThrowsCount") // CancellationException rethrow + two post-confirm failure paths
     private suspend fun connectToDevice(
-        transport: UnifiedOtaProtocol,
+        transportFactory: () -> UnifiedOtaProtocol,
         attempts: Int,
+        rebootMode: Int,
+        postConfirmReadinessDelayMs: Long,
         updateState: (FirmwareUpdateState) -> Unit,
-    ) {
+    ): UnifiedOtaProtocol {
         // Show "waiting for reboot" state before first connection attempt
         updateState(
             FirmwareUpdateState.Processing(ProgressState(UiText.Resource(Res.string.firmware_update_waiting_reboot))),
         )
 
-        retryWithDelay(
-            attempts = attempts,
-            retryDelayMillis = RETRY_DELAY,
-            onAttempt = { i ->
+        if (postConfirmReadinessDelayMs > 0L) {
+            Logger.i {
+                "ESP32 OTA: Waiting ${postConfirmReadinessDelayMs}ms for ${otaModeName(rebootMode)} OTA service"
+            }
+            delayFn(postConfirmReadinessDelayMs)
+        }
+
+        // In production WiFi mode the device may have picked up a different DHCP lease after rebooting into the OTA
+        // loader. Listen for the loader's UDP discovery broadcast and, if one arrives, redirect the TCP transport at
+        // the discovered IP. Skipped when a transport override is installed (tests inject fake transports).
+        val effectiveTransportFactory: () -> UnifiedOtaProtocol =
+            if (rebootMode == REBOOT_MODE_WIFI && wifiTransportFactoryOverride == null) {
                 updateState(
                     FirmwareUpdateState.Processing(
-                        ProgressState(UiText.Resource(Res.string.firmware_update_connecting_attempt, i, attempts)),
+                        ProgressState(UiText.Resource(Res.string.firmware_update_searching_device)),
                     ),
                 )
-            },
-        ) {
-            transport.connect()
+                val discoveredIp = WifiOtaDiscovery.discoverOtaDevice()
+                if (discoveredIp != null) {
+                    Logger.i { "ESP32 OTA: Using UDP-discovered OTA device IP $discoveredIp for TCP transport" }
+                    val factory: () -> UnifiedOtaProtocol = { WifiOtaTransport(discoveredIp) }
+                    factory
+                } else {
+                    Logger.i { "ESP32 OTA: No UDP discovery broadcast received; falling back to configured device IP" }
+                    transportFactory
+                }
+            } else {
+                transportFactory
+            }
+
+        var connectedTransport: UnifiedOtaProtocol? = null
+        val result =
+            retryWithDelay(
+                attempts = attempts,
+                retryDelayMillis = otaTransportRetryDelayMs,
+                onAttempt = { i ->
+                    updateState(
+                        FirmwareUpdateState.Processing(
+                            ProgressState(UiText.Resource(Res.string.firmware_update_connecting_attempt, i, attempts)),
+                        ),
+                    )
+                },
+            ) {
+                val transport = effectiveTransportFactory()
+                val connectResult =
+                    try {
+                        transport.connect()
+                    } catch (e: CancellationException) {
+                        closeFailedTransport(transport)
+                        throw e
+                    } catch (@Suppress("TooGenericExceptionCaught") e: Throwable) {
+                        Result.failure(e)
+                    }
+
+                if (connectResult.isSuccess) {
+                    connectedTransport = transport
+                    connectResult
+                } else {
+                    val error = connectResult.exceptionOrNull()
+                    if (error is CancellationException) {
+                        closeFailedTransport(transport)
+                        throw error
+                    }
+                    Logger.w(error) {
+                        "ESP32 OTA: ${otaModeName(
+                            rebootMode,
+                        )} connection attempt failed; closing transport before retry"
+                    }
+                    closeFailedTransport(transport)
+                    Result.failure(error ?: OtaProtocolException.ConnectionFailed("Connection attempt failed"))
+                }
+            }
+
+        result.getOrElse { cause -> throw postConfirmConnectionFailed(rebootMode, attempts, cause) }
+        return connectedTransport ?: throw postConfirmConnectionFailed(rebootMode, attempts, null)
+    }
+
+    private suspend fun closeFailedTransport(transport: UnifiedOtaProtocol) {
+        withContext(NonCancellable) {
+            try {
+                transport.close()
+            } catch (@Suppress("TooGenericExceptionCaught") e: Throwable) {
+                Logger.w(e) { "ESP32 OTA: Failed to close failed transport attempt" }
+            }
         }
-            .getOrThrow()
+    }
+
+    private fun postConfirmConnectionFailed(
+        rebootMode: Int,
+        attempts: Int,
+        cause: Throwable?,
+    ): OtaProtocolException.ConnectionFailed {
+        val modeName = otaModeName(rebootMode)
+        return OtaProtocolException.ConnectionFailed(
+            "Device confirmed $modeName OTA mode, but the OTA service was not reachable after $attempts attempts. " +
+                connectionRecoveryHint(rebootMode),
+            cause,
+        )
+    }
+
+    private fun connectionRecoveryHint(rebootMode: Int): String = when (rebootMode) {
+        REBOOT_MODE_WIFI -> "Make sure the phone and device are on the same network and try again."
+        REBOOT_MODE_BLE -> "Keep the device nearby and try again."
+        else -> "Try again."
     }
 
     @Suppress("LongMethod")
@@ -415,7 +531,7 @@ class Esp32OtaUpdateHandler(
                 Logger.i { "ESP32 OTA: Preflight confirmed; releasing mesh transport for OTA" }
                 disconnectMeshService()
                 // Give BLE stack time to fully release the GATT connection
-                delay(GATT_RELEASE_DELAY_MS)
+                delayFn(gattReleaseDelayMs)
                 preflight
             }
 
