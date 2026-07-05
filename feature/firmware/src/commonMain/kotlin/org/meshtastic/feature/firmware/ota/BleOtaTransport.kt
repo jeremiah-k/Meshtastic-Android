@@ -17,7 +17,6 @@
 package org.meshtastic.feature.firmware.ota
 
 import co.touchlab.kermit.Logger
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
@@ -112,14 +111,14 @@ class BleOtaTransport(
             val maxLen = bleConnection.maximumWriteValueLength(BleWriteType.WITHOUT_RESPONSE)
             Logger.i { "BLE OTA: Service ready. Max write value length: $maxLen bytes" }
 
-            // Collect responses. onSubscription fires when the CCCD write completes — a precise readiness
-            // signal; the settle below is a conservative cushion.
-            val subscribed = CompletableDeferred<Unit>()
+            // Collect notification responses. Kable writes the CCCD descriptor as part of flow collection
+            // startup; the settle delay below gives that write time to complete before we issue OTA commands.
+            // We intentionally do NOT gate on the onSubscription callback — some OTA loaders' GATT servers
+            // don't reliably ack the CCCD write, which would cause onSubscription to never fire and the
+            // previous CompletableDeferred-based gate to hang until the profile timeout. The request-response
+            // retry loop in the OTA protocol handles any command that arrives before CCCD is fully enabled.
             service
-                .observe(txChar) {
-                    Logger.d { "BLE OTA: TX characteristic subscribed" }
-                    subscribed.complete(Unit)
-                }
+                .observe(txChar)
                 .onEach { notifyBytes ->
                     try {
                         val response = notifyBytes.decodeToString()
@@ -130,13 +129,12 @@ class BleOtaTransport(
                     }
                 }
                 .catch { e ->
-                    if (!subscribed.isCompleted) subscribed.completeExceptionally(e)
-                    Logger.e(e) { "BLE OTA: Error in TX characteristic subscription" }
+                    Logger.e(e) { "BLE OTA: Error in TX characteristic notification flow" }
+                    responseChannel.close(e)
                 }
                 .launchIn(this)
 
-            subscribed.await()
-            // Conservative settle after CCCD confirmation before issuing commands.
+            // Give the CCCD write time to complete before issuing OTA commands.
             delay(SUBSCRIPTION_SETTLE)
             Logger.i { "BLE OTA: Service discovered and ready" }
         }
