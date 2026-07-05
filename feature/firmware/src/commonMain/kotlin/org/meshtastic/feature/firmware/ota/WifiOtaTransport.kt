@@ -70,6 +70,7 @@ class WifiOtaTransport(private val deviceIpAddress: String, private val port: In
                 } catch (e: TimeoutCancellationException) {
                     throw OtaProtocolException.ConnectionFailed(
                         "TCP connect to $deviceIpAddress:$port timed out after ${CONNECTION_TIMEOUT_MS}ms",
+                        e,
                     )
                 }
             socket = tcpSocket
@@ -206,7 +207,7 @@ class WifiOtaTransport(private val deviceIpAddress: String, private val port: In
             response
         }
     } catch (e: TimeoutCancellationException) {
-        throw OtaProtocolException.ConnectionFailed("Timed out waiting for OTA response after ${timeoutMs}ms")
+        throw OtaProtocolException.ConnectionFailed("Timed out waiting for OTA response after ${timeoutMs}ms", e)
     }
 
     companion object {

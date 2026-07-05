@@ -106,38 +106,63 @@ class Esp32OtaUpdateHandlerTest {
     private fun runSideEffect(block: suspend CoroutineScope.() -> Unit): Job =
         CoroutineScope(Dispatchers.Default).launch { block() }
 
-    // ── Confirmed ──────────────────────────────────────────────────────────
-
-    @Test
-    fun `Confirmed preflight releases the mesh transport`() = runBlocking {
+    /**
+     * Shared fixture builder for preflight tests. Schedules a sibling coroutine that emits [confirmationMessage] as a
+     * firmware ClientNotification after [CONFIRMATION_DELAY_MS]; pass `confirmationMessage = null` (e.g. Timeout test)
+     * to skip the emitter entirely.
+     */
+    private fun runPreflightTest(
+        target: String = BLE_TARGET,
+        confirmationMessage: String? = BLE_CONFIRMATION,
+        configure: Esp32OtaUpdateHandler.() -> Unit = {},
+        runUpdate: suspend PreflightFixture.() -> Unit = {
+            handler.startUpdate(release, hardware, target, states::add, firmwareUri)
+        },
+        assertions: PreflightFixture.() -> Unit,
+    ) = runBlocking {
         val serviceRepository = FakeServiceRepository()
         val radioController = FakeRadioController()
         val nodeRepository = newNodeRepository()
-        val handler = makeHandler(serviceRepository, radioController, nodeRepository, newFileHandler())
+        val handler = makeHandler(serviceRepository, radioController, nodeRepository, newFileHandler()).apply(configure)
         val states = mutableListOf<FirmwareUpdateState>()
+        val fixture = PreflightFixture(handler = handler, radioController = radioController, states = states)
 
-        // Simulate the firmware emitting its "Rebooting to BLE OTA" confirmation shortly after the trigger fires.
-        val emitter = runSideEffect {
-            delay(50)
-            serviceRepository.setClientNotification(ClientNotification(message = "Rebooting to BLE OTA"))
-        }
+        val emitter =
+            confirmationMessage?.let { msg ->
+                runSideEffect {
+                    delay(CONFIRMATION_DELAY_MS)
+                    serviceRepository.setClientNotification(ClientNotification(message = msg))
+                }
+            }
 
         try {
-            // Bound the call: we only need to observe the preflight side effect. The post-preflight BLE transport
-            // phase would otherwise burn ~30 s of real wall-clock time on retry/delay loops with mocked BLE deps.
-            withTimeoutOrNull(3000L) { handler.startUpdate(release, hardware, BLE_TARGET, states::add, firmwareUri) }
+            fixture.runUpdate()
         } finally {
-            emitter.cancel()
+            emitter?.cancel()
         }
 
+        fixture.assertions()
+    }
+
+    // ── Confirmed ──────────────────────────────────────────────────────────
+
+    @Test
+    fun `Confirmed preflight releases the mesh transport`() = runPreflightTest(
+        target = BLE_TARGET,
+        confirmationMessage = BLE_CONFIRMATION,
+        runUpdate = {
+            // Bound the call: we only need to observe the preflight side effect. The post-preflight BLE transport
+            // phase would otherwise burn ~30 s of real wall-clock time on retry/delay loops with mocked BLE deps.
+            withTimeoutOrNull(3000L) {
+                handler.startUpdate(release, hardware, BLE_TARGET, states::add, firmwareUri)
+            }
+        },
+    ) {
         assertEquals("n", radioController.lastSetDeviceAddress, "Confirmed preflight must disconnect mesh service")
     }
 
     @Test
-    fun `Confirmed BLE preflight retries with fresh transport after connection failure`() = runBlocking {
-        val serviceRepository = FakeServiceRepository()
-        val radioController = FakeRadioController()
-        val nodeRepository = newNodeRepository()
+    fun `Confirmed BLE preflight retries with fresh transport after connection failure`() {
         val events = mutableListOf<String>()
         val transports =
             ArrayDeque<FakeOtaTransport>().apply {
@@ -150,73 +175,128 @@ class Esp32OtaUpdateHandlerTest {
                 )
                 add(FakeOtaTransport(name = "second", events = events))
             }
-        val handler =
-            makeHandler(serviceRepository, radioController, nodeRepository, newFileHandler()).apply {
+        runPreflightTest(
+            target = BLE_TARGET,
+            confirmationMessage = BLE_CONFIRMATION,
+            configure = {
                 gattReleaseDelayMs = 0L
                 otaTransportRetryDelayMs = 0L
                 bleTransportFactoryOverride = { transports.removeFirst() }
-            }
-        val states = mutableListOf<FirmwareUpdateState>()
-
-        val emitter = runSideEffect {
-            delay(50)
-            serviceRepository.setClientNotification(ClientNotification(message = "Rebooting to BLE OTA"))
+            },
+        ) {
+            assertEquals("n", radioController.lastSetDeviceAddress, "Confirmed preflight must disconnect mesh service")
+            assertTrue(events.contains("close:first"), "Failed transport must be closed before retry")
+            assertTrue(events.contains("connect:second"), "Retry must create and connect a fresh transport")
+            assertTrue(events.indexOf("close:first") < events.indexOf("connect:second"))
+            assertTrue(events.contains("close:second"), "Successful transport must be closed after transfer")
+            assertTrue(states.any { it is FirmwareUpdateState.Success }, "Later fresh transport should complete update")
         }
-
-        try {
-            handler.startUpdate(release, hardware, BLE_TARGET, states::add, firmwareUri)
-        } finally {
-            emitter.cancel()
-        }
-
-        assertEquals("n", radioController.lastSetDeviceAddress, "Confirmed preflight must disconnect mesh service")
-        assertTrue(events.contains("close:first"), "Failed transport must be closed before retry")
-        assertTrue(events.contains("connect:second"), "Retry must create and connect a fresh transport")
-        assertTrue(events.indexOf("close:first") < events.indexOf("connect:second"))
-        assertTrue(events.contains("close:second"), "Successful transport must be closed after transfer")
-        assertTrue(states.any { it is FirmwareUpdateState.Success }, "Later fresh transport should complete update")
     }
 
     @Test
-    fun `Confirmed WiFi preflight waits for OTA service readiness before connecting`() = runBlocking {
-        val serviceRepository = FakeServiceRepository()
-        val radioController = FakeRadioController()
-        val nodeRepository = newNodeRepository()
+    fun `Confirmed WiFi preflight waits for OTA service readiness before connecting`() {
         val events = mutableListOf<String>()
-        val handler =
-            makeHandler(serviceRepository, radioController, nodeRepository, newFileHandler()).apply {
+        runPreflightTest(
+            target = WIFI_TARGET,
+            confirmationMessage = WIFI_CONFIRMATION,
+            configure = {
                 gattReleaseDelayMs = 0L
                 wifiOtaReadinessDelayMs = TEST_WIFI_READINESS_DELAY_MS
                 delayFn = { delayMs -> events += "delay:$delayMs" }
                 wifiTransportFactoryOverride = { FakeOtaTransport(name = "wifi", events = events) }
-            }
-        val states = mutableListOf<FirmwareUpdateState>()
-
-        val emitter = runSideEffect {
-            delay(50)
-            serviceRepository.setClientNotification(ClientNotification(message = "Rebooting to WiFi OTA"))
+            },
+        ) {
+            assertTrue(
+                events.contains("delay:$TEST_WIFI_READINESS_DELAY_MS"),
+                "WiFi post-confirm readiness delay must run",
+            )
+            assertTrue(events.contains("connect:wifi"), "WiFi transport must connect after readiness delay")
+            assertTrue(events.indexOf("delay:$TEST_WIFI_READINESS_DELAY_MS") < events.indexOf("connect:wifi"))
+            assertTrue(
+                states.any { it is FirmwareUpdateState.Success },
+                "WiFi transport should connect after readiness delay",
+            )
         }
-
-        try {
-            handler.startUpdate(release, hardware, WIFI_TARGET, states::add, firmwareUri)
-        } finally {
-            emitter.cancel()
-        }
-
-        assertTrue(events.contains("delay:$TEST_WIFI_READINESS_DELAY_MS"), "WiFi post-confirm readiness delay must run")
-        assertTrue(events.contains("connect:wifi"), "WiFi transport must connect after readiness delay")
-        assertTrue(events.indexOf("delay:$TEST_WIFI_READINESS_DELAY_MS") < events.indexOf("connect:wifi"))
-        assertTrue(
-            states.any { it is FirmwareUpdateState.Success },
-            "WiFi transport should connect after readiness delay",
-        )
     }
 
     @Test
-    fun `Confirmed WiFi preflight retries with fresh transport after connection failure`() = runBlocking {
-        val serviceRepository = FakeServiceRepository()
-        val radioController = FakeRadioController()
-        val nodeRepository = newNodeRepository()
+    fun `Confirmed WiFi preflight uses UDP discovered address before connecting`() {
+        val events = mutableListOf<String>()
+        runPreflightTest(
+            target = WIFI_TARGET,
+            confirmationMessage = WIFI_CONFIRMATION,
+            configure = {
+                gattReleaseDelayMs = 0L
+                wifiOtaReadinessDelayMs = TEST_WIFI_READINESS_DELAY_MS
+                delayFn = { delayMs -> events += "delay:$delayMs" }
+                wifiOtaDiscoveryOverride = {
+                    events += "discover"
+                    DISCOVERED_WIFI_TARGET
+                }
+                wifiTransportFactoryOverride = { target ->
+                    events += "factory:$target"
+                    FakeOtaTransport(name = target, events = events)
+                }
+            },
+        ) {
+            assertTrue(events.contains("discover"), "WiFi OTA should listen for the loader's DHCP address")
+            assertTrue(
+                events.contains("factory:$DISCOVERED_WIFI_TARGET"),
+                "Discovered DHCP address must replace the pre-reboot address",
+            )
+            assertTrue(
+                events.contains("connect:$DISCOVERED_WIFI_TARGET"),
+                "WiFi transport must connect to the discovered address",
+            )
+            assertTrue(
+                events.none { it == "factory:$WIFI_TARGET" || it == "connect:$WIFI_TARGET" },
+                "Configured pre-reboot address should not be used after discovery succeeds",
+            )
+            assertTrue(
+                events.none { it == "delay:$TEST_WIFI_READINESS_DELAY_MS" },
+                "Discovery timeout window counts as the post-confirm readiness wait",
+            )
+            assertTrue(states.any { it is FirmwareUpdateState.Success })
+        }
+    }
+
+    @Test
+    fun `Confirmed WiFi preflight falls back to configured address when UDP discovery misses`() {
+        val events = mutableListOf<String>()
+        runPreflightTest(
+            target = WIFI_TARGET,
+            confirmationMessage = WIFI_CONFIRMATION,
+            configure = {
+                gattReleaseDelayMs = 0L
+                wifiOtaReadinessDelayMs = TEST_WIFI_READINESS_DELAY_MS
+                delayFn = { delayMs -> events += "delay:$delayMs" }
+                wifiOtaDiscoveryOverride = {
+                    events += "discover"
+                    null
+                }
+                wifiTransportFactoryOverride = { target ->
+                    events += "factory:$target"
+                    FakeOtaTransport(name = target, events = events)
+                }
+            },
+        ) {
+            assertTrue(events.contains("discover"), "WiFi OTA should attempt UDP discovery before fixed-IP fallback")
+            assertTrue(events.contains("factory:$WIFI_TARGET"), "Missing discovery must fall back to configured target")
+            assertTrue(events.contains("connect:$WIFI_TARGET"), "Fallback transport must still connect")
+            assertTrue(
+                events.contains("delay:$TEST_WIFI_READINESS_DELAY_MS"),
+                "Discovery miss must still apply the post-confirm readiness margin",
+            )
+            assertTrue(
+                events.indexOf("delay:$TEST_WIFI_READINESS_DELAY_MS") < events.indexOf("connect:$WIFI_TARGET"),
+                "Readiness delay must run before connecting",
+            )
+            assertTrue(states.any { it is FirmwareUpdateState.Success })
+        }
+    }
+
+    @Test
+    fun `Confirmed WiFi preflight retries with fresh transport after connection failure`() {
         val events = mutableListOf<String>()
         val transports =
             ArrayDeque<FakeOtaTransport>().apply {
@@ -229,72 +309,49 @@ class Esp32OtaUpdateHandlerTest {
                 )
                 add(FakeOtaTransport(name = "wifi-second", events = events))
             }
-        val handler =
-            makeHandler(serviceRepository, radioController, nodeRepository, newFileHandler()).apply {
+        runPreflightTest(
+            target = WIFI_TARGET,
+            confirmationMessage = WIFI_CONFIRMATION,
+            configure = {
                 gattReleaseDelayMs = 0L
                 wifiOtaReadinessDelayMs = 0L
                 otaTransportRetryDelayMs = 0L
                 wifiTransportFactoryOverride = { transports.removeFirst() }
-            }
-        val states = mutableListOf<FirmwareUpdateState>()
-
-        val emitter = runSideEffect {
-            delay(50)
-            serviceRepository.setClientNotification(ClientNotification(message = "Rebooting to WiFi OTA"))
+            },
+        ) {
+            assertEquals("n", radioController.lastSetDeviceAddress, "Confirmed preflight must disconnect mesh service")
+            assertTrue(events.contains("close:wifi-first"), "Failed WiFi transport must be closed before retry")
+            assertTrue(events.contains("connect:wifi-second"), "WiFi retry must create and connect a fresh transport")
+            assertTrue(events.indexOf("close:wifi-first") < events.indexOf("connect:wifi-second"))
+            assertTrue(events.contains("close:wifi-second"), "Successful WiFi transport must be closed after transfer")
+            assertTrue(
+                states.any { it is FirmwareUpdateState.Success },
+                "Later fresh WiFi transport should complete update",
+            )
         }
-
-        try {
-            handler.startUpdate(release, hardware, WIFI_TARGET, states::add, firmwareUri)
-        } finally {
-            emitter.cancel()
-        }
-
-        assertEquals("n", radioController.lastSetDeviceAddress, "Confirmed preflight must disconnect mesh service")
-        assertTrue(events.contains("close:wifi-first"), "Failed WiFi transport must be closed before retry")
-        assertTrue(events.contains("connect:wifi-second"), "WiFi retry must create and connect a fresh transport")
-        assertTrue(events.indexOf("close:wifi-first") < events.indexOf("connect:wifi-second"))
-        assertTrue(events.contains("close:wifi-second"), "Successful WiFi transport must be closed after transfer")
-        assertTrue(
-            states.any { it is FirmwareUpdateState.Success },
-            "Later fresh WiFi transport should complete update",
-        )
     }
 
     @Test
-    fun `Confirmed WiFi preflight closes failed transports and surfaces connection error after retries`() =
-        runBlocking {
-            val serviceRepository = FakeServiceRepository()
-            val radioController = FakeRadioController()
-            val nodeRepository = newNodeRepository()
-            val events = mutableListOf<String>()
-            var attempt = 0
-            val handler =
-                makeHandler(serviceRepository, radioController, nodeRepository, newFileHandler()).apply {
-                    gattReleaseDelayMs = 0L
-                    wifiOtaReadinessDelayMs = 0L
-                    otaTransportRetryDelayMs = 0L
-                    wifiTransportFactoryOverride = {
-                        attempt += 1
-                        FakeOtaTransport(
-                            name = "wifi-$attempt",
-                            events = events,
-                            connectResult = Result.failure(OtaProtocolException.ConnectionFailed("Connection refused")),
-                        )
-                    }
+    fun `Confirmed WiFi preflight closes failed transports and surfaces connection error after retries`() {
+        val events = mutableListOf<String>()
+        var attempt = 0
+        runPreflightTest(
+            target = WIFI_TARGET,
+            confirmationMessage = WIFI_CONFIRMATION,
+            configure = {
+                gattReleaseDelayMs = 0L
+                wifiOtaReadinessDelayMs = 0L
+                otaTransportRetryDelayMs = 0L
+                wifiTransportFactoryOverride = {
+                    attempt += 1
+                    FakeOtaTransport(
+                        name = "wifi-$attempt",
+                        events = events,
+                        connectResult = Result.failure(OtaProtocolException.ConnectionFailed("Connection refused")),
+                    )
                 }
-            val states = mutableListOf<FirmwareUpdateState>()
-
-            val emitter = runSideEffect {
-                delay(50)
-                serviceRepository.setClientNotification(ClientNotification(message = "Rebooting to WiFi OTA"))
-            }
-
-            try {
-                handler.startUpdate(release, hardware, WIFI_TARGET, states::add, firmwareUri)
-            } finally {
-                emitter.cancel()
-            }
-
+            },
+        ) {
             assertEquals("n", radioController.lastSetDeviceAddress, "Confirmed preflight must disconnect mesh service")
             assertEquals(WIFI_CONNECT_ATTEMPTS, attempt, "WiFi should use the full post-confirm retry budget")
             repeat(WIFI_CONNECT_ATTEMPTS) { index ->
@@ -307,31 +364,49 @@ class Esp32OtaUpdateHandlerTest {
             assertIs<FirmwareUpdateState.Error>(states.lastOrNull())
             Unit
         }
+    }
+
+    @Test
+    fun `Confirmed BLE preflight closes failed transports and surfaces connection error after retries`() {
+        val events = mutableListOf<String>()
+        var attempt = 0
+        runPreflightTest(
+            target = BLE_TARGET,
+            confirmationMessage = BLE_CONFIRMATION,
+            configure = {
+                gattReleaseDelayMs = 0L
+                otaTransportRetryDelayMs = 0L
+                bleTransportFactoryOverride = {
+                    attempt += 1
+                    FakeOtaTransport(
+                        name = "ble-$attempt",
+                        events = events,
+                        connectResult = Result.failure(OtaProtocolException.ConnectionFailed("GATT unreachable")),
+                    )
+                }
+            },
+        ) {
+            assertEquals("n", radioController.lastSetDeviceAddress, "Confirmed preflight must disconnect mesh service")
+            assertEquals(BLE_CONNECT_ATTEMPTS, attempt, "BLE should use the full post-confirm retry budget")
+            repeat(BLE_CONNECT_ATTEMPTS) { index ->
+                val name = "ble-${index + 1}"
+                assertTrue(events.contains("connect:$name"), "Attempt ${index + 1} must connect a fresh transport")
+                assertTrue(events.contains("close:$name"), "Attempt ${index + 1} must close its failed transport")
+                assertTrue(events.indexOf("connect:$name") < events.indexOf("close:$name"))
+            }
+            assertTrue(events.none { it.startsWith("start:") || it.startsWith("stream:") })
+            assertIs<FirmwareUpdateState.Error>(states.lastOrNull())
+            Unit
+        }
+    }
 
     // ── Rejected ───────────────────────────────────────────────────────────
 
     @Test
-    fun `Rejected preflight preserves mesh transport and surfaces Error`() = runBlocking {
-        val serviceRepository = FakeServiceRepository()
-        val radioController = FakeRadioController()
-        val nodeRepository = newNodeRepository()
-        val handler = makeHandler(serviceRepository, radioController, nodeRepository, newFileHandler())
-        val states = mutableListOf<FirmwareUpdateState>()
-
-        val emitter = runSideEffect {
-            delay(50)
-            // OTA-keyed message that is NOT the canonical "Rebooting to <mode> OTA" success prefix → Rejected.
-            serviceRepository.setClientNotification(
-                ClientNotification(message = "Cannot start OTA: OTA Loader partition not found."),
-            )
-        }
-
-        try {
-            handler.startUpdate(release, hardware, BLE_TARGET, states::add, firmwareUri)
-        } finally {
-            emitter.cancel()
-        }
-
+    fun `Rejected preflight preserves mesh transport and surfaces Error`() = runPreflightTest(
+        // OTA-keyed message that is NOT the canonical "Rebooting to <mode> OTA" success prefix → Rejected.
+        confirmationMessage = "Cannot start OTA: OTA Loader partition not found.",
+    ) {
         assertNull(radioController.lastSetDeviceAddress, "Rejected preflight must NOT disconnect mesh service")
         assertTrue(states.any { it is FirmwareUpdateState.Error }, "Rejected preflight must emit Error state")
     }
@@ -339,19 +414,12 @@ class Esp32OtaUpdateHandlerTest {
     // ── Timeout ────────────────────────────────────────────────────────────
 
     @Test
-    fun `Timeout preflight preserves mesh transport and surfaces Error`() = runBlocking {
-        val serviceRepository = FakeServiceRepository()
-        val radioController = FakeRadioController()
-        val nodeRepository = newNodeRepository()
-        val handler =
-            makeHandler(serviceRepository, radioController, nodeRepository, newFileHandler()).apply {
-                otaPreflightTimeoutMs = 10L
-            }
-        val states = mutableListOf<FirmwareUpdateState>()
-
-        // No emitter: the firmware never responds, so the overridden preflight timeout resolves quickly.
-        handler.startUpdate(release, hardware, BLE_TARGET, states::add, firmwareUri)
-
+    fun `Timeout preflight preserves mesh transport and surfaces Error`() = runPreflightTest(
+        // No emitter (confirmationMessage = null): the firmware never responds, so the overridden short preflight
+        // timeout resolves quickly.
+        confirmationMessage = null,
+        configure = { otaPreflightTimeoutMs = 10L },
+    ) {
         assertNull(radioController.lastSetDeviceAddress, "Timeout preflight must NOT disconnect mesh service")
         val terminal = states.lastOrNull()
         assertIs<FirmwareUpdateState.Error>(terminal, "Timeout preflight must emit Error state")
@@ -364,10 +432,21 @@ class Esp32OtaUpdateHandlerTest {
         // Valid BLE MAC target so startUpdate routes through the BLE OTA preflight path.
         const val BLE_TARGET = "AA:BB:CC:DD:EE:FF"
         const val WIFI_TARGET = "192.168.1.33"
+        const val DISCOVERED_WIFI_TARGET = "192.168.1.44"
+        const val BLE_CONFIRMATION = "Rebooting to BLE OTA"
+        const val WIFI_CONFIRMATION = "Rebooting to WiFi OTA"
+        const val CONFIRMATION_DELAY_MS = 50L
+        const val BLE_CONNECT_ATTEMPTS = 5
         const val WIFI_CONNECT_ATTEMPTS = 10
         const val TEST_WIFI_READINESS_DELAY_MS = 1234L
     }
 }
+
+private data class PreflightFixture(
+    val handler: Esp32OtaUpdateHandler,
+    val radioController: FakeRadioController,
+    val states: MutableList<FirmwareUpdateState>,
+)
 
 private class FakeOtaTransport(
     private val name: String,

@@ -47,6 +47,7 @@ import org.meshtastic.core.model.TracerouteMapAvailability
 import org.meshtastic.core.model.evaluateTracerouteMapAvailability
 import org.meshtastic.core.model.service.TracerouteResponse
 import org.meshtastic.core.model.util.dispatchMeshtasticUri
+import org.meshtastic.core.model.util.isOtaStatusNotification
 import org.meshtastic.core.navigation.DeepLinkRouter
 import org.meshtastic.core.repository.EventFirmwareRepository
 import org.meshtastic.core.repository.FirmwareReleaseRepository
@@ -258,8 +259,7 @@ class UIViewModel(
             .onEach { notification ->
                 // OTA status notifications (e.g. "Rebooting to WiFi OTA") are consumed by the firmware update
                 // preflight gate — don't show a popup dialog for them.
-                val msg = notification.message.trim()
-                if (msg.contains("OTA") && (msg.startsWith("Rebooting to") || msg.startsWith("Cannot start OTA"))) {
+                if (notification.isOtaStatusNotification()) {
                     return@onEach
                 }
                 val isCompromised = notification.low_entropy_key != null || notification.duplicated_public_key != null

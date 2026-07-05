@@ -87,6 +87,11 @@ private const val OTA_KEYWORD = "OTA"
 // — keeps an IPv6 WiFi target (which also has colons) from being misrouted to the BLE path.
 private val MAC_ADDRESS_REGEX = Regex("([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}")
 
+private data class TransportFactoryResolution(
+    val factory: () -> UnifiedOtaProtocol,
+    val readinessAlreadyWaited: Boolean,
+)
+
 internal fun isBleMacAddress(target: String): Boolean = MAC_ADDRESS_REGEX.matches(target)
 
 /**
@@ -115,6 +120,7 @@ class Esp32OtaUpdateHandler(
     internal var delayFn: suspend (Long) -> Unit = { delay(it) }
     internal var bleTransportFactoryOverride: ((String) -> UnifiedOtaProtocol)? = null
     internal var wifiTransportFactoryOverride: ((String) -> UnifiedOtaProtocol)? = null
+    internal var wifiOtaDiscoveryOverride: (suspend () -> String?)? = null
 
     /** Entry point for FirmwareUpdateHandler interface. Routes to BLE (target is a MAC) or WiFi (anything else). */
     override suspend fun startUpdate(
@@ -275,6 +281,7 @@ class Esp32OtaUpdateHandler(
         // tests fall back to empty and the Downloading state still emits with a blank message.
         val downloadingMsg =
             safeCatchingAll { getStringSuspend(Res.string.firmware_update_downloading_percent, 0) }
+                .onFailure { e -> Logger.w(e) { "ESP32 OTA: Failed to resolve downloading message string" } }
                 .getOrDefault("")
                 .stripFormatArgs()
 
@@ -319,7 +326,6 @@ class Esp32OtaUpdateHandler(
         }
     }
 
-    @Suppress("ThrowsCount") // CancellationException rethrow + two post-confirm failure paths
     private suspend fun connectToDevice(
         transportFactory: () -> UnifiedOtaProtocol,
         attempts: Int,
@@ -327,41 +333,64 @@ class Esp32OtaUpdateHandler(
         postConfirmReadinessDelayMs: Long,
         updateState: (FirmwareUpdateState) -> Unit,
     ): UnifiedOtaProtocol {
-        // Show "waiting for reboot" state before first connection attempt
         updateState(
             FirmwareUpdateState.Processing(ProgressState(UiText.Resource(Res.string.firmware_update_waiting_reboot))),
         )
 
-        if (postConfirmReadinessDelayMs > 0L) {
-            Logger.i {
-                "ESP32 OTA: Waiting ${postConfirmReadinessDelayMs}ms for ${otaModeName(rebootMode)} OTA service"
-            }
-            delayFn(postConfirmReadinessDelayMs)
-        }
+        val resolution = resolvePostConfirmTransportFactory(rebootMode, transportFactory, updateState)
+        waitForPostConfirmReadiness(rebootMode, postConfirmReadinessDelayMs, resolution.readinessAlreadyWaited)
 
+        return runTransportConnectRetries(resolution.factory, attempts, rebootMode, updateState)
+    }
+
+    private suspend fun resolvePostConfirmTransportFactory(
+        rebootMode: Int,
+        transportFactory: () -> UnifiedOtaProtocol,
+        updateState: (FirmwareUpdateState) -> Unit,
+    ): TransportFactoryResolution {
         // In production WiFi mode the device may have picked up a different DHCP lease after rebooting into the OTA
         // loader. Listen for the loader's UDP discovery broadcast and, if one arrives, redirect the TCP transport at
-        // the discovered IP. Skipped when a transport override is installed (tests inject fake transports).
-        val effectiveTransportFactory: () -> UnifiedOtaProtocol =
-            if (rebootMode == REBOOT_MODE_WIFI && wifiTransportFactoryOverride == null) {
-                updateState(
-                    FirmwareUpdateState.Processing(
-                        ProgressState(UiText.Resource(Res.string.firmware_update_searching_device)),
-                    ),
-                )
-                val discoveredIp = WifiOtaDiscovery.discoverOtaDevice()
-                if (discoveredIp != null) {
-                    Logger.i { "ESP32 OTA: Using UDP-discovered OTA device IP $discoveredIp for TCP transport" }
-                    val factory: () -> UnifiedOtaProtocol = { WifiOtaTransport(discoveredIp) }
-                    factory
-                } else {
-                    Logger.i { "ESP32 OTA: No UDP discovery broadcast received; falling back to configured device IP" }
-                    transportFactory
+        // the discovered IP. Skipped for transport-only test overrides unless a discovery override is installed.
+        if (
+            rebootMode != REBOOT_MODE_WIFI || (wifiTransportFactoryOverride != null && wifiOtaDiscoveryOverride == null)
+        ) {
+            return TransportFactoryResolution(factory = transportFactory, readinessAlreadyWaited = false)
+        }
+
+        updateState(
+            FirmwareUpdateState.Processing(ProgressState(UiText.Resource(Res.string.firmware_update_searching_device))),
+        )
+        val discoverOtaDevice = wifiOtaDiscoveryOverride ?: { WifiOtaDiscovery.discoverOtaDevice() }
+        val discoveredIp = discoverOtaDevice()
+        val factory: () -> UnifiedOtaProtocol =
+            if (discoveredIp != null) {
+                val discoveredFactory: () -> UnifiedOtaProtocol = {
+                    wifiTransportFactoryOverride?.invoke(discoveredIp) ?: WifiOtaTransport(discoveredIp)
                 }
+                Logger.i { "ESP32 OTA: Using UDP-discovered OTA device for TCP transport" }
+                discoveredFactory
             } else {
+                Logger.i { "ESP32 OTA: No UDP discovery broadcast received; falling back to configured device IP" }
                 transportFactory
             }
+        // Only treat the readiness window as already-spent when discovery actually resolved a device — its 15 s
+        // listening window covers the loader's reboot+DHCP+TCP-server bring-up. On a null result (timeout / bind
+        // failure) the device has not yet been heard from, so the caller's 8 s readiness margin still applies.
+        return TransportFactoryResolution(factory = factory, readinessAlreadyWaited = discoveredIp != null)
+    }
 
+    private suspend fun waitForPostConfirmReadiness(rebootMode: Int, delayMs: Long, readinessAlreadyWaited: Boolean) {
+        if (delayMs <= 0L || readinessAlreadyWaited) return
+        Logger.i { "ESP32 OTA: Waiting ${delayMs}ms for ${otaModeName(rebootMode)} OTA service" }
+        delayFn(delayMs)
+    }
+
+    private suspend fun runTransportConnectRetries(
+        transportFactory: () -> UnifiedOtaProtocol,
+        attempts: Int,
+        rebootMode: Int,
+        updateState: (FirmwareUpdateState) -> Unit,
+    ): UnifiedOtaProtocol {
         var connectedTransport: UnifiedOtaProtocol? = null
         val result =
             retryWithDelay(
@@ -375,38 +404,36 @@ class Esp32OtaUpdateHandler(
                     )
                 },
             ) {
-                val transport = effectiveTransportFactory()
-                val connectResult =
-                    try {
-                        transport.connect()
-                    } catch (e: CancellationException) {
-                        closeFailedTransport(transport)
-                        throw e
-                    } catch (@Suppress("TooGenericExceptionCaught") e: Throwable) {
-                        Result.failure(e)
-                    }
-
-                if (connectResult.isSuccess) {
-                    connectedTransport = transport
-                    connectResult
-                } else {
-                    val error = connectResult.exceptionOrNull()
-                    if (error is CancellationException) {
-                        closeFailedTransport(transport)
-                        throw error
-                    }
-                    Logger.w(error) {
-                        "ESP32 OTA: ${otaModeName(
-                            rebootMode,
-                        )} connection attempt failed; closing transport before retry"
-                    }
-                    closeFailedTransport(transport)
-                    Result.failure(error ?: OtaProtocolException.ConnectionFailed("Connection attempt failed"))
-                }
+                val transport = transportFactory()
+                val connectResult = connectTransportAttempt(transport, rebootMode)
+                connectResult.onSuccess { connectedTransport = transport }
             }
 
         result.getOrElse { cause -> throw postConfirmConnectionFailed(rebootMode, attempts, cause) }
         return connectedTransport ?: throw postConfirmConnectionFailed(rebootMode, attempts, null)
+    }
+
+    private suspend fun connectTransportAttempt(transport: UnifiedOtaProtocol, rebootMode: Int): Result<Unit> {
+        val connectResult =
+            try {
+                transport.connect()
+            } catch (e: CancellationException) {
+                closeFailedTransport(transport)
+                throw e
+            } catch (@Suppress("TooGenericExceptionCaught") e: Throwable) {
+                Result.failure(e)
+            }
+
+        val error = connectResult.exceptionOrNull() ?: return connectResult
+        if (error is CancellationException) {
+            closeFailedTransport(transport)
+            throw error
+        }
+        Logger.w(error) {
+            "ESP32 OTA: ${otaModeName(rebootMode)} connection attempt failed; closing transport before retry"
+        }
+        closeFailedTransport(transport)
+        return Result.failure(error)
     }
 
     private suspend fun closeFailedTransport(transport: UnifiedOtaProtocol) {

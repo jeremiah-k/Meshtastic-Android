@@ -19,6 +19,7 @@ package org.meshtastic.feature.firmware.ota
 import co.touchlab.kermit.Logger
 import io.ktor.network.selector.SelectorManager
 import io.ktor.network.sockets.InetSocketAddress
+import io.ktor.network.sockets.SocketAddress
 import io.ktor.network.sockets.aSocket
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -37,30 +38,51 @@ internal object WifiOtaDiscovery {
      * Listens for the OTA loader's UDP discovery broadcast on [port] and returns the sender's IP address. Returns
      * `null` on timeout, bind failure, or any other receive error — callers fall back to the original IP.
      */
-    suspend fun discoverOtaDevice(port: Int = DEFAULT_PORT, timeoutMs: Long = DEFAULT_TIMEOUT_MS): String? =
-        withContext(ioDispatcher) {
-            // ponytail: No MulticastLock acquired — that is an Android-only API and this is commonMain. All-ones
-            // limited broadcasts (255.255.255.255) are typically delivered without it; if a specific device filters
-            // them, add an expect/actual multicast-lock wrapper and acquire it for the duration of [receive].
-            safeCatching<String?> {
-                withTimeoutOrNull(timeoutMs) {
-                    val selector = SelectorManager(ioDispatcher)
+    suspend fun discoverOtaDevice(
+        port: Int = WifiOtaTransport.DEFAULT_PORT,
+        timeoutMs: Long = DEFAULT_TIMEOUT_MS,
+    ): String? = withContext(ioDispatcher) {
+        // NOTE: No MulticastLock acquired — that is an Android-only API and this is commonMain. All-ones
+        // limited broadcasts (255.255.255.255) are typically delivered without it; if a specific device filters
+        // them, add an expect/actual multicast-lock wrapper and acquire it for the duration of [receive].
+        safeCatching<String?> {
+            withTimeoutOrNull(timeoutMs) {
+                val selector = SelectorManager(ioDispatcher)
+                try {
                     val socket = aSocket(selector).udp().bind(InetSocketAddress("0.0.0.0", port))
                     try {
                         Logger.i { "WiFi OTA: Listening for OTA device discovery broadcast on port $port" }
                         val datagram = socket.receive()
-                        val discoveredIp = datagram.address.hostname
-                        Logger.i { "WiFi OTA: Discovered OTA device at $discoveredIp" }
+                        val discoveredIp = senderHost(datagram.address)
+                        if (discoveredIp != null) {
+                            Logger.i { "WiFi OTA: Discovered OTA device broadcast" }
+                        }
                         discoveredIp
                     } finally {
                         socket.close()
-                        selector.close()
                     }
+                } finally {
+                    selector.close()
                 }
             }
-                .getOrNull()
         }
+            .getOrNull()
+    }
 
-    private const val DEFAULT_PORT = 3232
+    @Suppress("ReturnCount") // 3 early-out paths for different address shapes
+    internal fun senderHost(address: SocketAddress): String? {
+        val sock = address as? InetSocketAddress ?: return null
+        // InetSocketAddress.hostname may trigger a reverse-DNS lookup; prefer the raw IPv4 bytes returned by
+        // resolveAddress() (4 bytes for IPv4 — the only shape ESP32 OTA loader broadcasts). Falls back to hostname
+        // for IPv6 (6-byte address) or JS/Wasm (always null), where the reverse lookup is a non-issue.
+        val bytes = sock.resolveAddress()
+        if (bytes != null && bytes.size == IPV4_ADDRESS_BYTES) {
+            return bytes.joinToString(".") { (it.toInt() and BYTE_MASK).toString() }
+        }
+        return sock.hostname.takeIf { it.isNotBlank() }
+    }
+
+    private const val IPV4_ADDRESS_BYTES = 4
+    private const val BYTE_MASK = 0xFF
     private const val DEFAULT_TIMEOUT_MS = 15_000L
 }

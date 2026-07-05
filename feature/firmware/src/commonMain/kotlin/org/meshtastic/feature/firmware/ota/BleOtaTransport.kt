@@ -43,6 +43,21 @@ import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 
+private const val MAC_OCTET_COUNT = 6
+private const val MAC_OUI_OCTETS = 3
+private const val MASKED_MAC_MIDDLE = "**:**"
+private const val INVALID_MAC_LABEL = "<invalid-mac>"
+
+/**
+ * Masks a BLE MAC address for logging/UI-facing exception text: preserves the OUI (first 3 octets) and last octet for
+ * diagnostics while hiding the unique middle portion. Privacy rule: never log raw PII.
+ */
+internal fun maskMac(address: String): String {
+    val octets = address.split(":")
+    if (octets.size != MAC_OCTET_COUNT || octets.any { it.length != 2 }) return INVALID_MAC_LABEL
+    return "${octets.take(MAC_OUI_OCTETS).joinToString(":")}:$MASKED_MAC_MIDDLE:${octets.last()}"
+}
+
 /** BLE transport implementation for ESP32 Unified OTA protocol using Kable. */
 class BleOtaTransport(
     private val scanner: BleScanner,
@@ -85,7 +100,7 @@ class BleOtaTransport(
             val device =
                 scanForOtaDevice()
                     ?: throw OtaProtocolException.ConnectionFailed(
-                        "Device not found at address $address. " +
+                        "Device not found at address ${maskMac(address)}. " +
                             "Ensure the device has rebooted into OTA mode and is advertising.",
                     )
 
@@ -101,12 +116,14 @@ class BleOtaTransport(
                 if (finalState is BleConnectionState.Disconnected) {
                     Logger.w { "BLE OTA: Failed to connect to ${maskMac(device.address)} (state=$finalState)" }
                     throw OtaProtocolException.ConnectionFailed(
-                        "Failed to connect to device at address ${device.address}",
+                        "Failed to connect to device at address ${maskMac(device.address)}",
                     )
                 }
             } catch (@Suppress("SwallowedException") e: kotlinx.coroutines.TimeoutCancellationException) {
                 Logger.w { "BLE OTA: Timed out waiting to connect to ${maskMac(device.address)}. Error: ${e.message}" }
-                throw OtaProtocolException.Timeout("Timed out connecting to device at address ${device.address}")
+                throw OtaProtocolException.Timeout(
+                    "Timed out connecting to device at address ${maskMac(device.address)}",
+                )
             }
 
             Logger.i { "BLE OTA: Connected to ${maskMac(device.address)}, discovering services..." }
@@ -294,13 +311,6 @@ class BleOtaTransport(
         } else {
             OtaProtocolException.TransferFailed("Transfer failed: ${error.message}")
         }
-
-    /**
-     * Masks a BLE MAC address for logging: preserves the OUI (first 3 octets) and last octet for diagnostics while
-     * hiding the unique middle portion. Privacy rule: never log raw PII.
-     */
-    private fun maskMac(address: String): String =
-        address.takeIf { it.length >= 17 }?.let { "${it.substring(0, 8)}:**:**:**:${it.substring(15)}" } ?: address
 
     override suspend fun close() {
         try {

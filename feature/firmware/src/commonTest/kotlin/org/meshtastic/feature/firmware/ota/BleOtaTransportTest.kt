@@ -77,6 +77,16 @@ class BleOtaTransportTest {
     // -----------------------------------------------------------------------
 
     @Test
+    fun `maskMac preserves OUI and last octet without exposing full address`() {
+        assertEquals("AA:BB:CC:**:**:FF", maskMac(address))
+    }
+
+    @Test
+    fun `maskMac rejects malformed addresses`() {
+        assertEquals("<invalid-mac>", maskMac("AA:BB:CC:DD:EE:FF:00"))
+    }
+
+    @Test
     fun `connect succeeds when device is found`() = runTest {
         val scanner = FakeBleScanner()
         val connection = FakeBleConnection()
