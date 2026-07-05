@@ -23,6 +23,7 @@ import io.ktor.network.sockets.SocketAddress
 import io.ktor.network.sockets.aSocket
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.io.readByteArray
 import org.meshtastic.core.common.util.ioDispatcher
 import org.meshtastic.core.common.util.safeCatching
 
@@ -45,44 +46,61 @@ internal object WifiOtaDiscovery {
         // NOTE: No MulticastLock acquired — that is an Android-only API and this is commonMain. All-ones
         // limited broadcasts (255.255.255.255) are typically delivered without it; if a specific device filters
         // them, add an expect/actual multicast-lock wrapper and acquire it for the duration of [receive].
-        safeCatching<String?> {
+        safeCatching {
+            // ponytail: var accumulator + loop-on-condition. withTimeoutOrNull's block type comes from its
+            // terminal expression; an infinite `while(true){...}` whose body ends in Logger.d (Unit) makes
+            // the whole block Unit, which clashes with any explicit <T> param. Accumulating into `discovered`
+            // gives the block a concrete String? terminal and lets inference handle the rest.
             withTimeoutOrNull(timeoutMs) {
                 val selector = SelectorManager(ioDispatcher)
+                var discovered: String? = null
                 try {
                     val socket = aSocket(selector).udp().bind(InetSocketAddress("0.0.0.0", port))
                     try {
                         Logger.i { "WiFi OTA: Listening for OTA device discovery broadcast on port $port" }
-                        val datagram = socket.receive()
-                        val discoveredIp = senderHost(datagram.address)
-                        if (discoveredIp != null) {
-                            Logger.i { "WiFi OTA: Discovered OTA device broadcast" }
+                        while (discovered == null) {
+                            val datagram = socket.receive()
+                            val candidate = senderHost(datagram.address)
+                            val payload = datagram.packet.readByteArray()
+                            if (candidate != null && isOtaDiscoveryBeacon(payload)) {
+                                Logger.i { "WiFi OTA: Discovered OTA device broadcast" }
+                                discovered = candidate
+                            } else {
+                                Logger.d { "WiFi OTA: Ignoring non-Meshtastic OTA discovery datagram" }
+                            }
                         }
-                        discoveredIp
                     } finally {
                         socket.close()
                     }
                 } finally {
                     selector.close()
                 }
+                discovered
             }
         }
             .getOrNull()
     }
 
-    @Suppress("ReturnCount") // 3 early-out paths for different address shapes
+    @Suppress("ReturnCount") // early-out paths for different address shapes
     internal fun senderHost(address: SocketAddress): String? {
         val sock = address as? InetSocketAddress ?: return null
-        // InetSocketAddress.hostname may trigger a reverse-DNS lookup; prefer the raw IPv4 bytes returned by
-        // resolveAddress() (4 bytes for IPv4 — the only shape ESP32 OTA loader broadcasts). Falls back to hostname
-        // for IPv6 (6-byte address) or JS/Wasm (always null), where the reverse lookup is a non-issue.
+        // InetSocketAddress.hostname may trigger a reverse-DNS lookup; use only the raw IPv4 bytes returned by
+        // resolveAddress() (4 bytes for IPv4 — the only shape ESP32 OTA loader broadcasts).
         val bytes = sock.resolveAddress()
         if (bytes != null && bytes.size == IPV4_ADDRESS_BYTES) {
             return bytes.joinToString(".") { (it.toInt() and BYTE_MASK).toString() }
         }
-        return sock.hostname.takeIf { it.isNotBlank() }
+        return null
     }
 
+    internal fun isOtaDiscoveryBeacon(payload: ByteArray): Boolean {
+        val message = payload.decodeToString().trim()
+        return OTA_DISCOVERY_PATTERN.matches(message)
+    }
+
+    // esp32-unified-ota broadcasts "<deviceName> <version>", where deviceName is "Meshtastic_" plus 4 MAC hex digits.
+    private val OTA_DISCOVERY_PATTERN = Regex("""^Meshtastic_[0-9A-Fa-f]{4}\s+\S{1,32}$""")
     private const val IPV4_ADDRESS_BYTES = 4
     private const val BYTE_MASK = 0xFF
-    private const val DEFAULT_TIMEOUT_MS = 15_000L
+    private const val DEFAULT_TIMEOUT_MS = 3_000L
 }

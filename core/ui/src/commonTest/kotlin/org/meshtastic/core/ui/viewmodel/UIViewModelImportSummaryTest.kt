@@ -64,5 +64,7 @@ class UIViewModelImportSummaryTest {
     fun non_ota_status_notifications_are_not_suppressed() {
         assertFalse(ClientNotification(message = "Low battery").isOtaStatusNotification())
         assertFalse(ClientNotification(message = "Key verification requested").isOtaStatusNotification())
+        assertFalse(ClientNotification(message = "ROTATE credentials").isOtaStatusNotification())
+        assertFalse(ClientNotification(message = "Quota exceeded").isOtaStatusNotification())
     }
 }

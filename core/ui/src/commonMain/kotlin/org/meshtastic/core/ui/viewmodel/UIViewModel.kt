@@ -51,6 +51,7 @@ import org.meshtastic.core.model.util.isOtaStatusNotification
 import org.meshtastic.core.navigation.DeepLinkRouter
 import org.meshtastic.core.repository.EventFirmwareRepository
 import org.meshtastic.core.repository.FirmwareReleaseRepository
+import org.meshtastic.core.repository.FirmwareUpdateStatusRepository
 import org.meshtastic.core.repository.LockdownCoordinator
 import org.meshtastic.core.repository.LockdownPassphraseStore
 import org.meshtastic.core.repository.MeshLogRepository
@@ -89,6 +90,7 @@ class UIViewModel(
     meshLogRepository: MeshLogRepository,
     firmwareReleaseRepository: FirmwareReleaseRepository,
     private val eventFirmwareRepository: EventFirmwareRepository,
+    private val firmwareUpdateStatusRepository: FirmwareUpdateStatusRepository,
     private val uiPrefs: UiPrefs,
     private val notificationManager: NotificationManager,
     packetRepository: PacketRepository,
@@ -257,9 +259,12 @@ class UIViewModel(
         serviceRepository.clientNotification
             .filterNotNull()
             .onEach { notification ->
-                // OTA status notifications (e.g. "Rebooting to WiFi OTA") are consumed by the firmware update
-                // preflight gate — don't show a popup dialog for them.
-                if (notification.isOtaStatusNotification()) {
+                val firmwareUpdateStatus = firmwareUpdateStatusRepository.status.value
+                if (notification.isOtaStatusNotification() && firmwareUpdateStatus.isOtaUpdateActive) {
+                    Logger.i { "Suppressing OTA status ClientNotification generic alert during firmware update" }
+                    if (!firmwareUpdateStatus.isAwaitingOtaStatus) {
+                        clearClientNotification(notification)
+                    }
                     return@onEach
                 }
                 val isCompromised = notification.low_entropy_key != null || notification.duplicated_public_key != null

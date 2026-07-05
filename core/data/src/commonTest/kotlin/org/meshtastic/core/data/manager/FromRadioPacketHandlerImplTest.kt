@@ -22,6 +22,7 @@ import dev.mokkery.every
 import dev.mokkery.mock
 import dev.mokkery.verify
 import org.meshtastic.core.model.util.isOtaStatusNotification
+import org.meshtastic.core.repository.FirmwareUpdateStatusRepository
 import org.meshtastic.core.repository.MeshConfigFlowManager
 import org.meshtastic.core.repository.MeshConfigHandler
 import org.meshtastic.core.repository.MqttManager
@@ -58,6 +59,7 @@ class FromRadioPacketHandlerImplTest {
     private val configHandler: MeshConfigHandler = mock(MockMode.autofill)
     private val xmodemManager: XModemManager = mock(MockMode.autofill)
     private val lockdownCoordinator = FakeLockdownCoordinator()
+    private val firmwareUpdateStatusRepository = FirmwareUpdateStatusRepository()
 
     private lateinit var handler: FromRadioPacketHandlerImpl
 
@@ -73,6 +75,7 @@ class FromRadioPacketHandlerImplTest {
                 packetHandler,
                 notificationManager,
                 lockdownCoordinator,
+                firmwareUpdateStatusRepository,
             )
     }
 
@@ -220,5 +223,7 @@ class FromRadioPacketHandlerImplTest {
     fun `non OTA client notifications are not identified as OTA status`() {
         assertFalse(ClientNotification(message = "test").isOtaStatusNotification())
         assertFalse(ClientNotification(message = "Low battery").isOtaStatusNotification())
+        assertFalse(ClientNotification(message = "ROTATE credentials").isOtaStatusNotification())
+        assertFalse(ClientNotification(message = "Quota exceeded").isOtaStatusNotification())
     }
 }

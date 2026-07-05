@@ -21,6 +21,7 @@ import dev.mokkery.answering.returns
 import dev.mokkery.everySuspend
 import dev.mokkery.matcher.any
 import dev.mokkery.mock
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -32,9 +33,9 @@ import org.meshtastic.core.common.util.CommonUri
 import org.meshtastic.core.database.entity.FirmwareRelease
 import org.meshtastic.core.di.CoroutineDispatchers
 import org.meshtastic.core.model.DeviceHardware
+import org.meshtastic.core.repository.FirmwareUpdateStatusRepository
 import org.meshtastic.core.testing.FakeNodeRepository
 import org.meshtastic.core.testing.FakeRadioController
-import org.meshtastic.core.testing.FakeServiceRepository
 import org.meshtastic.core.testing.TestDataFactory
 import org.meshtastic.feature.firmware.FirmwareArtifact
 import org.meshtastic.feature.firmware.FirmwareFileHandler
@@ -43,6 +44,7 @@ import org.meshtastic.feature.firmware.FirmwareUpdateState
 import org.meshtastic.proto.ClientNotification
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -55,10 +57,11 @@ import kotlin.test.assertTrue
  * - Confirmed → mesh disconnect (`setDeviceAddress("n")`) is invoked, then the handler proceeds into the BLE transport
  *   phase, which fails fast on the mocked BLE deps. We bound the call with `withTimeoutOrNull` so the post-preflight
  *   BLE-connect retry loop is cancelled before it costs real wall-clock time.
- * - Rejected / Timeout → mesh transport is preserved (no `setDeviceAddress`) and an `Error` state is emitted; the
- *   handler returns cleanly with no exception to chase.
+ * - Rejected → mesh transport is preserved (no `setDeviceAddress`) and an `Error` state is emitted; the handler returns
+ *   cleanly with no exception to chase.
+ * - Silent firmware → legacy fallback disconnects the mesh transport and proceeds toward OTA connection attempts.
  *
- * The firmware response is simulated by mutating [FakeServiceRepository.clientNotification] from a sibling coroutine
+ * The firmware response is simulated by mutating [FakeRadioController.clientNotification] from a sibling coroutine
  * scheduled to fire after `triggerRebootOta`. Because baseline is captured BEFORE the trigger (see `performUpdate`), a
  * value written afterward is recognized as the response, not the baseline.
  */
@@ -77,16 +80,18 @@ class Esp32OtaUpdateHandlerTest {
         )
 
     private fun makeHandler(
-        serviceRepository: FakeServiceRepository,
         radioController: FakeRadioController,
         nodeRepository: FakeNodeRepository,
         fileHandler: FirmwareFileHandler,
+        firmwareUpdateStatusRepository: FirmwareUpdateStatusRepository,
+        environment: TestEsp32OtaUpdateEnvironment,
     ): Esp32OtaUpdateHandler = Esp32OtaUpdateHandler(
         firmwareRetriever = FirmwareRetriever(fileHandler),
         firmwareFileHandler = fileHandler,
         radioController = radioController,
         nodeRepository = nodeRepository,
-        serviceRepository = serviceRepository,
+        firmwareUpdateStatusRepository = firmwareUpdateStatusRepository,
+        environment = environment,
         bleScanner = mock(MockMode.autofill),
         bleConnectionFactory = mock(MockMode.autofill),
         dispatchers = dispatchers,
@@ -108,22 +113,30 @@ class Esp32OtaUpdateHandlerTest {
 
     /**
      * Shared fixture builder for preflight tests. Schedules a sibling coroutine that emits [confirmationMessage] as a
-     * firmware ClientNotification after [CONFIRMATION_DELAY_MS]; pass `confirmationMessage = null` (e.g. Timeout test)
-     * to skip the emitter entirely.
+     * firmware ClientNotification after [CONFIRMATION_DELAY_MS]; pass `confirmationMessage = null` to skip the emitter
+     * entirely and exercise the legacy fallback path.
      */
     private fun runPreflightTest(
         target: String = BLE_TARGET,
         confirmationMessage: String? = BLE_CONFIRMATION,
-        configure: Esp32OtaUpdateHandler.() -> Unit = {},
+        configure: TestEsp32OtaUpdateEnvironment.() -> Unit = {},
         runUpdate: suspend PreflightFixture.() -> Unit = {
             handler.startUpdate(release, hardware, target, states::add, firmwareUri)
         },
         assertions: PreflightFixture.() -> Unit,
     ) = runBlocking {
-        val serviceRepository = FakeServiceRepository()
         val radioController = FakeRadioController()
         val nodeRepository = newNodeRepository()
-        val handler = makeHandler(serviceRepository, radioController, nodeRepository, newFileHandler()).apply(configure)
+        val firmwareUpdateStatusRepository = FirmwareUpdateStatusRepository()
+        val environment = TestEsp32OtaUpdateEnvironment().apply(configure)
+        val handler =
+            makeHandler(
+                radioController = radioController,
+                nodeRepository = nodeRepository,
+                fileHandler = newFileHandler(),
+                firmwareUpdateStatusRepository = firmwareUpdateStatusRepository,
+                environment = environment,
+            )
         val states = mutableListOf<FirmwareUpdateState>()
         val fixture = PreflightFixture(handler = handler, radioController = radioController, states = states)
 
@@ -131,7 +144,7 @@ class Esp32OtaUpdateHandlerTest {
             confirmationMessage?.let { msg ->
                 runSideEffect {
                     delay(CONFIRMATION_DELAY_MS)
-                    serviceRepository.setClientNotification(ClientNotification(message = msg))
+                    radioController.setClientNotification(ClientNotification(message = msg))
                 }
             }
 
@@ -142,6 +155,10 @@ class Esp32OtaUpdateHandlerTest {
         }
 
         fixture.assertions()
+        assertFalse(
+            firmwareUpdateStatusRepository.status.value.isOtaUpdateActive,
+            "Firmware update status must reset after the handler finishes or is cancelled",
+        )
     }
 
     // ── Confirmed ──────────────────────────────────────────────────────────
@@ -181,7 +198,7 @@ class Esp32OtaUpdateHandlerTest {
             configure = {
                 gattReleaseDelayMs = 0L
                 otaTransportRetryDelayMs = 0L
-                bleTransportFactoryOverride = { transports.removeFirst() }
+                bleTransportFactory = { transports.removeFirst() }
             },
         ) {
             assertEquals("n", radioController.lastSetDeviceAddress, "Confirmed preflight must disconnect mesh service")
@@ -202,8 +219,8 @@ class Esp32OtaUpdateHandlerTest {
             configure = {
                 gattReleaseDelayMs = 0L
                 wifiOtaReadinessDelayMs = TEST_WIFI_READINESS_DELAY_MS
-                delayFn = { delayMs -> events += "delay:$delayMs" }
-                wifiTransportFactoryOverride = { FakeOtaTransport(name = "wifi", events = events) }
+                delayBlock = { delayMs -> events += "delay:$delayMs" }
+                wifiTransportFactory = { FakeOtaTransport(name = "wifi", events = events) }
             },
         ) {
             assertTrue(
@@ -228,12 +245,13 @@ class Esp32OtaUpdateHandlerTest {
             configure = {
                 gattReleaseDelayMs = 0L
                 wifiOtaReadinessDelayMs = TEST_WIFI_READINESS_DELAY_MS
-                delayFn = { delayMs -> events += "delay:$delayMs" }
-                wifiOtaDiscoveryOverride = {
+                delayBlock = { delayMs -> events += "delay:$delayMs" }
+                wifiDiscoveryEnabled = true
+                discoverWifiOtaDeviceBlock = {
                     events += "discover"
                     DISCOVERED_WIFI_TARGET
                 }
-                wifiTransportFactoryOverride = { target ->
+                wifiTransportFactory = { target ->
                     events += "factory:$target"
                     FakeOtaTransport(name = target, events = events)
                 }
@@ -269,12 +287,13 @@ class Esp32OtaUpdateHandlerTest {
             configure = {
                 gattReleaseDelayMs = 0L
                 wifiOtaReadinessDelayMs = TEST_WIFI_READINESS_DELAY_MS
-                delayFn = { delayMs -> events += "delay:$delayMs" }
-                wifiOtaDiscoveryOverride = {
+                delayBlock = { delayMs -> events += "delay:$delayMs" }
+                wifiDiscoveryEnabled = true
+                discoverWifiOtaDeviceBlock = {
                     events += "discover"
                     null
                 }
-                wifiTransportFactoryOverride = { target ->
+                wifiTransportFactory = { target ->
                     events += "factory:$target"
                     FakeOtaTransport(name = target, events = events)
                 }
@@ -316,7 +335,7 @@ class Esp32OtaUpdateHandlerTest {
                 gattReleaseDelayMs = 0L
                 wifiOtaReadinessDelayMs = 0L
                 otaTransportRetryDelayMs = 0L
-                wifiTransportFactoryOverride = { transports.removeFirst() }
+                wifiTransportFactory = { transports.removeFirst() }
             },
         ) {
             assertEquals("n", radioController.lastSetDeviceAddress, "Confirmed preflight must disconnect mesh service")
@@ -342,7 +361,7 @@ class Esp32OtaUpdateHandlerTest {
                 gattReleaseDelayMs = 0L
                 wifiOtaReadinessDelayMs = 0L
                 otaTransportRetryDelayMs = 0L
-                wifiTransportFactoryOverride = {
+                wifiTransportFactory = {
                     attempt += 1
                     FakeOtaTransport(
                         name = "wifi-$attempt",
@@ -376,7 +395,7 @@ class Esp32OtaUpdateHandlerTest {
             configure = {
                 gattReleaseDelayMs = 0L
                 otaTransportRetryDelayMs = 0L
-                bleTransportFactoryOverride = {
+                bleTransportFactory = {
                     attempt += 1
                     FakeOtaTransport(
                         name = "ble-$attempt",
@@ -411,21 +430,30 @@ class Esp32OtaUpdateHandlerTest {
         assertTrue(states.any { it is FirmwareUpdateState.Error }, "Rejected preflight must emit Error state")
     }
 
-    // ── Timeout ────────────────────────────────────────────────────────────
+    // ── Legacy fallback ────────────────────────────────────────────────────
 
     @Test
-    fun `Timeout preflight preserves mesh transport and surfaces Error`() = runPreflightTest(
-        // No emitter (confirmationMessage = null): the firmware never responds, so the overridden short preflight
-        // timeout resolves quickly.
+    fun `Silent preflight falls back to legacy OTA reconnect path`() = runPreflightTest(
+        // No emitter (confirmationMessage = null): older firmware may be silent, so the overridden preflight
+        // timeout
+        // should resolve quickly into the same disconnect/reconnect path the app used before preflight
+        // confirmation.
         confirmationMessage = null,
-        configure = { otaPreflightTimeoutMs = 10L },
+        configure = {
+            otaPreflightTimeoutMs = 10L
+            gattReleaseDelayMs = 0L
+        },
+        runUpdate = {
+            withTimeoutOrNull(3000L) {
+                handler.startUpdate(release, hardware, BLE_TARGET, states::add, firmwareUri)
+            }
+        },
     ) {
-        assertNull(radioController.lastSetDeviceAddress, "Timeout preflight must NOT disconnect mesh service")
-        val terminal = states.lastOrNull()
-        assertIs<FirmwareUpdateState.Error>(terminal, "Timeout preflight must emit Error state")
-        // kotlin.test's assertIs returns its non-null typed argument on iOS, which would make this test
-        // function return FirmwareUpdateState.Error instead of Unit. Explicit Unit terminates the block.
-        Unit
+        assertEquals(
+            "n",
+            radioController.lastSetDeviceAddress,
+            "Silent preflight must still disconnect mesh service",
+        )
     }
 
     private companion object {
@@ -447,6 +475,36 @@ private data class PreflightFixture(
     val radioController: FakeRadioController,
     val states: MutableList<FirmwareUpdateState>,
 )
+
+private class TestEsp32OtaUpdateEnvironment : Esp32OtaUpdateEnvironment {
+    override var otaPreflightTimeoutMs: Long = 5_000L
+    override var otaTransportRetryDelayMs: Long = 2_000L
+    override var wifiOtaReadinessDelayMs: Long = 8_000L
+    override var gattReleaseDelayMs: Long = 1_000L
+    override var wifiDiscoveryEnabled: Boolean = false
+
+    var delayBlock: suspend (Long) -> Unit = { delay(it) }
+    var bleTransportFactory: ((String) -> UnifiedOtaProtocol)? = null
+    var wifiTransportFactory: ((String) -> UnifiedOtaProtocol)? = null
+    var discoverWifiOtaDeviceBlock: suspend () -> String? = { null }
+
+    override suspend fun delay(milliseconds: Long) {
+        delayBlock(milliseconds)
+    }
+
+    override fun createBleTransport(
+        bleScanner: org.meshtastic.core.ble.BleScanner,
+        bleConnectionFactory: org.meshtastic.core.ble.BleConnectionFactory,
+        address: String,
+        dispatcher: CoroutineDispatcher,
+    ): UnifiedOtaProtocol =
+        bleTransportFactory?.invoke(address) ?: BleOtaTransport(bleScanner, bleConnectionFactory, address, dispatcher)
+
+    override fun createWifiTransport(deviceIp: String): UnifiedOtaProtocol =
+        wifiTransportFactory?.invoke(deviceIp) ?: WifiOtaTransport(deviceIp)
+
+    override suspend fun discoverWifiOtaDevice(): String? = discoverWifiOtaDeviceBlock.invoke()
+}
 
 private class FakeOtaTransport(
     private val name: String,
