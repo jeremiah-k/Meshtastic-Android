@@ -483,7 +483,9 @@ private class TestEsp32OtaUpdateEnvironment : Esp32OtaUpdateEnvironment {
     override var gattReleaseDelayMs: Long = 1_000L
     override var wifiDiscoveryEnabled: Boolean = false
 
-    var delayBlock: suspend (Long) -> Unit = { delay(it) }
+    // Fully qualified: an unqualified `delay(it)` would resolve to this class's own override (member functions win
+    // over imported top-level functions), producing infinite recursion through delayBlock → StackOverflowError.
+    var delayBlock: suspend (Long) -> Unit = { kotlinx.coroutines.delay(it) }
     var bleTransportFactory: ((String) -> UnifiedOtaProtocol)? = null
     var wifiTransportFactory: ((String) -> UnifiedOtaProtocol)? = null
     var discoverWifiOtaDeviceBlock: suspend () -> String? = { null }
