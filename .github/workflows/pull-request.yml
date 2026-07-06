@@ -2,7 +2,8 @@ name: Pull Request CI
 
 on:
   pull_request:
-    branches: [ main, "release/**" ]
+    branches: [ main, "release/**", "develop", "**-dev", "**-review" ]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -17,7 +18,6 @@ jobs:
   # (folded into this job rather than run standalone: runner-pool slots, not
   # compute, are the scarce resource during queue bursts).
   check-changes:
-    if: github.repository == 'meshtastic/Meshtastic-Android' && !( github.head_ref == 'scheduled-updates' || github.head_ref == 'l10n_main' )
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 10
     outputs:
@@ -101,6 +101,13 @@ jobs:
               - 'gradlew.bat'
               - 'settings.gradle.kts'
               - 'test.gradle.kts'
+
+  # 1b. FILTER DRIFT CHECK: Ensures check-changes stays aligned with module roots
+  verify-check-changes-filter:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.1
       - name: Verify module roots are represented in check-changes filter
         run: |
           python3 - <<'PY'
@@ -353,7 +360,6 @@ jobs:
     uses: ./.github/workflows/reusable-check.yml
     permissions:
       contents: read
-      pull-requests: write # Gradle job summary as a PR comment on failure
     with:
       run_lint: true
       run_screenshot_tests: ${{ needs.check-changes.outputs.screenshots == 'true' }}

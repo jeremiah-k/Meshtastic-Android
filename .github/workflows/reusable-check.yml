@@ -48,8 +48,9 @@ env:
   # Only main writes the Gradle caches. merge_group scopes are throwaway branches
   # (per gradle/actions docs) — writes there had no reader.
   GRADLE_CACHE_READ_ONLY: ${{ github.ref == 'refs/heads/main' && 'false' || 'true' }}
-  # Job summary as a PR comment on failure; no-ops on fork PRs (read-only token).
-  GRADLE_PR_COMMENT: ${{ github.event_name == 'pull_request' && 'on-failure' || 'never' }}
+  # PR Conversation comments permanently disabled in this fork; GHA Job Summaries still
+  # appear inside the Actions UI via add-job-summary: always in gradle-setup/action.yml.
+  GRADLE_PR_COMMENT: never
 
 jobs:
   # There is deliberately no fan-in "setup" job here. Every heavy job used to
@@ -74,7 +75,6 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
-      pull-requests: write
     timeout-minutes: 30
     if: inputs.run_lint == true
     env:
@@ -113,7 +113,6 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
-      pull-requests: write
     timeout-minutes: 20
     if: inputs.run_lint == true && inputs.run_screenshot_tests == true
     env:
@@ -162,7 +161,6 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
-      pull-requests: write
     timeout-minutes: 30
     if: inputs.run_lint == true && github.event_name == 'merge_group'
 
@@ -206,7 +204,6 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
-      pull-requests: write
     timeout-minutes: 45
     if: inputs.run_unit_tests == true
     env:
@@ -577,7 +574,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
-      pull-requests: write
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -654,3 +650,55 @@ jobs:
             desktopApp/build/compose/binaries/main/*/*.AppImage
           retention-days: 7
           if-no-files-found: error
+
+  # ── Flatpak Sources ───────────────────────────────────────────────────
+  build-flatpak-src:
+    name: Generate Flatpak Sources (${{ matrix.os }})
+    if: inputs.run_desktop_flatpak_src == true
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          filter: 'blob:none'
+          submodules: true
+
+      - name: Gradle Setup
+        uses: ./.github/actions/gradle-setup
+        with:
+          gradle_encryption_key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
+          develocity_access_key: ${{ secrets.DEVELOCITY_ACCESS_KEY }}
+          job_summary_pr_comment: ${{ env.GRADLE_PR_COMMENT }}
+          cache_read_only: true
+          install_jetbrains_jdk: 'true'
+
+      # Isolated Gradle user home — see explanation in release.yml.
+      # packageUberJarForCurrentOS is what the in-flatpak build invokes; it resolves the FULL
+      # runtime classpath. :assemble alone would miss runtime-only deps (skiko, ktor-cio, …).
+      - name: Generate Flatpak Sources
+        run: >
+          ./gradlew --no-build-cache
+          -Dgradle.user.home=${{ runner.temp }}/flatpak-gradle-home
+          :desktopApp:packageUberJarForCurrentOS :captureFlatpakSources
+
+      - name: Stage manifest
+        run: cp build/flatpak-sources.json flatpak-sources.json
+
+      - run: ls -lah flatpak-sources.json
+
+      - name: Upload Flatpak Sources
+        if: ${{ inputs.upload_artifacts }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: flatpak-sources-${{ runner.arch }}
+          path: flatpak-sources.json
+          retention-days: 7
