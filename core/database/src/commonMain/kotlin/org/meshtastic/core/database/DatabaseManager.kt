@@ -31,7 +31,9 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -279,7 +281,10 @@ open class DatabaseManager(
         Logger.d { "Closed inactive database ${anonymizeDbName(dbName)} to free connections" }
     }
 
-    private val limitedIo = dispatchers.io.limitedParallelism(4)
+    // Short-term runtime containment: serialize withDb calls to reduce Room/SQLite connection-pool churn seen during
+    // device/firmware update flows. Revisit after direct currentDb.value callers are audited and safe DB concurrency is
+    // restored.
+    private val limitedIo = dispatchers.io.limitedParallelism(1)
 
     /** Execute [block] with the current DB instance. Retries once if the pool closes during a DB switch. */
     @Suppress("TooGenericExceptionCaught")
@@ -288,7 +293,9 @@ open class DatabaseManager(
         val active = currentDbName
         markLastUsed(active)
         try {
-            block(db)
+            val result = withContext(NonCancellable) { block(db) }
+            currentCoroutineContext().ensureActive()
+            result
         } catch (e: CancellationException) {
             throw e // Preserve structured concurrency cancellation propagation.
         } catch (e: Exception) {
@@ -298,7 +305,11 @@ open class DatabaseManager(
             if (retryDb != null && retryDb !== db && isDbClosedException(e)) {
                 Logger.w { "withDb: database closed during switch (${e.message}), retrying with current DB" }
                 try {
-                    block(retryDb)
+                    val retryResult = withContext(NonCancellable) { block(retryDb) }
+                    currentCoroutineContext().ensureActive()
+                    retryResult
+                } catch (retryCancel: CancellationException) {
+                    throw retryCancel
                 } catch (retryEx: Exception) {
                     retryEx.addSuppressed(e)
                     throw retryEx
