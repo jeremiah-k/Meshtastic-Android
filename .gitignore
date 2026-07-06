@@ -106,3 +106,5 @@ build-scan-*.scan
 # Python bytecode from scripts/
 __pycache__/
 *.pyc
+.omo/*
+.commandcode
