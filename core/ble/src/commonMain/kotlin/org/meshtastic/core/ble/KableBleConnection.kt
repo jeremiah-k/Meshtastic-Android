@@ -29,15 +29,18 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.job
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import org.meshtastic.core.common.util.ioDispatcher
 import kotlin.concurrent.Volatile
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
@@ -245,6 +248,7 @@ class KableBleConnection(private val scope: CoroutineScope, private val loggingC
         _deviceFlow.emit(null)
     }
 
+    @Suppress("ThrowsCount")
     override suspend fun <T> profile(
         serviceUuid: Uuid,
         timeout: Duration,
@@ -253,7 +257,29 @@ class KableBleConnection(private val scope: CoroutineScope, private val loggingC
         val p = peripheral ?: error("Not connected")
         val cScope = connectionScope ?: error("No active connection scope")
         val service = KableBleService(p, serviceUuid)
-        return withTimeout(timeout) { cScope.setup(service) }
+        return withTimeout(timeout) {
+            withContext(ioDispatcher) {
+                val servicesReady = async { p.services.first { it != null } }
+                val disconnectHandle = cScope.coroutineContext.job.invokeOnCompletion { servicesReady.cancel() }
+                try {
+                    try {
+                        servicesReady.await()
+                    } catch (e: CancellationException) {
+                        if (!cScope.coroutineContext.job.isActive) {
+                            throw NotConnectedException("Connection lost during service discovery")
+                        }
+                        throw e
+                    }
+                    if (!cScope.coroutineContext.job.isActive) {
+                        throw NotConnectedException("Connection lost during service discovery")
+                    }
+                } finally {
+                    disconnectHandle.dispose()
+                    servicesReady.cancel()
+                }
+                cScope.setup(service)
+            }
+        }
     }
 
     override fun maximumWriteValueLength(writeType: BleWriteType): Int? = peripheral?.negotiatedMaxWriteLength()
