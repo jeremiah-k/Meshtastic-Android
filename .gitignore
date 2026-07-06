@@ -102,3 +102,4 @@ build-scan-*.scan
 
 # Local agent memory (remember plugin) — must never be committed
 .remember/
+.omo/*
