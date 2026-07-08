@@ -131,7 +131,9 @@ class BleOtaTransport(
             throw OtaProtocolException.Timeout("Timed out connecting to OTA device")
         }
 
-        if (bleConnection.invalidateServiceCache()) {
+        val cacheInvalidated = bleConnection.invalidateServiceCache()
+        Logger.d { "BLE OTA: GATT cache invalidation requested: $cacheInvalidated" }
+        if (cacheInvalidated) {
             Logger.i { "BLE OTA: Invalidated stale GATT service cache before OTA discovery" }
         }
 

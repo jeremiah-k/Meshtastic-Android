@@ -33,4 +33,4 @@ internal actual fun Peripheral.requestHighConnectionPriority(): Boolean = false
 
 internal actual fun Peripheral.requestBalancedConnectionPriority(): Boolean = false
 
-internal actual fun Peripheral.refreshGattCache(): Boolean = false
+internal actual fun Peripheral.refreshGattCache(connectionScope: kotlinx.coroutines.CoroutineScope?): Boolean = false

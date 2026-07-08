@@ -18,6 +18,7 @@ package org.meshtastic.core.ble
 
 import com.juul.kable.Peripheral
 import com.juul.kable.PeripheralBuilder
+import kotlinx.coroutines.CoroutineScope
 
 /** Platform-specific configuration for the Peripheral builder based on device type. */
 internal expect fun PeripheralBuilder.platformConfig(device: BleDevice, autoConnect: () -> Boolean)
@@ -46,13 +47,15 @@ internal expect fun Peripheral.requestHighConnectionPriority(): Boolean
 internal expect fun Peripheral.requestBalancedConnectionPriority(): Boolean
 
 /**
- * Clears the platform's cached GATT service table for this peripheral.
+ * Clears the platform's cached GATT service table for the connected [Peripheral].
  *
- * Necessary when a device reboots into a different GATT profile (e.g., ESP32 OTA loader) using the same BLE MAC —
- * Android's BluetoothGatt caches services per address and returns the stale table on subsequent connections, causing
- * service discovery to report the old firmware's services instead of the new profile's.
+ * Kable keeps Android's `BluetoothGatt` on an internal connection object owned by the peripheral. This extension
+ * searches the peripheral and its active connection for that field, then invokes the hidden `refresh()` API to clear
+ * the per-device service cache.
+ *
+ * Necessary when a device reboots into a different GATT profile (e.g., ESP32 OTA loader) using the same BLE MAC.
  *
  * Returns `true` if the cache was invalidated. On platforms without a cache (JVM/iOS) this is a no-op returning
  * `false`.
  */
-internal expect fun Peripheral.refreshGattCache(): Boolean
+internal expect fun Peripheral.refreshGattCache(connectionScope: CoroutineScope?): Boolean
