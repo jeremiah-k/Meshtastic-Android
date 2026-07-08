@@ -89,6 +89,13 @@ interface BleConnection {
      * returns `false` for platforms that don't support it.
      */
     fun requestBalancedConnectionPriority(): Boolean = false
+
+    /**
+     * Clears the platform's cached GATT service table for the connected peripheral. Necessary when a device reboots
+     * into a different GATT profile (e.g., ESP32 OTA loader) on the same BLE MAC. Returns `true` if the cache was
+     * invalidated. Default implementation returns `false` for platforms without a service cache.
+     */
+    fun invalidateServiceCache(): Boolean = false
 }
 
 /** Represents a BLE service for commonMain. */

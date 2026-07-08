@@ -44,3 +44,15 @@ internal expect fun Peripheral.requestHighConnectionPriority(): Boolean
  * operations complete. On platforms without an equivalent API (JVM/iOS) this is a no-op.
  */
 internal expect fun Peripheral.requestBalancedConnectionPriority(): Boolean
+
+/**
+ * Clears the platform's cached GATT service table for this peripheral.
+ *
+ * Necessary when a device reboots into a different GATT profile (e.g., ESP32 OTA loader) using the same BLE MAC —
+ * Android's BluetoothGatt caches services per address and returns the stale table on subsequent connections, causing
+ * service discovery to report the old firmware's services instead of the new profile's.
+ *
+ * Returns `true` if the cache was invalidated. On platforms without a cache (JVM/iOS) this is a no-op returning
+ * `false`.
+ */
+internal expect fun Peripheral.refreshGattCache(): Boolean

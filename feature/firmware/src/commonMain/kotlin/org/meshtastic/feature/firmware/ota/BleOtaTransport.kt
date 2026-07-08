@@ -131,6 +131,10 @@ class BleOtaTransport(
             throw OtaProtocolException.Timeout("Timed out connecting to OTA device")
         }
 
+        if (bleConnection.invalidateServiceCache()) {
+            Logger.i { "BLE OTA: Invalidated stale GATT service cache before OTA discovery" }
+        }
+
         Logger.i { "BLE OTA: Connected to OTA device, discovering services..." }
 
         try {

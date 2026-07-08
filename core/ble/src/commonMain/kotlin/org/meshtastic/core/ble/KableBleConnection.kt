@@ -295,6 +295,8 @@ class KableBleConnection(private val scope: CoroutineScope, private val loggingC
 
     override fun requestBalancedConnectionPriority(): Boolean = peripheral?.requestBalancedConnectionPriority() == true
 
+    override fun invalidateServiceCache(): Boolean = peripheral?.refreshGattCache() == true
+
     /** Ensures the previous peripheral's GATT resources are fully released. */
     private suspend fun cleanUpPeripheral(tag: String) {
         withContext(NonCancellable) { safeClosePeripheral(tag) }

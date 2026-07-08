@@ -86,3 +86,24 @@ internal actual fun Peripheral.requestBalancedConnectionPriority(): Boolean {
         .onFailure { Logger.w(it) { "requestConnectionPriority(Balanced) threw" } }
         .getOrDefault(false)
 }
+
+internal actual fun Peripheral.refreshGattCache(): Boolean {
+    val androidPeripheral = this as? AndroidPeripheral ?: return false
+    return try {
+        // Kable's AndroidPeripheral wraps android.bluetooth.BluetoothGatt internally. BluetoothGatt.refresh() is a
+        // hidden framework API that clears the per-device service cache. This is necessary when a device reboots into
+        // a different GATT profile (e.g., ESP32 OTA loader) on the same BLE MAC — without it, discoverServices()
+        // returns the stale cached table in ~6ms instead of performing real over-the-air discovery.
+        val gattField =
+            AndroidPeripheral::class.java.declaredFields.firstOrNull {
+                it.type == android.bluetooth.BluetoothGatt::class.java
+            } ?: return false
+        gattField.isAccessible = true
+        val gatt = gattField.get(androidPeripheral) as? android.bluetooth.BluetoothGatt ?: return false
+        val refreshMethod = gatt.javaClass.getMethod("refresh")
+        refreshMethod.invoke(gatt) as? Boolean ?: false
+    } catch (@Suppress("TooGenericExceptionCaught") e: Exception) {
+        Logger.w(e) { "refreshGattCache: failed to invoke BluetoothGatt.refresh()" }
+        false
+    }
+}
