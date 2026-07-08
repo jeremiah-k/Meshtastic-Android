@@ -27,10 +27,6 @@ import com.juul.kable.PooledThreadingStrategy
 import com.juul.kable.toIdentifier
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.StateFlow
-import java.lang.reflect.Field
-import java.lang.reflect.Modifier
-import java.util.Collections
-import java.util.IdentityHashMap
 
 /**
  * Shared thread pool for Kable BLE connections.
@@ -98,125 +94,59 @@ internal actual fun Peripheral.requestBalancedConnectionPriority(): Boolean {
 
 @Suppress("ReturnCount")
 internal actual fun Peripheral.refreshGattCache(connectionScope: CoroutineScope?): Boolean {
-    return try {
-        // Kable stores BluetoothGatt on its internal Connection object, which is owned by AndroidPeripheral. The
-        // connection scope alone is only a coroutine wrapper in current Kable releases, so it is just a fallback
-        // diagnostic root here.
-        // If Kable exposes a public cache-refresh/invalidate API later, replace this reflection with that API.
-        val roots = gattSearchRoots(connectionScope)
-        val rootNames = roots.joinToString { it.javaClass.name }
-        val target = findBluetoothGatt(roots)
-        if (target == null) {
-            Logger.w {
-                "refreshGattCache: no BluetoothGatt field found from roots [$rootNames]; " +
-                    "androidPeripheral=${this is AndroidPeripheral}"
+    // Direct 2-hop reflection on Kable 0.43.1 internals.
+    // Path: BluetoothDeviceAndroidPeripheral.connection (MutableStateFlow<Connection?>) → .value → Connection.gatt
+    // Re-verify field names on Kable version bumps.
+    val gatt =
+        extractBluetoothGatt()
+            ?: run {
+                Logger.w {
+                    "refreshGattCache: BluetoothGatt unreachable via Kable internals" + " (${this.javaClass.name})"
+                }
+                return false
             }
-            return false
-        }
-
-        val refreshMethod = target.gatt.javaClass.getMethod("refresh")
-        val result = refreshMethod.invoke(target.gatt) as? Boolean ?: false
-        Logger.i { "refreshGattCache: found BluetoothGatt on ${target.ownerClassName}; refresh() returned $result" }
+    return try {
+        val refreshMethod = gatt.javaClass.getMethod("refresh")
+        val result = refreshMethod.invoke(gatt) as? Boolean ?: false
+        Logger.i { "refreshGattCache: refresh() returned $result" }
         result
     } catch (@Suppress("TooGenericExceptionCaught") e: Exception) {
-        Logger.w(e) { "refreshGattCache: failed to invoke BluetoothGatt.refresh()" }
+        Logger.w(e) { "refreshGattCache: refresh() invocation failed" }
         false
     }
 }
 
-private const val MAX_GATT_SEARCH_DEPTH = 2
+/**
+ * Extracts the [BluetoothGatt] from Kable's internal object graph via a 2-hop field lookup.
+ *
+ * Hop 1: `Peripheral` → field `"connection"` (`MutableStateFlow<Connection?>`) → `.value` → `Connection` Hop 2:
+ * `Connection` → field `"gatt"` → `BluetoothGatt`
+ *
+ * Returns `null` if either hop fails (e.g., Kable internals changed between versions).
+ */
+@Suppress("ReturnCount")
+private fun Peripheral.extractBluetoothGatt(): BluetoothGatt? {
+    // Hop 1: Read "connection" field from the concrete Peripheral class (BluetoothDeviceAndroidPeripheral)
+    val connectionField = readDeclaredField("connection") ?: return null
+    val connectionStateFlow = connectionField as? StateFlow<*> ?: return null
+    val connection = connectionStateFlow.value ?: return null
 
-private data class GattSearchNode(val owner: Any, val depth: Int)
-
-private data class GattTarget(val gatt: BluetoothGatt, val ownerClassName: String)
-
-private fun Peripheral.gattSearchRoots(connectionScope: CoroutineScope?): List<Any> {
-    val roots = mutableListOf<Any>(this)
-    kableConnectionObject()?.let(roots::add)
-    connectionScope?.let(roots::add)
-    return roots
+    // Hop 2: Read "gatt" field from the Connection class
+    return connection.readDeclaredFieldAs<BluetoothGatt>("gatt")
 }
 
-@Suppress("ReturnCount")
-private fun Peripheral.kableConnectionObject(): Any? {
-    invokeNoArgMethod("connectionOrThrow")?.let {
-        return it
-    }
-    val connectionHolder =
-        javaClass.allInstanceFields().firstOrNull { it.name == "connection" }?.readValue(this) ?: return null
-
-    return if (connectionHolder is StateFlow<*>) connectionHolder.value else connectionHolder
-}
-
-@Suppress("ReturnCount")
-private fun findBluetoothGatt(roots: List<Any>): GattTarget? {
-    val visited = Collections.newSetFromMap(IdentityHashMap<Any, Boolean>())
-    val queue = ArrayDeque<GattSearchNode>()
-    roots.forEach { queue.add(GattSearchNode(it, depth = 0)) }
-
-    while (queue.isNotEmpty()) {
-        val (owner, depth) = queue.removeFirst()
-        if (!visited.add(owner)) continue
-
-        if (owner is BluetoothGatt) return GattTarget(owner, owner.javaClass.name)
-
-        owner.javaClass.allInstanceFields().forEach { field ->
-            val value = field.readValue(owner) ?: return@forEach
-            if (value is BluetoothGatt) {
-                return GattTarget(value, owner.javaClass.name)
-            }
-            if (depth < MAX_GATT_SEARCH_DEPTH && shouldInspectGattOwner(value)) {
-                queue.add(GattSearchNode(value, depth + 1))
-            }
+private fun Any.readDeclaredField(name: String): Any? {
+    var clazz: Class<*>? = javaClass
+    while (clazz != null && clazz != Any::class.java) {
+        try {
+            val field = clazz.getDeclaredField(name)
+            field.isAccessible = true
+            return field.get(this)
+        } catch (_: NoSuchFieldException) {
+            clazz = clazz.superclass
         }
     }
-
     return null
 }
 
-private fun Any.invokeNoArgMethod(name: String): Any? = javaClass
-    .allDeclaredMethods()
-    .firstOrNull { it.name == name && it.parameterTypes.isEmpty() }
-    ?.runCatchingInvoke(this)
-
-private fun Class<*>.allInstanceFields(): Sequence<Field> = sequence {
-    var clazz: Class<*>? = this@allInstanceFields
-    while (clazz != null && clazz != Any::class.java) {
-        clazz.declaredFields.filterNot { Modifier.isStatic(it.modifiers) }.forEach { yield(it) }
-        clazz = clazz.superclass
-    }
-}
-
-private fun Class<*>.allDeclaredMethods() = sequence {
-    var clazz: Class<*>? = this@allDeclaredMethods
-    while (clazz != null && clazz != Any::class.java) {
-        clazz.declaredMethods.forEach { yield(it) }
-        clazz = clazz.superclass
-    }
-}
-
-private fun Field.readValue(owner: Any): Any? = runCatching {
-    isAccessible = true
-    get(owner)
-}
-    .getOrNull()
-
-private fun java.lang.reflect.Method.runCatchingInvoke(owner: Any): Any? = runCatching {
-    isAccessible = true
-    invoke(owner)
-}
-    .getOrNull()
-
-@Suppress("ReturnCount")
-private fun shouldInspectGattOwner(value: Any): Boolean {
-    val clazz = value.javaClass
-    if (clazz.isArray || clazz.isEnum) return false
-    if (value is String || value is Number || value is Boolean || value is Char) return false
-
-    val className = clazz.name
-    return !className.startsWith("android.") &&
-        !className.startsWith("java.") &&
-        !className.startsWith("javax.") &&
-        !className.startsWith("kotlin.") &&
-        !className.startsWith("kotlinx.coroutines.")
-}
+private inline fun <reified T> Any.readDeclaredFieldAs(name: String): T? = readDeclaredField(name) as? T
