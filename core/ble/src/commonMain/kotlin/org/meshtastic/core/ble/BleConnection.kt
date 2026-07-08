@@ -106,6 +106,9 @@ interface BleService {
     /** Returns true when the characteristic is present on the connected device. */
     fun hasCharacteristic(characteristic: BleCharacteristic): Boolean
 
+    /** Returns the UUIDs of all characteristics discovered for this service. Empty for non-Kable platforms. */
+    fun discoveredCharacteristicUuids(): List<Uuid> = emptyList()
+
     /** Observes notifications/indications from the characteristic. */
     fun observe(characteristic: BleCharacteristic): Flow<ByteArray>
 

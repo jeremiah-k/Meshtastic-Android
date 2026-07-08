@@ -54,6 +54,11 @@ class KableBleService(private val peripheral: Peripheral, private val serviceUui
         svc.serviceUuid == serviceUuid && svc.characteristics.any { it.characteristicUuid == characteristic.uuid }
     } == true
 
+    override fun discoveredCharacteristicUuids(): List<Uuid> = peripheral.services.value
+        ?.find { it.serviceUuid == serviceUuid }
+        ?.characteristics
+        ?.map { it.characteristicUuid } ?: emptyList()
+
     override fun observe(characteristic: BleCharacteristic) =
         peripheral.observe(characteristicOf(serviceUuid, characteristic.uuid))
 

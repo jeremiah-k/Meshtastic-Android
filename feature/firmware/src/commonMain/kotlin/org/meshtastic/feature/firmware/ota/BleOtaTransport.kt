@@ -134,7 +134,27 @@ class BleOtaTransport(
         val cacheInvalidated = bleConnection.invalidateServiceCache()
         Logger.d { "BLE OTA: GATT cache invalidation requested: $cacheInvalidated" }
         if (cacheInvalidated) {
-            Logger.i { "BLE OTA: Invalidated stale GATT service cache before OTA discovery" }
+            // Kable already discovered services during connect() before we could invalidate the cache.
+            // The stale radio-profile services are now in Kable's internal StateFlow. Force a fresh
+            // discovery by disconnecting and reconnecting — Android's GATT cache was cleared by refresh(),
+            // so the next connect will return the OTA loader's actual service table.
+            Logger.i { "BLE OTA: Reconnecting after GATT cache refresh to force service rediscovery" }
+            bleConnection.disconnect()
+            delay(RECONNECT_DELAY)
+            try {
+                val reconnectState = bleConnection.connectAndAwait(device, CONNECTION_TIMEOUT)
+                if (reconnectState is BleConnectionState.Disconnected) {
+                    Logger.w { "BLE OTA: Failed to reconnect after GATT cache refresh (state=$reconnectState)" }
+                    throw OtaProtocolException.ConnectionFailed("Failed to reconnect after GATT cache refresh")
+                }
+            } catch (e: TimeoutCancellationException) {
+                currentCoroutineContext().ensureActive()
+                Logger.w { "BLE OTA: Timed out reconnecting after GATT cache refresh. Error: ${e.message}" }
+                throw OtaProtocolException.Timeout("Timed out reconnecting after GATT cache refresh")
+            }
+            Logger.i { "BLE OTA: Reconnected after GATT cache refresh" }
+        } else {
+            Logger.w { "BLE OTA: GATT cache invalidation failed; proceeding with potentially stale service cache" }
         }
 
         Logger.i { "BLE OTA: Connected to OTA device, discovering services..." }
@@ -383,9 +403,17 @@ class BleOtaTransport(
         }
 
         if (missing.isNotEmpty()) {
+            val discovered = discoveredCharacteristicUuids()
+            val diagnostic =
+                if (discovered.isNotEmpty()) {
+                    " (discovered characteristics: $discovered)"
+                } else {
+                    " (no characteristics discovered for OTA service)"
+                }
             throw OtaProtocolException.ConnectionFailed(
                 "ESP32 OTA service was missing required characteristics after BLE service discovery: " +
-                    missing.joinToString(separator = "; "),
+                    missing.joinToString(separator = "; ") +
+                    diagnostic,
             )
         }
     }
@@ -397,6 +425,7 @@ class BleOtaTransport(
         private val ACK_TIMEOUT = 10.seconds
         private val VERIFICATION_TIMEOUT = 10.seconds
         private val REBOOT_DELAY = 5.seconds
+        private val RECONNECT_DELAY = 500.milliseconds
         const val RECOMMENDED_CHUNK_SIZE = 512
 
         /** Fallback write payload when the MTU has not been negotiated (23-byte ATT MTU minus the 3-byte header). */
