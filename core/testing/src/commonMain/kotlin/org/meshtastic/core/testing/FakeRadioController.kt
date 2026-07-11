@@ -74,6 +74,13 @@ class FakeRadioController :
     var gattCacheInvalidationRequested = false
         private set
 
+    /**
+     * Number of times [suspendTransportForFirmwareUpdate] has been invoked — lets OTA tests assert that the
+     * transport-suspension path was used in place of `setDeviceAddress("n")`.
+     */
+    var suspendTransportForFirmwareUpdateCallCount: Int = 0
+        private set
+
     init {
         registerResetAction {
             sentPackets.clear()
@@ -90,6 +97,7 @@ class FakeRadioController :
             startProvideLocationCalled = false
             stopProvideLocationCalled = false
             gattCacheInvalidationRequested = false
+            suspendTransportForFirmwareUpdateCallCount = 0
         }
     }
 
@@ -227,6 +235,10 @@ class FakeRadioController :
 
     override suspend fun setDeviceAddress(address: String) {
         lastSetDeviceAddress = address
+    }
+
+    override suspend fun suspendTransportForFirmwareUpdate() {
+        suspendTransportForFirmwareUpdateCallCount++
     }
 
     override fun requestGattCacheInvalidationOnNextConnect() {

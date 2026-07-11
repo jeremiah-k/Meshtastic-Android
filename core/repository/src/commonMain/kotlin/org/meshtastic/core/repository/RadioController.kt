@@ -76,6 +76,23 @@ interface RadioController :
     suspend fun setDeviceAddress(address: String)
 
     /**
+     * Suspends the active radio transport for an OTA firmware update without deselecting the current device.
+     *
+     * Contract:
+     * - synchronously stops the current radio transport (suspending until teardown completes);
+     * - disables automatic reconnect until the normal post-update reconnect (e.g. [setDeviceAddress] with the original
+     *   address);
+     * - preserves the selected device address;
+     * - preserves the active per-device database;
+     * - does NOT clear NodeManager state, early packets, notifications, or preferences.
+     *
+     * Use this in place of [setDeviceAddress]`\("n")` when the goal is only to release the transport for an OTA tool —
+     * `setDeviceAddress("n")` additionally invokes the real-device-deselection path (database switch, in-memory reset,
+     * notification cancel, prefs write), which is unnecessary and disruptive for OTA.
+     */
+    suspend fun suspendTransportForFirmwareUpdate()
+
+    /**
      * Requests that the next BLE connection invalidates Android's GATT service cache. Call before [setDeviceAddress]
      * when reconnecting after a firmware update.
      */

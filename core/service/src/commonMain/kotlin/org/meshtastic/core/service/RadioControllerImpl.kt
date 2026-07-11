@@ -134,6 +134,17 @@ class RadioControllerImpl(
         onDeviceAddressChanged?.invoke()
     }
 
+    override suspend fun suspendTransportForFirmwareUpdate() {
+        // Delegated to the lower-level transport's suspending disconnect, which:
+        // - tears down the active transport and suspends until teardown completes;
+        // - clears the connectionRequested gate so environmental listeners cannot auto-reconnect;
+        // - preserves the selected device address (currentDeviceAddressFlow) and the bonded-address pref;
+        // - touches none of the app-level per-device state (DatabaseManager, NodeManager, early packets,
+        //   notifications, prefs).
+        // The post-update path re-arms and reconnects the transport by calling setDeviceAddress(original).
+        radioInterfaceService.disconnect()
+    }
+
     override fun requestGattCacheInvalidationOnNextConnect() {
         radioInterfaceService.requestGattCacheInvalidationOnNextConnect()
     }
@@ -141,7 +152,7 @@ class RadioControllerImpl(
     private suspend fun switchDevice(deviceAddr: String) {
         val currentAddr = meshPrefs.deviceAddress.value
         if (deviceAddr != currentAddr) {
-            Logger.i { "Device address changed, switching database and clearing node DB" }
+            Logger.i { "Device address changed, switching database and clearing in-memory node state" }
             meshPrefs.setDeviceAddress(deviceAddr)
             nodeManager.clear()
             messageProcessor.value.clearEarlyPackets()

@@ -209,6 +209,26 @@ class RadioControllerImplTest {
     }
 
     @Test
+    fun suspendTransportForFirmwareUpdateDelegatesToRadioInterfaceServiceDisconnect() = runTest {
+        val controller = createController()
+        every { meshPrefs.deviceAddress } returns MutableStateFlow("ble:AA:BB:CC:DD:EE:FF")
+
+        controller.suspendTransportForFirmwareUpdate()
+
+        // Contract: the OTA suspension path MUST delegate to the lower-level transport's suspending
+        // disconnect() — nothing else.
+        verifySuspend(exactly(1)) { radioInterfaceService.disconnect() }
+        // Must NOT deselect the device, switch databases, write prefs, clear NodeManager / early packets,
+        // cancel notifications, or invoke the selected-address callback.
+        verify(exactly(0)) { radioInterfaceService.setDeviceAddress(any()) }
+        verifySuspend(exactly(0)) { meshPrefs.setDeviceAddress(any()) }
+        verify(exactly(0)) { databaseManager.switchActiveDatabase(any()) }
+        verify(exactly(0)) { nodeManager.clear() }
+        verify(exactly(0)) { nodeManager.loadCachedNodeDB() }
+        verify(exactly(0)) { notificationManager.cancelAll() }
+    }
+
+    @Test
     fun sendReactionPersistsToDatabase() = runTest {
         val controller = createController()
         val user = User(id = "!abcd1234", long_name = "Test", short_name = "T")

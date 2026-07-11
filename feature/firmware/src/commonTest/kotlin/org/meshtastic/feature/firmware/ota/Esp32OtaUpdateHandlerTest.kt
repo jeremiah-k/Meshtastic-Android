@@ -54,12 +54,13 @@ import kotlin.test.assertTrue
  * `triggerRebootOta` and tearing down the mesh transport.
  *
  * Each test drives `startUpdate` end-to-end just far enough to observe the preflight outcome:
- * - Confirmed → mesh disconnect (`setDeviceAddress("n")`) is invoked, then the handler proceeds into the BLE transport
- *   phase, which fails fast on the mocked BLE deps. We bound the call with `withTimeoutOrNull` so the post-preflight
- *   BLE-connect retry loop is cancelled before it costs real wall-clock time.
- * - Rejected → mesh transport is preserved (no `setDeviceAddress`) and an `Error` state is emitted; the handler returns
- *   cleanly with no exception to chase.
- * - Silent firmware → legacy fallback disconnects the mesh transport and proceeds toward OTA connection attempts.
+ * - Confirmed → mesh transport is suspended (`suspendTransportForFirmwareUpdate` is invoked, without deselecting the
+ *   device via `setDeviceAddress`), then the handler proceeds into the BLE transport phase, which fails fast on the
+ *   mocked BLE deps. We bound the call with `withTimeoutOrNull` so the post-preflight BLE-connect retry loop is
+ *   cancelled before it costs real wall-clock time.
+ * - Rejected → mesh transport is preserved (no suspension, no `setDeviceAddress`) and an `Error` state is emitted; the
+ *   handler returns cleanly with no exception to chase.
+ * - Silent firmware → legacy fallback suspends the mesh transport and proceeds toward OTA connection attempts.
  *
  * The firmware response is simulated by mutating [FakeRadioController.clientNotification] from a sibling coroutine
  * scheduled to fire after `triggerRebootOta`. Because baseline is captured BEFORE the trigger (see `performUpdate`), a
@@ -175,7 +176,14 @@ class Esp32OtaUpdateHandlerTest {
             }
         },
     ) {
-        assertEquals("n", radioController.lastSetDeviceAddress, "Confirmed preflight must disconnect mesh service")
+        assertTrue(
+            radioController.suspendTransportForFirmwareUpdateCallCount > 0,
+            "Confirmed preflight must suspend the mesh transport",
+        )
+        assertNull(
+            radioController.lastSetDeviceAddress,
+            "Transport suspension must NOT deselect the device via setDeviceAddress",
+        )
     }
 
     @Test
@@ -201,7 +209,14 @@ class Esp32OtaUpdateHandlerTest {
                 bleTransportFactory = { transports.removeFirst() }
             },
         ) {
-            assertEquals("n", radioController.lastSetDeviceAddress, "Confirmed preflight must disconnect mesh service")
+            assertTrue(
+                radioController.suspendTransportForFirmwareUpdateCallCount > 0,
+                "Confirmed preflight must suspend the mesh transport",
+            )
+            assertNull(
+                radioController.lastSetDeviceAddress,
+                "Transport suspension must NOT deselect the device via setDeviceAddress",
+            )
             assertTrue(events.contains("close:first"), "Failed transport must be closed before retry")
             assertTrue(events.contains("connect:second"), "Retry must create and connect a fresh transport")
             assertTrue(events.indexOf("close:first") < events.indexOf("connect:second"))
@@ -338,7 +353,14 @@ class Esp32OtaUpdateHandlerTest {
                 wifiTransportFactory = { transports.removeFirst() }
             },
         ) {
-            assertEquals("n", radioController.lastSetDeviceAddress, "Confirmed preflight must disconnect mesh service")
+            assertTrue(
+                radioController.suspendTransportForFirmwareUpdateCallCount > 0,
+                "Confirmed preflight must suspend the mesh transport",
+            )
+            assertNull(
+                radioController.lastSetDeviceAddress,
+                "Transport suspension must NOT deselect the device via setDeviceAddress",
+            )
             assertTrue(events.contains("close:wifi-first"), "Failed WiFi transport must be closed before retry")
             assertTrue(events.contains("connect:wifi-second"), "WiFi retry must create and connect a fresh transport")
             assertTrue(events.indexOf("close:wifi-first") < events.indexOf("connect:wifi-second"))
@@ -371,7 +393,14 @@ class Esp32OtaUpdateHandlerTest {
                 }
             },
         ) {
-            assertEquals("n", radioController.lastSetDeviceAddress, "Confirmed preflight must disconnect mesh service")
+            assertTrue(
+                radioController.suspendTransportForFirmwareUpdateCallCount > 0,
+                "Confirmed preflight must suspend the mesh transport",
+            )
+            assertNull(
+                radioController.lastSetDeviceAddress,
+                "Transport suspension must NOT deselect the device via setDeviceAddress",
+            )
             assertEquals(WIFI_CONNECT_ATTEMPTS, attempt, "WiFi should use the full post-confirm retry budget")
             repeat(WIFI_CONNECT_ATTEMPTS) { index ->
                 val name = "wifi-${index + 1}"
@@ -405,7 +434,14 @@ class Esp32OtaUpdateHandlerTest {
                 }
             },
         ) {
-            assertEquals("n", radioController.lastSetDeviceAddress, "Confirmed preflight must disconnect mesh service")
+            assertTrue(
+                radioController.suspendTransportForFirmwareUpdateCallCount > 0,
+                "Confirmed preflight must suspend the mesh transport",
+            )
+            assertNull(
+                radioController.lastSetDeviceAddress,
+                "Transport suspension must NOT deselect the device via setDeviceAddress",
+            )
             assertEquals(BLE_CONNECT_ATTEMPTS, attempt, "BLE should use the full post-confirm retry budget")
             repeat(BLE_CONNECT_ATTEMPTS) { index ->
                 val name = "ble-${index + 1}"
@@ -426,7 +462,15 @@ class Esp32OtaUpdateHandlerTest {
         // OTA-keyed message that is NOT the canonical "Rebooting to <mode> OTA" success prefix → Rejected.
         confirmationMessage = "Cannot start OTA: OTA Loader partition not found.",
     ) {
-        assertNull(radioController.lastSetDeviceAddress, "Rejected preflight must NOT disconnect mesh service")
+        assertNull(
+            radioController.lastSetDeviceAddress,
+            "Rejected preflight must NOT suspend or deselect the mesh transport",
+        )
+        assertEquals(
+            0,
+            radioController.suspendTransportForFirmwareUpdateCallCount,
+            "Rejected preflight must NOT suspend the mesh transport",
+        )
         assertTrue(states.any { it is FirmwareUpdateState.Error }, "Rejected preflight must emit Error state")
     }
 
@@ -449,10 +493,13 @@ class Esp32OtaUpdateHandlerTest {
             }
         },
     ) {
-        assertEquals(
-            "n",
+        assertTrue(
+            radioController.suspendTransportForFirmwareUpdateCallCount > 0,
+            "Silent preflight must still suspend the mesh transport via the legacy fallback path",
+        )
+        assertNull(
             radioController.lastSetDeviceAddress,
-            "Silent preflight must still disconnect mesh service",
+            "Legacy fallback transport suspension must NOT deselect the device via setDeviceAddress",
         )
     }
 

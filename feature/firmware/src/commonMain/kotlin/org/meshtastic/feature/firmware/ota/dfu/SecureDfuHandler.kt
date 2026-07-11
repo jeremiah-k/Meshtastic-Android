@@ -470,13 +470,16 @@ class SecureDfuHandler(
                 val entries = firmwareFileHandler.extractZipEntries(zipFile)
                 val pkg = parseDfuZipEntries(entries)
 
-                // ── 3. Disconnect mesh service, trigger buttonless DFU ───────────
+                // ── 3. Suspend mesh transport, trigger buttonless DFU ──────────
                 updateState(
                     FirmwareUpdateState.Processing(
                         ProgressState(UiText.Resource(Res.string.firmware_update_enabling_dfu)),
                     ),
                 )
-                radioController.setDeviceAddress("n")
+                // Suspend the mesh transport (without deselecting the device or clearing the in-memory
+                // node DB) so the OTA bootloader has a free BLE GATT link. The post-update verification
+                // path re-arms and reconnects the transport via setDeviceAddress(originalAddress).
+                radioController.suspendTransportForFirmwareUpdate()
                 delay(GATT_RELEASE_DELAY_MS)
 
                 // The trigger always uses SecureDfuTransport — it speaks both Secure (FE59) and Legacy (1530)
