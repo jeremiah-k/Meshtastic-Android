@@ -287,6 +287,9 @@ interface NodeInfoDao {
     @Query("DELETE FROM metadata WHERE num=:num")
     suspend fun deleteMetadata(num: Int)
 
+    @Query("SELECT * FROM metadata WHERE num=:num LIMIT 1")
+    suspend fun getMetadataByNum(num: Int): MetadataEntity?
+
     /** Snapshot used by DatabaseMerger to carry per-node DeviceMetadata across transports (newest timestamp wins). */
     @Query("SELECT * FROM metadata")
     suspend fun getAllMetadataSnapshot(): List<MetadataEntity>
@@ -404,7 +407,84 @@ interface NodeInfoDao {
     suspend fun installConfig(mi: MyNodeEntity, nodes: List<NodeEntity>) {
         clearMyNodeInfo()
         setMyNodeInfo(mi)
-        putAll(getVerifiedNodesForUpsert(nodes))
+
+        // Authoritative local-node migration: firmware 2.7→2.8 can regenerate the public key from an
+        // unchanged private key and then unconditionally call createNewIdentity(), which changes the
+        // node's NodeNum while keeping the same 32-byte public key. Without this branch, the general
+        // duplicate-public-key protection in getVerifiedNodesForUpsert would retain the old conflicting
+        // row and MyNodeInfo would name a node number with no matching row in the node table.
+        //
+        // Runs before the batch-validated putAll so that, on a successful migration, the new local row is
+        // inserted directly and the incoming local node is excluded from the batch pass; remote nodes and
+        // the ordinary update path are untouched when the conditions do not match.
+        val localNode = nodes.firstOrNull { it.num == mi.myNodeNum }
+        val remaining =
+            if (localNode != null && migrateLocalNodeForKeyRotation(localNode, mi)) {
+                nodes - localNode
+            } else {
+                nodes
+            }
+        putAll(getVerifiedNodesForUpsert(remaining))
+    }
+
+    /**
+     * Migrates an authoritative local node whose node number changed while retaining its public key (firmware 2.7→2.8
+     * createNewIdentity() path). Returns true when a migration was performed, in which case the caller MUST exclude
+     * [incomingLocal] from the subsequent batch validation pass.
+     *
+     * Migration runs (and only runs) when ALL of:
+     * - the incoming local node carries a full non-empty (KEY_SIZE-byte) public key;
+     * - there is no existing node row under the new local number [mi.myNodeNum];
+     * - exactly one existing row has the same public key under a different node number.
+     *
+     * Within this same Room transaction the old row and its DeviceMetadata (if any) are removed, a new local row is
+     * inserted under [mi.myNodeNum] built from the incoming firmware data while preserving the app-local fields
+     * (isFavorite, notes, powerChannelLabels, manuallyVerified), and the metadata is re-keyed to the new node number.
+     * Incoming values are authoritative for current firmware/network state including is_ignored and is_muted.
+     *
+     * This also repairs an already-broken database in which MyNodeInfo was already advanced to the new number while the
+     * node table still contained only the old public-key-matching row: at installConfig time mi is already stored, so
+     * the only state we observe is "no row under mi.myNodeNum + one row under a different num with the same key" — the
+     * same shape as a fresh transition.
+     */
+    @Suppress("ReturnCount")
+    private suspend fun migrateLocalNodeForKeyRotation(incomingLocal: NodeEntity, mi: MyNodeEntity): Boolean {
+        val incomingKey = incomingLocal.user.public_key
+        if (incomingKey.size != KEY_SIZE) return false
+        if (getNodeByNum(mi.myNodeNum) != null) return false
+
+        val keyMatches = findNodesByPublicKeys(listOf(incomingKey)).filter { it.num != mi.myNodeNum }
+        if (keyMatches.size != 1) return false
+
+        val oldRow = keyMatches.first()
+        val oldMetadata = getMetadataByNum(oldRow.num)
+
+        // Populate denormalized publicKey / name columns from the incoming firmware data, mirroring the
+        // batch-validation path so the new row's searchable columns are consistent.
+        val newLocalRow =
+            incomingLocal.copy(
+                num = mi.myNodeNum,
+                publicKey = incomingKey,
+                longName =
+                if (incomingLocal.user.hw_model != HardwareModel.UNSET) incomingLocal.user.long_name else null,
+                shortName =
+                if (incomingLocal.user.hw_model != HardwareModel.UNSET) incomingLocal.user.short_name else null,
+                // Preserve app-local fields that the firmware cannot repopulate.
+                isFavorite = oldRow.isFavorite,
+                notes = oldRow.notes,
+                powerChannelLabels = oldRow.powerChannelLabels,
+                manuallyVerified = oldRow.manuallyVerified,
+                // Incoming values are authoritative for current firmware/network state. isIgnored and isMuted
+                // default from incomingLocal (its user-supplied defaults), which matches the spec.
+            )
+
+        deleteNode(oldRow.num)
+        if (oldMetadata != null) {
+            deleteMetadata(oldRow.num)
+            upsert(oldMetadata.copy(num = mi.myNodeNum))
+        }
+        doUpsert(newLocalRow)
+        return true
     }
 
     /**
