@@ -184,25 +184,18 @@ open class MeshLogRepositoryImpl(
     override suspend fun deleteLocalStatsLogs(nodeNum: Int) = withContext(dispatchers.io) {
         val myNodeNum = nodeInfoReadDataSource.myNodeInfoFlow().firstOrNull()?.myNodeNum
         val logId = if (nodeNum == myNodeNum) MeshLog.NODE_NUM_LOCAL else nodeNum
-        // One withDb block: the query and the chunked deletes all land on the same DB instance (previously each
-        // chunk
-        // re-fetched the DAO to survive a mid-op switch; capturing one instance is the more correct behavior, and
-        // the
-        // drain barrier now covers the whole read-modify-delete against a concurrent merge).
         dbManager.withDb { db ->
             val dao = db.meshLogDao()
-            val localStatsLogIds =
-                dao.getLogsFrom(logId, PortNum.TELEMETRY_APP.value, Int.MAX_VALUE)
-                    .firstOrNull()
-                    .orEmpty()
+            // Snapshot read outside the transaction — the selection requires Kotlin protobuf parsing
+            // (parseTelemetryLog), so it cannot be a single SQL operation. The delete targets stable UUIDs,
+            // so a concurrent insert between snapshot and delete is simply not in the delete set.
+            val uuidsToDelete =
+                dao.getLogsSnapshot(logId, PortNum.TELEMETRY_APP.value, Int.MAX_VALUE)
                     .map { it.asExternalModel() }
                     .filter { parseTelemetryLog(it)?.local_stats != null }
                     .map { it.uuid }
-
-            // Chunk to stay under SQLite's bind-variable limit.
-            for (chunk in localStatsLogIds.chunked(DELETE_CHUNK_SIZE)) {
-                dao.deleteLogsByUuid(chunk)
-            }
+            // The chunked delete runs inside one Room transaction — all-or-nothing.
+            dao.deleteLogsByUuidAtomic(uuidsToDelete)
         }
         Unit
     }
@@ -217,8 +210,5 @@ open class MeshLogRepositoryImpl(
 
     companion object {
         private const val MILLIS_PER_SEC = 1000L
-
-        /** Max UUIDs per DELETE IN-clause; keeps us under SQLite's bind-variable limit. */
-        private const val DELETE_CHUNK_SIZE = 500
     }
 }
