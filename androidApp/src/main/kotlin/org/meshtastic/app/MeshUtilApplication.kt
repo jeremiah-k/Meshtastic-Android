@@ -136,7 +136,7 @@ open class MeshUtilApplication :
 
     override fun onTerminate() {
         // Shutdown managers (useful for Robolectric tests)
-        get<DatabaseManager>().close()
+        kotlinx.coroutines.runBlocking { get<DatabaseManager>().close() }
         applicationScope.cancel()
         super.onTerminate()
         org.koin.core.context.stopKoin()

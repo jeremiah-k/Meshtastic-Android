@@ -48,6 +48,12 @@ object DatabaseConstants {
     // Address anonymization sizing
     const val ADDRESS_ANON_SHORT_LEN: Int = 4
     const val ADDRESS_ANON_EDGE_LEN: Int = 2
+
+    /**
+     * SQLite's default maximum number of host parameters (bind variables) per statement. Used to chunk IN-clause
+     * queries.
+     */
+    const val SQLITE_MAX_BIND_PARAMETERS: Int = 999
 }
 
 fun shortSha1(s: String): String = s.encodeUtf8().sha1().hex().take(DatabaseConstants.DB_NAME_HASH_LEN)
