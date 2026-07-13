@@ -51,8 +51,7 @@ class SwitchingNodeInfoReadDataSource(private val dbManager: DatabaseProvider) :
     }
 
     override suspend fun getNodesOlderThan(lastHeard: Int): List<NodeEntity> =
-        dbManager.withDb { it.nodeInfoDao().getNodesOlderThan(lastHeard) } ?: emptyList()
+        dbManager.currentDb.value.nodeInfoDao().getNodesOlderThan(lastHeard)
 
-    override suspend fun getUnknownNodes(): List<NodeEntity> =
-        dbManager.withDb { it.nodeInfoDao().getUnknownNodes() } ?: emptyList()
+    override suspend fun getUnknownNodes(): List<NodeEntity> = dbManager.currentDb.value.nodeInfoDao().getUnknownNodes()
 }

@@ -33,16 +33,16 @@ class DeviceHardwareLocalDataSource(private val dbManager: DatabaseProvider) {
     }
 
     suspend fun getByHwModel(hwModel: Int): List<DeviceHardwareEntity> =
-        dbManager.withDb { it.deviceHardwareDao().getByHwModel(hwModel) }.orEmpty()
+        dbManager.currentDb.value.deviceHardwareDao().getByHwModel(hwModel)
 
     suspend fun getByTarget(target: String): DeviceHardwareEntity? =
-        dbManager.withDb { it.deviceHardwareDao().getByTarget(target) }
+        dbManager.currentDb.value.deviceHardwareDao().getByTarget(target)
 
     suspend fun getByModelAndTarget(hwModel: Int, target: String): DeviceHardwareEntity? =
-        dbManager.withDb { it.deviceHardwareDao().getByModelAndTarget(hwModel, target) }
+        dbManager.currentDb.value.deviceHardwareDao().getByModelAndTarget(hwModel, target)
 
-    suspend fun hasAnyEntries(): Boolean = dbManager.withDb { it.deviceHardwareDao().count() > 0 } ?: false
+    suspend fun hasAnyEntries(): Boolean = dbManager.currentDb.value.deviceHardwareDao().count() > 0
 
     /** All known `platformioTarget` values — used to determine which msh.to links are vendor links. */
-    suspend fun getAllTargets(): List<String> = dbManager.withDb { it.deviceHardwareDao().getAllTargets() }.orEmpty()
+    suspend fun getAllTargets(): List<String> = dbManager.currentDb.value.deviceHardwareDao().getAllTargets()
 }
