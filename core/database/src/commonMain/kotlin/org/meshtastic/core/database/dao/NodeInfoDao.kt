@@ -333,6 +333,25 @@ interface NodeInfoDao {
     @Query("DELETE FROM nodes WHERE num IN (:nodeNums)")
     suspend fun deleteNodes(nodeNums: List<Int>)
 
+    /**
+     * Atomically deletes stale node rows (and their metadata) before upserting the canonical node. Ordered
+     * deletes-then-upsert so the verified upsert path — which maps a `same_key, different_num` collision back to the
+     * existing identity — cannot resurrect a just-deleted stale entry.
+     *
+     * Runs in one Room transaction: if the upsert verification or write fails, the deletes roll back.
+     */
+    @Transaction
+    suspend fun reconcileIdentity(deleteNums: List<Int>, upsert: NodeEntity?) {
+        for (num in deleteNums) {
+            deleteMetadata(num)
+        }
+        deleteNodes(deleteNums)
+        if (upsert != null) {
+            val verified = getVerifiedNodeForUpsert(upsert)
+            doUpsert(verified)
+        }
+    }
+
     @Query("SELECT * FROM nodes WHERE last_heard < :lastHeard")
     suspend fun getNodesOlderThan(lastHeard: Int): List<NodeEntity>
 

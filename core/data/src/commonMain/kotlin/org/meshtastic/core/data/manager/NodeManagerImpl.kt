@@ -28,6 +28,7 @@ import okio.ByteString
 import org.koin.core.annotation.Named
 import org.koin.core.annotation.Single
 import org.meshtastic.core.common.util.clampTimestampToNow
+import org.meshtastic.core.common.util.crc32
 import org.meshtastic.core.common.util.handledLaunch
 import org.meshtastic.core.model.MyNodeInfo
 import org.meshtastic.core.model.Node
@@ -50,6 +51,18 @@ import org.meshtastic.proto.User
 import org.meshtastic.proto.NodeInfo as ProtoNodeInfo
 import org.meshtastic.proto.Position as ProtoPosition
 
+/**
+ * Resolves a stable identity key from a raw [ByteString]. Returns null unless the key is exactly [Node.PUBLIC_KEY_SIZE]
+ * bytes and is not [Node.ERROR_BYTE_STRING]. Used by the reducer to centralize key validation so no branch repeats the
+ * size/error check inline.
+ */
+private fun resolveStableKey(key: ByteString?): ByteString? {
+    if (key == null || key.size != Node.PUBLIC_KEY_SIZE || key == Node.ERROR_BYTE_STRING) return null
+    return key
+}
+
+private val DEFAULT_NODE_NAME_REGEX = Regex("^Meshtastic [0-9a-fA-F]{4}$")
+
 /** Implementation of [NodeManager] that maintains an in-memory database of the mesh. */
 @Suppress("LongParameterList", "TooManyFunctions", "CyclomaticComplexMethod")
 @Single(binds = [NodeManager::class, NodeIdLookup::class])
@@ -59,41 +72,108 @@ class NodeManagerImpl(
     @Named("ServiceScope") private val scope: CoroutineScope,
 ) : NodeManager {
 
+    /**
+     * Resolves the stable identity key from a stored [Node], preferring [Node.publicKey] and falling back to
+     * [User.public_key] only when the primary field is not itself a valid stable key.
+     */
+    internal fun resolveNodeStableKey(node: Node): ByteString? =
+        resolveStableKey(node.publicKey) ?: resolveStableKey(node.user.public_key)
+
     // Two indices over the same node set: byNum is the canonical store (mesh-level identifier), byId is a secondary
-    // O(1) lookup for the user-facing hex string. Both are held in a single atomic ref so updates are observed
-    // consistently — concurrent readers never see an entry present in one index but not the other.
-    private data class NodeIndex(
+    // index for O(1) user-ID lookup. Both are held in a single atomic ref so updates are observed consistently.
+    internal data class NodeIndex(
         val byNum: PersistentMap<Int, Node> = persistentMapOf(),
         val byId: PersistentMap<String, Node> = persistentMapOf(),
     ) {
-        fun put(num: Int, node: Node): NodeIndex {
+        fun put(num: Int, node: Node, preferredNum: Int? = null): NodeIndex {
             val previous = byNum[num]
+            val nextByNum = byNum.putting(num, node)
             var nextById = byId
-            // If the user.id changed (e.g. firmware reassigned the hex id) drop the stale id entry.
-            if (previous != null && previous.user.id.isNotEmpty() && previous.user.id != node.user.id) {
-                nextById = nextById.removing(previous.user.id)
+            val affectedIds = setOfNotNull(previous?.user?.id, node.user.id).filter { it.isNotEmpty() }
+            for (id in affectedIds) {
+                val candidates = nextByNum.entries.filter { it.value.user.id == id }
+                val representative = chooseRepresentative(candidates, preferredNum)
+                nextById =
+                    if (representative == null) {
+                        nextById.removing(id)
+                    } else {
+                        nextById.putting(id, representative.value)
+                    }
             }
-            if (node.user.id.isNotEmpty()) {
-                nextById = nextById.putting(node.user.id, node)
-            }
-            return NodeIndex(byNum = byNum.putting(num, node), byId = nextById)
+            return NodeIndex(byNum = nextByNum, byId = nextById)
         }
 
-        fun remove(num: Int): NodeIndex {
+        /**
+         * Removes [num] from both indices. When the removed node's user ID was the [byId] representative and another
+         * surviving node shares that ID, [preferredNum] wins when present; otherwise the stable fallback selects the
+         * replacement.
+         */
+        fun remove(num: Int, preferredNum: Int? = null): NodeIndex {
             val previous = byNum[num] ?: return this
-            return NodeIndex(
-                byNum = byNum.removing(num),
-                byId = if (previous.user.id.isNotEmpty()) byId.removing(previous.user.id) else byId,
-            )
+            val newByNum = byNum.removing(num)
+            var newById = byId
+            if (previous.user.id.isNotEmpty() && (byId[previous.user.id]?.num == num || preferredNum != null)) {
+                val survivors = newByNum.entries.filter { it.value.user.id == previous.user.id }
+                val survivor = chooseRepresentative(survivors, preferredNum)
+                newById =
+                    if (survivor != null) {
+                        newById.putting(previous.user.id, survivor.value)
+                    } else {
+                        newById.removing(previous.user.id)
+                    }
+            }
+            return NodeIndex(byNum = newByNum, byId = newById)
         }
 
         companion object {
+            /**
+             * Determines whether a [Node] is a generated placeholder (default identity with no established identity).
+             * Used by both the representative selector and the stale-packet reducer to ensure consistent
+             * classification.
+             */
+            internal fun isGeneratedPlaceholder(node: Node): Boolean {
+                val nodeKey = resolveStableKey(node.publicKey) ?: resolveStableKey(node.user.public_key)
+                return nodeKey == null &&
+                    node.user.hw_model == HardwareModel.UNSET &&
+                    node.user.id == NodeAddress.numToDefaultId(node.num) &&
+                    node.user.long_name.matches(DEFAULT_NODE_NAME_REGEX)
+            }
+
+            private val representativeComparator =
+                compareByDescending<Map.Entry<Int, Node>> {
+                    resolveStableKey(it.value.publicKey) != null ||
+                        resolveStableKey(it.value.user.public_key) != null ||
+                        it.value.user.hw_model != HardwareModel.UNSET
+                }
+                    .thenBy { it.key }
+
+            /**
+             * Selects a deterministic representative from [candidates] sharing the same user ID. If [preferredNum] is
+             * provided and present in candidates, it is selected (used for stale replay and local reconciliation).
+             * Otherwise, prefer an established key or hardware identity, then the lower node number.
+             */
+            internal fun chooseRepresentative(
+                candidates: List<Map.Entry<Int, Node>>,
+                preferredNum: Int?,
+            ): Map.Entry<Int, Node>? = preferredNum?.let { preferred -> candidates.firstOrNull { it.key == preferred } }
+                ?: candidates.minWithOrNull(representativeComparator)
+
             fun fromByNum(nodes: Map<Int, Node>): NodeIndex {
                 var byNum = persistentMapOf<Int, Node>()
+                for ((n, node) in nodes) {
+                    byNum = byNum.putting(n, node)
+                }
+                // Build byId deterministically: for duplicate user IDs, choose representative by stable tie-break.
+                val byIdEntries =
+                    byNum.entries
+                        .groupBy { it.value.user.id }
+                        .filterKeys { it.isNotEmpty() }
+                        .mapValues { (_, entries) ->
+                            chooseRepresentative(entries.toList(), preferredNum = null)!!.value
+                        }
                 var byId = persistentMapOf<String, Node>()
-                for ((num, node) in nodes) {
-                    byNum = byNum.putting(num, node)
-                    if (node.user.id.isNotEmpty()) byId = byId.putting(node.user.id, node)
+                for ((id, node) in byIdEntries) {
+                    byId = byId.putting(id, node)
                 }
                 return NodeIndex(byNum, byId)
             }
@@ -138,6 +218,7 @@ class NodeManagerImpl(
 
     companion object {
         private const val TIME_MS_TO_S = 1000L
+        private const val GENERATED_NODE_NAME_SUFFIX_LENGTH = 4
     }
 
     override fun loadCachedNodeDB() {
@@ -189,19 +270,8 @@ class NodeManagerImpl(
         nodeIndex.update { it.remove(nodeNum) }
     }
 
-    internal fun getOrCreateNode(n: Int, channel: Int = 0): Node = nodeIndex.value.byNum[n]
-        ?: run {
-            val userId = NodeAddress.numToDefaultId(n)
-            val defaultUser =
-                User(
-                    id = userId,
-                    long_name = "Meshtastic ${userId.takeLast(n = 4)}",
-                    short_name = userId.takeLast(n = 4),
-                    hw_model = HardwareModel.UNSET,
-                )
-
-            Node(num = n, user = defaultUser, channel = channel)
-        }
+    internal fun getOrCreateNode(n: Int, channel: Int = 0): Node =
+        nodeIndex.value.byNum[n] ?: createDefaultNode(n, channel)
 
     override fun updateNode(nodeNum: Int, channel: Int, transform: (Node) -> Node) {
         // Perform read + transform inside update{} to ensure atomicity.
@@ -222,40 +292,17 @@ class NodeManagerImpl(
     }
 
     override fun handleReceivedUser(fromNum: Int, p: User, channel: Int, manuallyVerified: Boolean) {
-        updateNode(fromNum) { node ->
-            val newNode = (node.isUnknownUser && p.hw_model != HardwareModel.UNSET)
-            val shouldPreserve = shouldPreserveExistingUser(node.user, p)
-
-            val next =
-                if (shouldPreserve) {
-                    node.copy(channel = channel, manuallyVerified = manuallyVerified)
-                } else {
-                    val keyMatch = !node.hasPKC || node.user.public_key == p.public_key
-                    val newUser = if (keyMatch) p else p.copy(public_key = ByteString.EMPTY)
-                    node.copy(
-                        user = newUser,
-                        publicKey = newUser.public_key,
-                        channel = channel,
-                        manuallyVerified = manuallyVerified,
-                    )
-                }
-            if (newNode && !shouldPreserve) {
-                scope.handledLaunch {
-                    notificationManager.dispatch(
-                        Notification(
-                            title = getStringSuspend(Res.string.new_node_seen, next.user.short_name),
-                            message = next.user.long_name,
-                            category = Notification.Category.NodeEvent,
-                            id = next.num,
-                            // Path format must stay in sync with DEEP_LINK_BASE_URI + DeepLinkRouter
-                            // in core/navigation (avoided as a Gradle dep here to keep core/data free
-                            // of Compose Navigation libs).
-                            deepLinkUri = "meshtastic://meshtastic/nodes/${next.num}",
-                        ),
-                    )
-                }
+        while (true) {
+            val before = nodeIndex.value
+            val myNum = myNodeNum.value // Read fresh on each retry
+            val transition = reduceReceivedUser(before, fromNum, p, channel, manuallyVerified, myNum)
+            // Guard against myNodeNum changing between the reduction and the CAS — a handshake renumber
+            // could reclassify a local packet as remote or vice versa.
+            if (myNodeNum.value != myNum) continue
+            if (nodeIndex.compareAndSet(before, transition.after)) {
+                applyReceivedUserEffects(transition)
+                return
             }
-            next
         }
     }
 
@@ -356,10 +403,235 @@ class NodeManagerImpl(
     }
 
     private fun shouldPreserveExistingUser(existing: User, incoming: User): Boolean {
-        val isDefaultName = (incoming.long_name).matches(Regex("^Meshtastic [0-9a-fA-F]{4}$"))
+        val isDefaultName = incoming.long_name.matches(DEFAULT_NODE_NAME_REGEX)
         val isDefaultHwModel = incoming.hw_model == HardwareModel.UNSET
-        val hasExistingUser = (existing.id).isNotEmpty() && existing.hw_model != HardwareModel.UNSET
+        val hasCustomIdentity =
+            existing.id != incoming.id ||
+                existing.long_name != incoming.long_name ||
+                existing.short_name != incoming.short_name
+        val hasExistingUser =
+            existing.id.isNotEmpty() && (existing.hw_model != HardwareModel.UNSET || hasCustomIdentity)
         return hasExistingUser && isDefaultName && isDefaultHwModel
+    }
+
+    /**
+     * Ordered persistence plan produced by [reduceReceivedUser]. Deletions execute before upsert: stale rows are
+     * removed before the canonical node is validated/inserted, so the DAO's normal mesh-time upsert cannot resurrect a
+     * deleted stale identity from a `same_key, different_num` collision.
+     */
+    private data class PersistencePlan(val deleteNums: List<Int> = emptyList(), val upsert: Node? = null)
+
+    /**
+     * Result of classifying one [User] packet against an in-memory [NodeIndex] snapshot. The reducer is pure: it only
+     * reads [before] and the packet fields, and produces the next index plus the side effects to apply once the CAS
+     * commits. Safe to re-evaluate on every retry.
+     */
+    private data class ReceivedUserTransition(
+        val after: NodeIndex,
+        /** Ordered persistence plan to apply once the CAS commits (see [PersistencePlan]). */
+        val persistence: PersistencePlan,
+        /** Node to fire a "new node seen" notification for (null if not a genuine new node). */
+        val notifyNode: Node?,
+    )
+
+    /**
+     * Pure reducer that classifies an incoming [User] packet against the [before] snapshot and returns the next index
+     * plus queued side effects. No logging, no DB calls, no coroutine launches — deterministic and safe to re-run on
+     * CAS retry.
+     *
+     * Classification:
+     * 1. [fromNum] == [myNum] → local-link authoritative: remove ALL other same-key entries, update local, no notify.
+     * 2. [p.public_key] is null/empty/ERROR → NoMatch: normal update.
+     * 3. Otherwise the resolved key's canonical firmware-2.8 num (`crc32(public_key).toInt()`) decides direction:
+     *     - Multiple other same-key candidates → ambiguous: preserve all, ignore packet.
+     *     - Exactly one other same-key candidate:
+     *         - Incoming at the canonical num, other not canonical → remove the other noncanonical entry, accept/
+     *           transform/upsert the incoming packet, prefer [fromNum], no notification.
+     *         - Other at the canonical num, incoming not canonical → remove the incoming stale entry (placeholder or
+     *           same-key), prefer the other num, no persistence, no notification.
+     *         - Neither num canonical → direction unknown: preserve both, ignore packet.
+     *         - Either slot carrying a different established valid key → conflict: preserve both, ignore packet.
+     *     - No other same-key candidate → NoMatch: normal update.
+     */
+    @Suppress("CyclomaticComplexMethod", "ReturnCount", "LongMethod")
+    private fun reduceReceivedUser(
+        before: NodeIndex,
+        fromNum: Int,
+        p: User,
+        channel: Int,
+        manuallyVerified: Boolean,
+        myNum: Int?,
+    ): ReceivedUserTransition {
+        val resolvedKey = resolveStableKey(p.public_key)
+
+        if (fromNum == myNum) {
+            // Local-link data is authoritative. Remove ALL other same-key entries in-memory, then update the local
+            // node. Durable renumbering is handled by the config-install migration — no repository delete calls.
+            val otherSameKeyNums =
+                if (resolvedKey == null) {
+                    emptyList()
+                } else {
+                    before.byNum.entries
+                        .filter { (otherNum, otherNode) ->
+                            otherNum != fromNum && resolveNodeStableKey(otherNode) == resolvedKey
+                        }
+                        .map { it.key }
+                }
+            val afterRemovals = otherSameKeyNums.fold(before) { idx, num -> idx.remove(num) }
+            val localNode = afterRemovals.byNum[fromNum] ?: createDefaultNode(fromNum, channel)
+            val transformed = transformUserNode(localNode, p, channel, manuallyVerified)
+            return ReceivedUserTransition(
+                after = afterRemovals.put(fromNum, transformed, preferredNum = fromNum),
+                persistence = PersistencePlan(deleteNums = otherSameKeyNums, upsert = transformed),
+                notifyNode = null,
+            )
+        }
+
+        // Non-local: identity matching against other nodes in the snapshot. Direction is decided by the firmware-2.8
+        // canonical node num (crc32 of the resolved public key) — the slot whose num matches the key is the canonical
+        // home; the other same-key sighting is a stale replay that must yield.
+        if (resolvedKey != null) {
+            val canonicalNum = resolvedKey.crc32().toInt()
+            val matches =
+                before.byNum.entries.filter { (otherNum, otherNode) ->
+                    otherNum != fromNum && resolveNodeStableKey(otherNode) == resolvedKey
+                }
+
+            if (matches.size > 1) {
+                // Ambiguous: multiple other candidates carry the same key. Don't pick arbitrarily.
+                return ReceivedUserTransition(before, PersistencePlan(), null)
+            }
+
+            if (matches.size == 1) {
+                val other = matches.single()
+                val otherIsCanonical = other.key == canonicalNum
+                val incomingIsCanonical = fromNum == canonicalNum
+                val existing = before.byNum[fromNum]
+                val existingKey = existing?.let { resolveNodeStableKey(it) }
+                val isGeneratedPlaceholder = existing != null && NodeIndex.isGeneratedPlaceholder(existing)
+                // The incoming slot is open for canonical-direction reconciliation when absent, a generated
+                // placeholder, or already carrying the same key. A different established valid key is a conflict.
+                val incomingSlotIsOpen = existing == null || isGeneratedPlaceholder || existingKey == resolvedKey
+
+                if (incomingIsCanonical && !otherIsCanonical) {
+                    // Packet arrived at the canonical num; the other same-key entry is a stale noncanonical sighting.
+                    if (!incomingSlotIsOpen) {
+                        // Different established identity at the canonical num → conflict, preserve both.
+                        return ReceivedUserTransition(before, PersistencePlan(), null)
+                    }
+                    // Delete the noncanonical same-key row durably, then upsert canonical.
+                    val afterRemoval = before.remove(other.key)
+                    val baseNode = afterRemoval.byNum[fromNum] ?: createDefaultNode(fromNum, channel)
+                    val transformed = transformUserNode(baseNode, p, channel, manuallyVerified)
+                    return ReceivedUserTransition(
+                        after = afterRemoval.put(fromNum, transformed, preferredNum = fromNum),
+                        persistence = PersistencePlan(deleteNums = listOf(other.key), upsert = transformed),
+                        notifyNode = null,
+                    )
+                }
+
+                if (otherIsCanonical && !incomingIsCanonical) {
+                    // Other entry sits at the canonical num; the incoming packet at fromNum is a stale noncanonical
+                    // replay. Delete the stale row durably so it cannot return after process restart.
+                    if (!incomingSlotIsOpen) {
+                        return ReceivedUserTransition(before, PersistencePlan(), null)
+                    }
+                    return ReceivedUserTransition(
+                        after = before.remove(fromNum, preferredNum = other.key),
+                        persistence = PersistencePlan(deleteNums = listOf(fromNum)),
+                        notifyNode = null,
+                    )
+                }
+
+                // Neither num is canonical (both-canonical is impossible since other.key != fromNum): direction
+                // unknown. Preserve both, no persistence, no notification.
+                return ReceivedUserTransition(before, PersistencePlan(), null)
+            }
+        }
+
+        // NoMatch: normal update path.
+        val existing = before.byNum[fromNum] ?: createDefaultNode(fromNum, channel)
+        val isNewNode = existing.isUnknownUser && p.hw_model != HardwareModel.UNSET
+        val shouldPreserve = shouldPreserveExistingUser(existing.user, p)
+        val transformed = transformUserNode(existing, p, channel, manuallyVerified)
+        val notify = if (isNewNode && !shouldPreserve) transformed else null
+        return ReceivedUserTransition(
+            after = before.put(fromNum, transformed),
+            persistence = PersistencePlan(upsert = transformed),
+            notifyNode = notify,
+        )
+    }
+
+    /** Pure factory for a placeholder [Node] at [num]. Kept side-effect-free so the reducer can call it safely. */
+    private fun createDefaultNode(num: Int, channel: Int): Node {
+        val userId = NodeAddress.numToDefaultId(num)
+        return Node(
+            num = num,
+            user =
+            User(
+                id = userId,
+                long_name = "Meshtastic ${userId.takeLast(GENERATED_NODE_NAME_SUFFIX_LENGTH)}",
+                short_name = userId.takeLast(GENERATED_NODE_NAME_SUFFIX_LENGTH),
+                hw_model = HardwareModel.UNSET,
+            ),
+            channel = channel,
+        )
+    }
+
+    /**
+     * Pure transform of an existing [node] under an incoming [User] packet (extracted from the legacy updateNode path).
+     */
+    private fun transformUserNode(node: Node, p: User, channel: Int, manuallyVerified: Boolean): Node {
+        val shouldPreserve = shouldPreserveExistingUser(node.user, p)
+        return if (shouldPreserve) {
+            node.copy(channel = channel, manuallyVerified = manuallyVerified)
+        } else {
+            val sanitizedUser = if (resolveStableKey(p.public_key) == null) p.copy(public_key = ByteString.EMPTY) else p
+            val keyMatch = !node.hasPKC || node.user.public_key == sanitizedUser.public_key
+            val newUser = if (keyMatch) sanitizedUser else sanitizedUser.copy(public_key = ByteString.EMPTY)
+            node.copy(
+                user = newUser,
+                publicKey = newUser.public_key,
+                channel = channel,
+                manuallyVerified = manuallyVerified,
+            )
+        }
+    }
+
+    /**
+     * Applies the side effects queued by [reduceReceivedUser] exactly once after the CAS commits, dispatching on the
+     * ordered [PersistencePlan]. The plan deletes stale rows before the upsert so the DAO's normal mesh-time upsert
+     * (which deliberately maps a `same_key, different_num` node back to the existing identity) cannot resurrect a
+     * deleted stale entry.
+     */
+    private fun applyReceivedUserEffects(transition: ReceivedUserTransition) {
+        val plan = transition.persistence
+        if (plan.deleteNums.isNotEmpty() || plan.upsert != null) {
+            if (isNodeDbReady.value) {
+                scope.handledLaunch { nodeRepository.reconcileIdentity(plan.deleteNums, plan.upsert) }
+            }
+        }
+        transition.notifyNode?.let { node ->
+            scope.handledLaunch {
+                notificationManager.dispatch(
+                    Notification(
+                        title = notificationTitleFormatter(node.user.short_name),
+                        message = node.user.long_name,
+                        category = Notification.Category.NodeEvent,
+                        id = node.num,
+                        deepLinkUri = "meshtastic://meshtastic/nodes/${node.num}",
+                    ),
+                )
+            }
+        }
+    }
+
+    /**
+     * Test seam over the notification title; production resolves compose-resources lazily inside the dispatch
+     * coroutine.
+     */
+    internal var notificationTitleFormatter: suspend (String) -> String = { shortName ->
+        getStringSuspend(Res.string.new_node_seen, shortName)
     }
 
     override fun toNodeID(nodeNum: Int): String = if (nodeNum == NodeAddress.NODENUM_BROADCAST) {

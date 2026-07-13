@@ -151,6 +151,13 @@ class FakeNodeRepository :
         _nodeDBbyNum.value = _nodeDBbyNum.value - nodeNums.toSet()
     }
 
+    override suspend fun reconcileIdentity(deleteNums: List<Int>, upsert: Node?) {
+        _nodeDBbyNum.value = _nodeDBbyNum.value - deleteNums.toSet()
+        if (upsert != null) {
+            _nodeDBbyNum.value = _nodeDBbyNum.value + (upsert.num to upsert)
+        }
+    }
+
     override suspend fun setNodeNotes(num: Int, notes: String) {
         val node = _nodeDBbyNum.value[num] ?: return
         _nodeDBbyNum.value = _nodeDBbyNum.value + (num to node.copy(notes = notes))

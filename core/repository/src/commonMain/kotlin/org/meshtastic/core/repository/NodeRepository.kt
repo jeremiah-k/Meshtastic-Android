@@ -146,6 +146,16 @@ interface NodeRepository {
     suspend fun deleteNodes(nodeNums: List<Int>)
 
     /**
+     * Atomically deletes stale node rows then upserts the canonical node in a single [withDb] transaction. Deletions
+     * execute first so the upsert's normal mesh-time verification (which deliberately maps a `same_key, different_num`
+     * collision back to the existing identity) cannot resurrect a just-deleted stale row.
+     *
+     * @param deleteNums Node numbers to delete before the upsert (empty list is a no-op).
+     * @param upsert Node to upsert after deletions (null skips the upsert).
+     */
+    suspend fun reconcileIdentity(deleteNums: List<Int>, upsert: Node?)
+
+    /**
      * Updates the personal notes for a node.
      *
      * @param num The node number.

@@ -24,6 +24,7 @@ import org.meshtastic.core.database.entity.MyNodeEntity
 import org.meshtastic.core.database.entity.NodeEntity
 import org.meshtastic.core.di.CoroutineDispatchers
 
+@Suppress("TooManyFunctions")
 @Single
 class SwitchingNodeInfoWriteDataSource(
     private val dbManager: DatabaseProvider,
@@ -57,6 +58,10 @@ class SwitchingNodeInfoWriteDataSource(
 
     override suspend fun deleteNodes(nodeNums: List<Int>) {
         withContext(dispatchers.io) { dbManager.withDb { it.nodeInfoDao().deleteNodes(nodeNums) } }
+    }
+
+    override suspend fun reconcileIdentity(deleteNums: List<Int>, upsert: NodeEntity?) {
+        withContext(dispatchers.io) { dbManager.withDb { it.nodeInfoDao().reconcileIdentity(deleteNums, upsert) } }
     }
 
     override suspend fun deleteMetadata(num: Int) {

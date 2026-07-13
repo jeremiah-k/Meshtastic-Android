@@ -221,6 +221,10 @@ class NodeRepositoryImpl(
         nodeNums.forEach { nodeInfoWriteDataSource.deleteMetadata(it) }
     }
 
+    /** Atomically deletes stale rows then upserts the canonical node in one [withDb] transaction. */
+    override suspend fun reconcileIdentity(deleteNums: List<Int>, upsert: Node?) =
+        withContext(dispatchers.io) { nodeInfoWriteDataSource.reconcileIdentity(deleteNums, upsert?.toEntity()) }
+
     override suspend fun getNodesOlderThan(lastHeard: Int): List<Node> =
         withContext(dispatchers.io) { nodeInfoReadDataSource.getNodesOlderThan(lastHeard).map { it.toModel() } }
 

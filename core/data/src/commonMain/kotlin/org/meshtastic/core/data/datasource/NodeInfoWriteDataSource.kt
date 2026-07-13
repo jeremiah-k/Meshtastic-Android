@@ -20,6 +20,7 @@ import org.meshtastic.core.database.entity.MetadataEntity
 import org.meshtastic.core.database.entity.MyNodeEntity
 import org.meshtastic.core.database.entity.NodeEntity
 
+@Suppress("TooManyFunctions")
 interface NodeInfoWriteDataSource {
     suspend fun upsert(node: NodeEntity)
 
@@ -33,6 +34,12 @@ interface NodeInfoWriteDataSource {
     suspend fun deleteNode(num: Int)
 
     suspend fun deleteNodes(nodeNums: List<Int>)
+
+    /**
+     * Atomically deletes [deleteNums] rows (node + metadata) then upserts [upsert] in one [withDb] transaction.
+     * Deletions execute first so the upsert cannot resurrect a just-deleted stale identity.
+     */
+    suspend fun reconcileIdentity(deleteNums: List<Int>, upsert: NodeEntity?)
 
     suspend fun deleteMetadata(num: Int)
 
