@@ -441,7 +441,6 @@ open class DatabaseManager(
     private suspend fun <T> withCurrentDb(block: suspend (MeshtasticDatabase) -> T): T? {
         val db = beginWrite()
         val active = currentDbName
-        markLastUsed(active)
         try {
             return runCancellableDbBlock(db, block)
         } catch (e: CancellationException) {
