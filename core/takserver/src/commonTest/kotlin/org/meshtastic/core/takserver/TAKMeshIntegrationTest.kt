@@ -318,6 +318,8 @@ class TAKMeshIntegrationTest {
 
         override suspend fun deleteNodes(nodeNums: List<Int>) {}
 
+        override suspend fun reconcileIdentity(deleteNums: List<Int>, upsert: Node?) {}
+
         override suspend fun setNodeNotes(num: Int, notes: String) {}
 
         override suspend fun upsert(node: Node) {}
