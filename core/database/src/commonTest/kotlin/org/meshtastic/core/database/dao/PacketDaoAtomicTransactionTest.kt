@@ -103,9 +103,10 @@ class PacketDaoAtomicTransactionTest {
         status: MessageStatus = MessageStatus.UNKNOWN,
         routingError: Int = -1,
         sfppHash: ByteString? = null,
+        ownerNodeNum: Int = myNodeNum,
     ) = Packet(
         uuid = 0L,
-        myNodeNum = myNodeNum,
+        myNodeNum = ownerNodeNum,
         port_num = PortNum.TEXT_MESSAGE_APP.value,
         contact_key = contact,
         received_time = time,
@@ -135,8 +136,9 @@ class PacketDaoAtomicTransactionTest {
         to: String? = null,
         status: MessageStatus = MessageStatus.UNKNOWN,
         sfppHash: ByteString? = null,
+        ownerNodeNum: Int = myNodeNum,
     ) = ReactionEntity(
-        myNodeNum = myNodeNum,
+        myNodeNum = ownerNodeNum,
         replyId = replyId,
         userId = userId,
         emoji = emoji,
@@ -328,6 +330,24 @@ class PacketDaoAtomicTransactionTest {
     }
 
     @Test
+    fun updatePacketByKeyUpdatesEveryOwnershipScopedCopy() = runTest {
+        seedMyNodeInfo()
+        val canonical = textPacket("contact", "canonical", time = 100, packetId = 55, from = "!aa", to = "^all")
+        val legacy =
+            textPacket("contact", "legacy", time = 101, packetId = 55, from = "!aa", to = "^all", ownerNodeNum = 0)
+        packetDao.insert(canonical)
+        packetDao.insert(legacy)
+
+        packetDao.updatePacketByKey(canonical.data.copy(status = MessageStatus.DELIVERED), routingError = 4)
+
+        val matching = packetDao.findPacketsWithId(55).filter { it.data.from == "!aa" && it.data.to == "^all" }
+        assertEquals(2, matching.size)
+        assertTrue(matching.all { it.data.status == MessageStatus.DELIVERED })
+        assertTrue(matching.all { it.routingError == 4 })
+        assertEquals(setOf(0, myNodeNum), matching.map { it.myNodeNum }.toSet())
+    }
+
+    @Test
     fun updatePacketByKeyAppliesRoutingErrorWhenNonNegative() = runTest {
         seedMyNodeInfo()
         val packet = textPacket("contact", "msg", time = 100, packetId = 60, from = "!aa", to = "^all")
@@ -380,6 +400,25 @@ class PacketDaoAtomicTransactionTest {
         assertEquals(999, updated!!.timestamp)
         assertEquals(MessageStatus.SFPP_CONFIRMED, updated.status)
         assertEquals(sfppHash, updated.sfpp_hash)
+    }
+
+    @Test
+    fun updateReactionByKeyUpdatesEveryOwnershipScopedCopy() = runTest {
+        seedMyNodeInfo()
+        packetDao.insert(textPacket("contact", "msg", time = 100, packetId = 84))
+        packetDao.insert(reaction(replyId = 84, userId = "!u", emoji = "👍", timestamp = 1, packetId = 84))
+        packetDao.insert(
+            reaction(replyId = 84, userId = "!u", emoji = "👍", timestamp = 2, packetId = 84, ownerNodeNum = 0),
+        )
+
+        packetDao.updateReactionByKey(
+            reaction(replyId = 84, userId = "!u", emoji = "👍", timestamp = 999, packetId = 84, ownerNodeNum = 0),
+        )
+
+        val matching = packetDao.findReactionsWithId(84).filter { it.userId == "!u" && it.emoji == "👍" }
+        assertEquals(2, matching.size)
+        assertTrue(matching.all { it.timestamp == 999L })
+        assertEquals(setOf(0, myNodeNum), matching.map { it.myNodeNum }.toSet())
     }
 
     @Test

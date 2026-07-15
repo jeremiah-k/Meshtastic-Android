@@ -16,7 +16,9 @@
  */
 package org.meshtastic.core.data.manager
 
+import co.touchlab.kermit.Logger
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import org.koin.core.annotation.Named
 import org.koin.core.annotation.Single
@@ -25,6 +27,8 @@ import org.meshtastic.core.model.fullRouteDiscovery
 import org.meshtastic.core.model.getTracerouteResponse
 import org.meshtastic.core.model.service.TracerouteResponse
 import org.meshtastic.core.repository.NodeRepository
+import org.meshtastic.core.repository.RadioInterfaceService
+import org.meshtastic.core.repository.RadioSessionContext
 import org.meshtastic.core.repository.ServiceStateWriter
 import org.meshtastic.core.repository.TracerouteHandler
 import org.meshtastic.core.repository.TracerouteSnapshotRepository
@@ -39,6 +43,7 @@ class TracerouteHandlerImpl(
     private val serviceStateWriter: ServiceStateWriter,
     private val tracerouteSnapshotRepository: TracerouteSnapshotRepository,
     private val nodeRepository: NodeRepository,
+    private val radioInterfaceService: RadioInterfaceService,
     @Named("ServiceScope") private val scope: CoroutineScope,
 ) : TracerouteHandler {
 
@@ -46,51 +51,56 @@ class TracerouteHandlerImpl(
 
     override fun recordStartTime(requestId: Int) = requestTimer.start(requestId)
 
-    override fun handleTraceroute(packet: MeshPacket, logUuid: String?, logInsertJob: Job?) {
-        // Decode the route discovery once — avoids triple protobuf decode
+    override fun handleTraceroute(
+        packet: MeshPacket,
+        logUuid: String?,
+        logInsertJob: Job?,
+        session: RadioSessionContext?,
+    ) {
+        // Decode the route discovery once — avoids triple protobuf decode.
         val routeDiscovery = packet.fullRouteDiscovery ?: return
         val forwardRoute = routeDiscovery.route
         val returnRoute = routeDiscovery.route_back
-
-        // Require both directions for a "full" traceroute response
         if (forwardRoute.isEmpty() || returnRoute.isEmpty()) return
 
-        scope.handledLaunch {
-            val full =
-                routeDiscovery.getTracerouteResponse(
-                    getUser = { num ->
-                        val user = nodeRepository.getUser(num)
-                        "${user.long_name} (${user.short_name})"
-                    },
-                    headerTowards = getStringSuspend(Res.string.traceroute_route_towards_dest),
-                    headerBack = getStringSuspend(Res.string.traceroute_route_back_to_us),
+        val start = if (session == null) CoroutineStart.DEFAULT else CoroutineStart.UNDISPATCHED
+        scope.handledLaunch(start = start) {
+            val process: suspend () -> Unit = {
+                val full =
+                    routeDiscovery.getTracerouteResponse(
+                        getUser = { num ->
+                            val user = nodeRepository.getUser(num)
+                            "${user.long_name} (${user.short_name})"
+                        },
+                        headerTowards = getStringSuspend(Res.string.traceroute_route_towards_dest),
+                        headerBack = getStringSuspend(Res.string.traceroute_route_back_to_us),
+                    )
+                val requestId = packet.decoded?.request_id ?: 0
+
+                if (logUuid != null) {
+                    logInsertJob?.join()
+                    val routeNodeNums = (forwardRoute + returnRoute).distinct()
+                    val nodeDbByNum = nodeRepository.nodeDBbyNum.value
+                    val snapshotPositions =
+                        routeNodeNums.mapNotNull { num -> nodeDbByNum[num]?.validPosition?.let { num to it } }.toMap()
+                    tracerouteSnapshotRepository.upsertSnapshotPositions(logUuid, requestId, snapshotPositions)
+                }
+
+                val responseText = requestTimer.appendDuration(requestId, full, "Traceroute")
+                val destination = forwardRoute.firstOrNull() ?: returnRoute.lastOrNull() ?: 0
+                serviceStateWriter.setTracerouteResponse(
+                    TracerouteResponse(
+                        message = responseText,
+                        destinationNodeNum = destination,
+                        requestId = requestId,
+                        forwardRoute = forwardRoute,
+                        returnRoute = returnRoute,
+                        logUuid = logUuid,
+                    ),
                 )
-
-            val requestId = packet.decoded?.request_id ?: 0
-
-            if (logUuid != null) {
-                logInsertJob?.join()
-                val routeNodeNums = (forwardRoute + returnRoute).distinct()
-                val nodeDbByNum = nodeRepository.nodeDBbyNum.value
-                val snapshotPositions =
-                    routeNodeNums.mapNotNull { num -> nodeDbByNum[num]?.validPosition?.let { num to it } }.toMap()
-                tracerouteSnapshotRepository.upsertSnapshotPositions(logUuid, requestId, snapshotPositions)
             }
-
-            val responseText = requestTimer.appendDuration(requestId, full, "Traceroute")
-
-            val destination = forwardRoute.firstOrNull() ?: returnRoute.lastOrNull() ?: 0
-
-            serviceStateWriter.setTracerouteResponse(
-                TracerouteResponse(
-                    message = responseText,
-                    destinationNodeNum = destination,
-                    requestId = requestId,
-                    forwardRoute = forwardRoute,
-                    returnRoute = returnRoute,
-                    logUuid = logUuid,
-                ),
-            )
+            val admitted = session == null || radioInterfaceService.runWithSessionLease(session) { process() }
+            if (!admitted) Logger.d { "Dropped traceroute work from a retired transport session" }
         }
     }
 }

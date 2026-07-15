@@ -31,6 +31,7 @@ import org.meshtastic.core.model.NodeAddress
 import org.meshtastic.core.repository.MeshConnectionManager
 import org.meshtastic.core.repository.NodeManager
 import org.meshtastic.core.repository.NotificationManager
+import org.meshtastic.core.repository.RadioInterfaceService
 import org.meshtastic.proto.Data
 import org.meshtastic.proto.DeviceMetrics
 import org.meshtastic.proto.EnvironmentMetrics
@@ -47,6 +48,7 @@ class TelemetryPacketHandlerImplTest {
     private val nodeManager = mock<NodeManager>(MockMode.autofill)
     private val connectionManager = mock<MeshConnectionManager>(MockMode.autofill)
     private val notificationManager = mock<NotificationManager>(MockMode.autofill)
+    private val radioInterfaceService = mock<RadioInterfaceService>(MockMode.autofill)
 
     private val testDispatcher = StandardTestDispatcher()
     private val testScope = TestScope(testDispatcher)
@@ -63,6 +65,7 @@ class TelemetryPacketHandlerImplTest {
                 nodeManager = nodeManager,
                 connectionManager = lazy { connectionManager },
                 notificationManager = notificationManager,
+                radioInterfaceService = radioInterfaceService,
                 scope = testScope,
             )
     }

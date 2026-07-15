@@ -39,6 +39,9 @@ object DatabaseConstants {
     const val DEVICE_DB_FOR_PREFIX: String = "device_db_for:"
     const val NODE_DB_FOR_PREFIX: String = "node_db_for:"
     const val ADDR_DB_FOR_PREFIX: String = "addr_db_for:"
+    const val PENDING_SOURCE_DB_FOR_PREFIX: String = "pending_source_db_for:"
+    const val PENDING_DESTINATION_DB_FOR_PREFIX: String = "pending_destination_db_for:"
+    const val RETIRED_DB_NAMES_KEY: String = "retired_db_names"
 
     // Display/truncation and hash sizing for DB names
     const val DB_NAME_HASH_LEN: Int = 10
@@ -48,6 +51,12 @@ object DatabaseConstants {
     // Address anonymization sizing
     const val ADDRESS_ANON_SHORT_LEN: Int = 4
     const val ADDRESS_ANON_EDGE_LEN: Int = 2
+
+    /**
+     * SQLite's default maximum number of host parameters (bind variables) per statement. Used to chunk IN-clause
+     * queries.
+     */
+    const val SQLITE_MAX_BIND_PARAMETERS: Int = 999
 }
 
 fun shortSha1(s: String): String = s.encodeUtf8().sha1().hex().take(DatabaseConstants.DB_NAME_HASH_LEN)

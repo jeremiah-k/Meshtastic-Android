@@ -91,8 +91,9 @@ class PacketRepositoryImpl(private val dbManager: DatabaseProvider, private val 
     override fun getUnreadCountTotal(): Flow<Int> =
         dbManager.currentDb.flatMapLatest { db -> db.packetDao().getUnreadCountTotal() }
 
-    // One-shot writes go through withDb so they register with the cross-transport merge drain barrier and pick up
-    // its closed-pool retry (see DatabaseProvider). Reads and Flow/Paging factories stay on currentDb by design.
+    // One-shot writes go through withDb so they register with the cross-transport merge drain barrier. The callback
+    // is never replayed after it starts; callers needing retries must make that policy explicit where idempotency is
+    // known. Reads and Flow/Paging factories stay on currentDb by design.
 
     override suspend fun clearUnreadCount(contact: String, timestamp: Long) {
         withContext(dispatchers.io + NonCancellable) {

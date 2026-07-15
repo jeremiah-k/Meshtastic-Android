@@ -28,5 +28,10 @@ interface TelemetryPacketHandler {
      * @param dataPacket The decoded data packet.
      * @param myNodeNum The local node number.
      */
-    fun handleTelemetry(packet: MeshPacket, dataPacket: DataPacket, myNodeNum: Int)
+    fun handleTelemetry(
+        packet: MeshPacket,
+        dataPacket: DataPacket,
+        myNodeNum: Int,
+        session: RadioSessionContext? = null,
+    )
 }

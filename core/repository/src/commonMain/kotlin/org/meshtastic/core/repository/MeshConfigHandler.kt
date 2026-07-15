@@ -34,23 +34,23 @@ interface MeshConfigHandler {
     val moduleConfig: StateFlow<LocalModuleConfig>
 
     /** Handles a received device configuration. */
-    fun handleDeviceConfig(config: Config)
+    fun handleDeviceConfig(config: Config, session: RadioSessionContext): Boolean
 
     /** Handles a received module configuration. */
-    fun handleModuleConfig(config: ModuleConfig)
+    fun handleModuleConfig(config: ModuleConfig, session: RadioSessionContext): Boolean
 
     /** Handles a received channel configuration. */
-    fun handleChannel(channel: Channel)
+    fun handleChannel(channel: Channel, session: RadioSessionContext): Boolean
 
     /**
      * Handles the [DeviceUIConfig] received during the config handshake (STATE_SEND_UIDATA). This arrives as the 2nd
      * packet in every handshake, immediately after my_info.
      */
-    fun handleDeviceUIConfig(config: DeviceUIConfig)
+    fun handleDeviceUIConfig(config: DeviceUIConfig, session: RadioSessionContext): Boolean
 
     /**
      * Handles the [LoRaRegionPresetMap] received during the config handshake (after metadata, before channels). It
      * describes which modem presets are legal in each LoRa region. Absent on firmware older than 2.8.
      */
-    fun handleRegionPresets(map: LoRaRegionPresetMap)
+    fun handleRegionPresets(map: LoRaRegionPresetMap, session: RadioSessionContext): Boolean
 }

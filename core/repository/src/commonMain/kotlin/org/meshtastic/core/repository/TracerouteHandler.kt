@@ -31,5 +31,5 @@ interface TracerouteHandler {
      * @param logUuid Optional UUID for the associated log entry.
      * @param logInsertJob Optional job for the log entry insertion, to ensure ordering.
      */
-    fun handleTraceroute(packet: MeshPacket, logUuid: String?, logInsertJob: Job?)
+    fun handleTraceroute(packet: MeshPacket, logUuid: String?, logInsertJob: Job?, session: RadioSessionContext? = null)
 }
