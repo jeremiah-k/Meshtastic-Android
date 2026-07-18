@@ -2,7 +2,7 @@
 title: Testing
 parent: Developer Guide
 nav_order: 7
-last_updated: 2026-06-11
+last_updated: 2026-07-18
 aliases:
   - tests
   - unit-tests
@@ -84,6 +84,22 @@ The Macrobenchmark generator (`BaselineProfileGenerator`) and the before/after b
 The generated profile is merged into `androidApp/src/google/generated/baselineProfiles/` and packaged into release builds via `androidx.profileinstaller`.
 
 > ⚠️ **Warning:** The journey currently covers cold start only (launch → first frame), because CI has no paired radio. Post-connection screens (node list, map, message thread) are not yet AOT-compiled; extend the journey once a fake transport or connected device is wired into the harness.
+
+### Debug responsiveness and LeakCanary
+
+Debug builds keep LeakCanary enabled by default for continuous leak detection during normal development, soak, and replay-fuzz sessions. Release builds are unchanged. For a controlled responsiveness comparison, build the same debug variant without LeakCanary:
+
+```bash
+./gradlew -PenableLeakCanary=false :androidApp:assembleFdroidDebug
+```
+
+Compare that build with the default LeakCanary-enabled debug build:
+
+```bash
+./gradlew :androidApp:assembleFdroidDebug
+```
+
+When reporting jank, record which mode produced the trace. A difference between these two builds identifies debug leak instrumentation as a contributor; no difference points elsewhere. Also compare against a release-like/profileable build before attributing debug-only stalls to production behavior.
 
 ## Test Organization
 

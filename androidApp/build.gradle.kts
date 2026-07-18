@@ -52,6 +52,10 @@ if (keystorePropertiesFile.exists()) {
 // Build a Closed-track templated AAB with: -PenableCarTemplates=true
 val enableCarTemplates = providers.gradleProperty("enableCarTemplates").map { it.toBoolean() }.getOrElse(false)
 
+// LeakCanary remains enabled for debug builds by default so regular development and soak sessions retain continuous
+// leak detection. Disable it only for controlled responsiveness comparisons with: -PenableLeakCanary=false
+val enableLeakCanary = providers.gradleProperty("enableLeakCanary").map { it.toBoolean() }.getOrElse(true)
+
 configure<ApplicationExtension> {
     namespace = "org.meshtastic.app"
 
@@ -288,12 +292,11 @@ dependencies {
 
     debugImplementation(libs.androidx.compose.ui.test.manifest)
     debugImplementation(libs.androidx.glance.preview)
-    // LeakCanary auto-installs via a manifest-declared ContentProvider -- no init code needed.
-    // Debug-only (0 method count in release, per LeakCanary's own design). Added after adversarial
-    // mesh-fuzz testing surfaced a GC-thrash concern in the debug log view; this gives continuous,
-    // automatic leak detection (dumped heap + leak trace + notification) for future soak/fuzz runs
-    // instead of manually polling `dumpsys meminfo`.
-    debugImplementation(libs.leakcanary.android)
+    if (enableLeakCanary) {
+        // LeakCanary auto-installs through its manifest ContentProvider. The property above provides a controlled
+        // no-LeakCanary debug build without weakening the default continuous leak-detection behavior.
+        debugImplementation(libs.leakcanary.android)
+    }
 
     googleImplementation(projects.feature.car)
     googleImplementation(libs.location.services)
