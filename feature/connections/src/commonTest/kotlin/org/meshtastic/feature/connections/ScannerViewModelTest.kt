@@ -42,6 +42,7 @@ import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
+import kotlin.time.Duration.Companion.seconds
 
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class ScannerViewModelTest {
@@ -147,6 +148,31 @@ class ScannerViewModelTest {
         harness.testDispatcher.scheduler.advanceTimeBy(BLE_SCAN_START_FAILURE_RETRY_COOLDOWN.inWholeMilliseconds + 1)
         viewModel.startBleScan()
 
+        assertEquals(2, scanAttempts)
+    }
+
+    @Test
+    fun `scan quota failure honors retry-after cooldown`() = runTest {
+        var scanAttempts = 0
+        every { bleScanner.scan(any(), any()) } returns
+            flow {
+                scanAttempts += 1
+                throw BleScanStartException(
+                    reason = BleScanStartFailureReason.ScanningTooFrequently,
+                    cause = IllegalStateException("Android BLE scan-start quota exhausted"),
+                    retryAfter = 30.seconds,
+                )
+            }
+
+        viewModel.startBleScan()
+        assertEquals(1, scanAttempts)
+
+        harness.testDispatcher.scheduler.advanceTimeBy(BLE_SCAN_START_FAILURE_RETRY_COOLDOWN.inWholeMilliseconds + 1)
+        viewModel.startBleScan()
+        assertEquals(1, scanAttempts)
+
+        harness.testDispatcher.scheduler.advanceTimeBy(15.seconds.inWholeMilliseconds)
+        viewModel.startBleScan()
         assertEquals(2, scanAttempts)
     }
 

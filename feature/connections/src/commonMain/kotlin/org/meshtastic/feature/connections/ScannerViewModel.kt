@@ -393,7 +393,7 @@ open class ScannerViewModel(
         scanJob = null
         _isBleScanning.value = false
         uiPrefs.setBleAutoScan(false)
-        startBleScanRetryCooldown()
+        startBleScanRetryCooldown(exception.retryAfter)
 
         Logger.w(exception) {
             "BLE scan could not start: ${exception.reason.androidCode} (${exception.reason.description})"
@@ -401,21 +401,25 @@ open class ScannerViewModel(
         val messageRes =
             when (exception.reason) {
                 BleScanStartFailureReason.MissingScanPermission -> Res.string.bluetooth_scan_missing_permission
-                BleScanStartFailureReason.ApplicationRegistrationFailed -> Res.string.bluetooth_scan_start_failed
+
+                BleScanStartFailureReason.ApplicationRegistrationFailed,
+                BleScanStartFailureReason.ScanningTooFrequently,
+                -> Res.string.bluetooth_scan_start_failed
             }
         val errorMessage =
             safeCatchingAll { getStringSuspend(messageRes) }.getOrDefault(BLE_SCAN_START_FAILURE_MESSAGE_FALLBACK)
         serviceRepository.setErrorMessage(text = errorMessage, severity = Severity.Warn)
     }
 
-    private fun startBleScanRetryCooldown() {
+    private fun startBleScanRetryCooldown(retryAfter: Duration?) {
+        val cooldown = maxOf(BLE_SCAN_START_FAILURE_RETRY_COOLDOWN, retryAfter ?: Duration.ZERO)
         val generation = ++scanStartFailureCooldownGeneration
         scanStartFailureCooldownActive.value = true
         scanStartFailureCooldownJob?.cancel()
         scanStartFailureCooldownJob =
             viewModelScope.launch {
                 try {
-                    delay(BLE_SCAN_START_FAILURE_RETRY_COOLDOWN)
+                    delay(cooldown)
                 } finally {
                     if (scanStartFailureCooldownGeneration == generation) {
                         scanStartFailureCooldownActive.value = false
