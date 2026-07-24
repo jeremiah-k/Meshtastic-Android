@@ -726,7 +726,6 @@
     <string name="mqtt_status_reconnecting">Повторно свързване…</string>
     <string name="mqtt_status_reconnecting_with_attempt">Повторно свързване (опит %1$d) — %2$s</string>
     <string name="mqtt_test_connection">Тестване на връзката</string>
-    <string name="must_set_region">Трябва да зададете регион!</string>
     <string name="must_update">Трябва да актуализирате това приложение в магазина за приложения (или GitHub). Приложението е твърде старо, за да говори с този фърмуер на радиото. Моля, прочетете нашите <a href="https://meshtastic.org/docs/software/android/installation">документи</a> по тази тема.</string>
     <!-- MUTE -->
     <string name="mute_1_week">1 седмица</string>

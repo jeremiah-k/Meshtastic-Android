@@ -780,7 +780,6 @@
     <string name="mqtt_status_reconnecting">Återansluter…</string>
     <string name="mqtt_status_reconnecting_with_attempt">Återansluter (försök %1$d) — %2$s</string>
     <string name="mqtt_test_connection">Testa anslutningen</string>
-    <string name="must_set_region">Du måste ställa in en region!</string>
     <string name="must_update">Du måste uppdatera detta program i app-butiken (eller Github). Det är för gammalt för att prata med denna radioenhet. Läs vår <a href="https://meshtastic.org/docs/software/android/installation">dokumentation</a> i detta ämne.</string>
     <!-- MUTE -->
     <string name="mute_1_week">1 vecka</string>

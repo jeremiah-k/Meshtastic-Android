@@ -153,7 +153,6 @@
     <string name="module_settings">Cumraíocht an mhódule</string>
     <!-- MQTT -->
     <string name="mqtt_status_disconnected">Na ceangailte</string>
-    <string name="must_set_region">Caithfidh tú réigiún a shocrú!</string>
     <string name="must_update">Caithfidh tú an feidhmchlár seo a nuashonrú ón siopa feidhmchláir (nó Github). Tá sé ró-aois chun cumarsáid a dhéanamh leis an firmware raidió seo. Le do thoil, léigh ár <a href="https://meshtastic.org/docs/software/android/installation">doiciméid</a> ar an ábhar seo.</string>
     <!-- MUTE -->
     <string name="mute_1_week">1 seachtain</string>

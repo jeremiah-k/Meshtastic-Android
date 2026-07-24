@@ -333,7 +333,6 @@
     <string name="mqtt_enabled">MQTT 활성화</string>
     <string name="mqtt_status_connected">연결됨</string>
     <string name="mqtt_status_disconnected">연결 끊김</string>
-    <string name="must_set_region">지역을 설정해 주세요!</string>
     <string name="must_update">구글 플레이 스토어 또는 깃허브를 통해서 앱을 업데이트 해야합니다. 앱이 너무 구버전입니다. 이 주제의  <a href="https://meshtastic.org/docs/software/android/installation">docs</a> 를 읽어주세요</string>
     <!-- MUTE -->
     <string name="mute_1_week">1 주</string>

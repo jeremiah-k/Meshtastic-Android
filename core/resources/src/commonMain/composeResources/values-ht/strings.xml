@@ -149,7 +149,6 @@
     <string name="module_settings">Konfigirasyon modil</string>
     <!-- MQTT -->
     <string name="mqtt_status_disconnected">Dekonekte</string>
-    <string name="must_set_region">Ou dwe mete yon rejyon!</string>
     <string name="must_update">Ou dwe mete aplikasyon sa ajou nan magazen Google Jwèt. Li twò ansyen pou li kominike ak radyo sa a.</string>
     <!-- MUTE -->
     <string name="mute_1_week">1 semèn</string>
