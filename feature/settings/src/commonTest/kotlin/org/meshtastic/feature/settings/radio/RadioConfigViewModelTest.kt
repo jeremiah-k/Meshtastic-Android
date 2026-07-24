@@ -187,6 +187,35 @@ class RadioConfigViewModelTest {
     )
 
     @Test
+    fun `importProfile reports unreadable file instead of silently dropping result`() = runTest {
+        everySuspend { fileService.read(any(), any()) } returns false
+        var result: Result<DeviceProfile>? = null
+
+        viewModel.importProfile(CommonUri.parse("content://test/missing.cfg")) { result = it }
+        advanceUntilIdle()
+
+        assertFalse(assertNotNull(result).isSuccess)
+    }
+
+    @Test
+    fun `importProfile reports decoder failure exactly once`() = runTest {
+        everySuspend { fileService.read(any(), any()) } calls
+            { args ->
+                val block = args.arg<suspend (okio.BufferedSource) -> Unit>(1)
+                block(okio.Buffer().writeUtf8("not a profile"))
+                true
+            }
+        everySuspend { importProfileUseCase(any()) } returns Result.failure(IllegalArgumentException("bad profile"))
+        val results = mutableListOf<Result<DeviceProfile>>()
+
+        viewModel.importProfile(CommonUri.parse("content://test/bad.cfg"), results::add)
+        advanceUntilIdle()
+
+        assertEquals(1, results.size)
+        assertFalse(results.single().isSuccess)
+    }
+
+    @Test
     fun `setConfig calls useCase`() = runTest {
         val node = Node(num = 123, user = User(id = "!123"))
         nodeRepository.setNodes(listOf(node))
@@ -1029,11 +1058,42 @@ class RadioConfigViewModelTest {
         viewModel = createViewModel()
 
         val profile = DeviceProfile()
-        everySuspend { installProfileUseCase(any(), any(), any()) } returns Unit
+        everySuspend { installProfileUseCase(any(), any(), any(), any()) } returns Unit
 
-        viewModel.installProfile(profile)
+        var result: Result<Unit>? = null
+        viewModel.installProfile(profile) { result = it }
+        advanceUntilIdle()
 
-        verifySuspend { installProfileUseCase(123, profile, any()) }
+        verifySuspend { installProfileUseCase(123, profile, any(), true) }
+        assertTrue(assertNotNull(result).isSuccess)
+    }
+
+    @Test
+    fun `installProfile reports missing destination`() = runTest {
+        viewModel = createViewModel()
+        var result: Result<Unit>? = null
+
+        viewModel.installProfile(DeviceProfile()) { result = it }
+
+        assertFalse(assertNotNull(result).isSuccess)
+        verifySuspend(exactly(0)) { installProfileUseCase(any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun `installProfile reports staged restore failure`() = runTest {
+        val node = Node(num = 123, user = User(id = "!123"))
+        nodeRepository.setMyNodeInfo(MyNodeInfo(myNodeNum = 123))
+        nodeRepository.setOurNode(node)
+        serviceRepository.setConnectionState(ConnectionState.Connected)
+        viewModel = createViewModel()
+        everySuspend { installProfileUseCase(any(), any(), any(), any()) } throws
+            IllegalStateException("restore interrupted")
+        var result: Result<Unit>? = null
+
+        viewModel.installProfile(DeviceProfile()) { result = it }
+        advanceUntilIdle()
+
+        assertFalse(assertNotNull(result).isSuccess)
     }
 
     @Test

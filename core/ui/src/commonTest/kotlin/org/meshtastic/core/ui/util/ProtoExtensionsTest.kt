@@ -18,6 +18,8 @@ package org.meshtastic.core.ui.util
 
 import kotlinx.coroutines.test.runTest
 import okio.ByteString.Companion.toByteString
+import org.meshtastic.core.model.util.getChannelReplacementList
+import org.meshtastic.core.model.util.normalizeReplacementSettings
 import org.meshtastic.core.testing.FakeRadioConfigRepository
 import org.meshtastic.core.testing.FakeRadioController
 import org.meshtastic.proto.Channel

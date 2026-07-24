@@ -58,6 +58,7 @@ import org.meshtastic.core.resources.export_configuration
 import org.meshtastic.core.resources.filter_settings
 import org.meshtastic.core.resources.help_and_documentation
 import org.meshtastic.core.resources.import_configuration
+import org.meshtastic.core.resources.import_configuration_failed
 import org.meshtastic.core.resources.node_layout_section_title
 import org.meshtastic.core.resources.preferences_language
 import org.meshtastic.core.resources.remotely_administrating
@@ -73,6 +74,7 @@ import org.meshtastic.core.ui.icon.MeshtasticIcons
 import org.meshtastic.core.ui.icon.PermScanWifi
 import org.meshtastic.core.ui.icon.SettingsRemote
 import org.meshtastic.core.ui.icon.Wifi
+import org.meshtastic.core.ui.util.SnackbarManager
 import org.meshtastic.feature.settings.component.AppInfoSection
 import org.meshtastic.feature.settings.component.AppearanceSection
 import org.meshtastic.feature.settings.component.ExpressiveSection
@@ -99,6 +101,8 @@ fun SettingsScreen(
     onBack: (() -> Unit)? = null,
 ) {
     val appFunctionsAvailable: Boolean = koinInject(qualifier = named("googleServicesAvailable"))
+    val snackbarManager: SnackbarManager = koinInject()
+    val importFailureMessage = stringResource(Res.string.import_configuration_failed)
     val hiddenFeaturesUnlocked by settingsViewModel.hiddenFeaturesUnlocked.collectAsStateWithLifecycle()
     val localConfig by settingsViewModel.localConfig.collectAsStateWithLifecycle()
     val ourNode by settingsViewModel.ourNodeInfo.collectAsStateWithLifecycle()
@@ -111,11 +115,20 @@ fun SettingsScreen(
     var showEditDeviceProfileDialog by remember { mutableStateOf(false) }
 
     val importConfigLauncher =
-        rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-            if (it.resultCode == Activity.RESULT_OK) {
-                showEditDeviceProfileDialog = true
-                it.data?.data?.let { uri ->
-                    viewModel.importProfile(uri.toKmpUri()) { profile -> deviceProfile = profile }
+        rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            if (result.resultCode == Activity.RESULT_OK) {
+                val uri = result.data?.data
+                if (uri == null) {
+                    snackbarManager.showSnackbar(importFailureMessage)
+                } else {
+                    viewModel.importProfile(uri.toKmpUri()) { importResult ->
+                        importResult
+                            .onSuccess { profile ->
+                                deviceProfile = profile
+                                showEditDeviceProfileDialog = true
+                            }
+                            .onFailure { snackbarManager.showSnackbar(importFailureMessage) }
+                    }
                 }
             }
         }
@@ -139,7 +152,9 @@ fun SettingsScreen(
             onConfirm = {
                 showEditDeviceProfileDialog = false
                 if (deviceProfile != null) {
-                    viewModel.installProfile(it)
+                    viewModel.installProfile(it) { result ->
+                        result.onFailure { snackbarManager.showSnackbar(importFailureMessage) }
+                    }
                 } else {
                     deviceProfile = it
                     val nodeName = (it.short_name ?: "").ifBlank { "node" }
