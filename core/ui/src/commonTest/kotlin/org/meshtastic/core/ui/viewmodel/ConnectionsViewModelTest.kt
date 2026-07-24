@@ -47,6 +47,7 @@ import org.meshtastic.core.testing.FakeRadioPrefs
 import org.meshtastic.core.testing.FakeServiceRepository
 import org.meshtastic.core.testing.FakeUiPrefs
 import org.meshtastic.core.testing.TestDataFactory
+import org.meshtastic.proto.Config
 import org.meshtastic.proto.HardwareModel
 import org.meshtastic.proto.LocalConfig
 import org.meshtastic.proto.User
@@ -62,6 +63,7 @@ class ConnectionsViewModelTest {
     private val testDispatcher = StandardTestDispatcher()
     private lateinit var viewModel: ConnectionsViewModel
     private val radioConfigRepository: RadioConfigRepository = mock(MockMode.autofill)
+    private val localConfigFlow = MutableStateFlow(LocalConfig())
     private val serviceRepository = FakeServiceRepository()
     private val nodeRestartTracker = NodeRestartTracker(CoroutineScope(SupervisorJob()))
     private val nodeRepository = FakeNodeRepository()
@@ -89,7 +91,9 @@ class ConnectionsViewModelTest {
         dispatchedNotifications.clear()
         notificationsCanBeScheduled = true
 
-        every { radioConfigRepository.localConfigFlow } returns MutableStateFlow(LocalConfig())
+        localConfigFlow.value = LocalConfig()
+        nodeRestartTracker.onConnected()
+        every { radioConfigRepository.localConfigFlow } returns localConfigFlow
         uiPrefs.hasShownNotPairedWarning.value = false
         uiPrefs.firmwareUpdateNotificationKeys.value = emptySet()
 
@@ -123,6 +127,41 @@ class ConnectionsViewModelTest {
 
         assertEquals(true, viewModel.hasShownNotPairedWarning.value)
         assertEquals(true, uiPrefs.hasShownNotPairedWarning.value)
+    }
+
+    @Test
+    fun `expected restart takes priority over unset region while still connected`() = runTest {
+        viewModel.connectionStatus.test {
+            assertEquals(ConnectionStatus.NOT_CONNECTED, awaitItem())
+
+            serviceRepository.setConnectionState(ConnectionState.Connected)
+            assertEquals(ConnectionStatus.CONNECTED, awaitItem())
+
+            nodeRestartTracker.expectRestart()
+            assertEquals(ConnectionStatus.RESTARTING, awaitItem())
+
+            localConfigFlow.value = LocalConfig(lora = Config.LoRaConfig(region = Config.LoRaConfig.RegionCode.UNSET))
+            expectNoEvents()
+
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `unset region is prompted after restart window closes`() = runTest {
+        nodeRestartTracker.expectRestart()
+        localConfigFlow.value = LocalConfig(lora = Config.LoRaConfig(region = Config.LoRaConfig.RegionCode.UNSET))
+        serviceRepository.setConnectionState(ConnectionState.Connected)
+
+        viewModel.connectionStatus.test {
+            assertEquals(ConnectionStatus.NOT_CONNECTED, awaitItem())
+            assertEquals(ConnectionStatus.RESTARTING, awaitItem())
+
+            nodeRestartTracker.onConnected()
+            assertEquals(ConnectionStatus.MUST_SET_REGION, awaitItem())
+
+            cancelAndIgnoreRemainingEvents()
+        }
     }
 
     @Test

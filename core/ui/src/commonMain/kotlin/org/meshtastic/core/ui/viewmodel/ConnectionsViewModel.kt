@@ -162,7 +162,11 @@ class ConnectionsViewModel(
         ) { state, unset, progress, restartExpected ->
             when (state) {
                 is ConnectionState.Connected ->
-                    if (unset) ConnectionStatus.MUST_SET_REGION else ConnectionStatus.CONNECTED
+                    when {
+                        restartExpected -> ConnectionStatus.RESTARTING
+                        unset -> ConnectionStatus.MUST_SET_REGION
+                        else -> ConnectionStatus.CONNECTED
+                    }
 
                 // While an expected node restart is in flight, the drop and the reconnect attempts are the restart
                 // —
