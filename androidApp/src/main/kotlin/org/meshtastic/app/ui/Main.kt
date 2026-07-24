@@ -27,6 +27,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
 import androidx.navigation3.runtime.NavKey
 import androidx.navigation3.runtime.entryProvider
 import co.touchlab.kermit.Logger
@@ -55,6 +56,7 @@ import org.meshtastic.feature.messaging.navigation.contactsGraph
 import org.meshtastic.feature.node.navigation.nodesGraph
 import org.meshtastic.feature.settings.lockdown.LockdownDialog
 import org.meshtastic.feature.settings.navigation.settingsGraph
+import org.meshtastic.feature.settings.navigation.settingsRadioConfigViewModel
 import org.meshtastic.feature.settings.radio.channel.channelsGraph
 import org.meshtastic.feature.wifiprovision.navigation.wifiProvisionGraph
 
@@ -72,6 +74,7 @@ fun MainScreen() {
     val multiBackstack = rememberMultiBackstack(initialTab)
     val backStack = multiBackstack.activeBackStack
     val scrollToTopEvents = viewModel.scrollToTopEventFlow
+    val appViewModelStoreOwner = checkNotNull(LocalViewModelStoreOwner.current)
 
     AndroidAppVersionCheck(viewModel)
 
@@ -113,7 +116,7 @@ fun MainScreen() {
                     channelsGraph(backStack)
                     connectionsGraph(backStack)
                     discoveryGraph(backStack)
-                    settingsGraph(backStack)
+                    settingsGraph(backStack) { settingsRadioConfigViewModel(backStack, appViewModelStoreOwner) }
                     docsEntries(backStack)
                     firmwareGraph(backStack)
                     wifiProvisionGraph(backStack)
