@@ -643,13 +643,16 @@ open class RadioConfigViewModel(
         safeLaunch(tag = "removeFixedPosition") { radioConfigUseCase.removeFixedPosition(destNum) }
     }
 
-    fun importProfile(uri: CommonUri, onResult: (DeviceProfile) -> Unit) {
-        safeLaunch(tag = "importProfile") {
-            var profile: DeviceProfile? = null
-            fileService.read(uri) { source ->
-                importProfileUseCase(source).onSuccess { profile = it }.onFailure { throw it }
+    fun importProfile(uri: CommonUri, onResult: (Result<DeviceProfile>) -> Unit) {
+        viewModelScope.launch {
+            val result = safeCatching {
+                var profile: DeviceProfile? = null
+                val wasRead = fileService.read(uri) { source -> profile = importProfileUseCase(source).getOrThrow() }
+                check(wasRead) { "Unable to read the selected configuration profile" }
+                checkNotNull(profile) { "The selected configuration profile was empty" }
             }
-            profile?.let { onResult(it) }
+            result.onFailure { Logger.e { "[importProfile] Failed to import profile" } }
+            onResult(result)
         }
     }
 
@@ -720,9 +723,24 @@ open class RadioConfigViewModel(
         }
     }
 
-    fun installProfile(protobuf: DeviceProfile) {
-        val destNum = destNum ?: destNode.value?.num ?: return
-        safeLaunch(tag = "installProfile") { installProfileUseCase(destNum, protobuf, destNode.value?.user) }
+    fun installProfile(protobuf: DeviceProfile, onResult: (Result<Unit>) -> Unit = {}) {
+        val destNum = destNum ?: destNode.value?.num
+        if (destNum == null) {
+            onResult(Result.failure(IllegalStateException("No destination is available for profile installation")))
+            return
+        }
+        viewModelScope.launch {
+            val result = safeCatching {
+                installProfileUseCase(
+                    destNum = destNum,
+                    profile = protobuf,
+                    currentUser = destNode.value?.user,
+                    isLocal = radioConfigState.value.isLocal,
+                )
+            }
+            result.onFailure { Logger.e { "[installProfile] Failed to install profile" } }
+            onResult(result)
+        }
     }
 
     fun clearPacketResponse() {

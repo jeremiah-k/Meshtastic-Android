@@ -65,24 +65,25 @@ fun EditDeviceProfileDialog(
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val state = remember {
-        mutableStateMapOf<ProfileField, Boolean>().apply {
-            putAll(
-                ProfileField.entries.associateWith { field ->
-                    when (field) {
-                        ProfileField.LONG_NAME -> deviceProfile.long_name != null
-                        ProfileField.SHORT_NAME -> deviceProfile.short_name != null
-                        ProfileField.CHANNEL_URL -> deviceProfile.channel_url != null
-                        ProfileField.CONFIG -> deviceProfile.config != null
-                        ProfileField.MODULE_CONFIG -> deviceProfile.module_config != null
-                        ProfileField.FIXED_POSITION -> deviceProfile.fixed_position != null
-                        ProfileField.UNMESSAGABLE -> deviceProfile.is_unmessagable != null
-                        ProfileField.LICENSED -> deviceProfile.is_licensed != null
-                    }
-                },
-            )
+    val state =
+        remember(deviceProfile) {
+            mutableStateMapOf<ProfileField, Boolean>().apply {
+                putAll(
+                    ProfileField.entries.associateWith { field ->
+                        when (field) {
+                            ProfileField.LONG_NAME -> deviceProfile.long_name != null
+                            ProfileField.SHORT_NAME -> deviceProfile.short_name != null
+                            ProfileField.CHANNEL_URL -> deviceProfile.channel_url != null
+                            ProfileField.CONFIG -> deviceProfile.config != null
+                            ProfileField.MODULE_CONFIG -> deviceProfile.module_config != null
+                            ProfileField.FIXED_POSITION -> deviceProfile.fixed_position != null
+                            ProfileField.UNMESSAGABLE -> deviceProfile.is_unmessagable != null
+                            ProfileField.LICENSED -> deviceProfile.is_licensed != null
+                        }
+                    },
+                )
+            }
         }
-    }
 
     MeshtasticDialog(
         title = title,

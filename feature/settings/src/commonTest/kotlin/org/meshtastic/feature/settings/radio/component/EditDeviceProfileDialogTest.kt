@@ -16,6 +16,9 @@
  */
 package org.meshtastic.feature.settings.radio.component
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.onNodeWithText
@@ -81,6 +84,29 @@ class EditDeviceProfileDialogTest {
 
         // Verify onDismiss is called
         assertTrue(onDismissClicked)
+    }
+
+    @Test
+    fun `selection resets when imported profile replaces initial profile`() = runComposeUiTest {
+        val initial = DeviceProfile(long_name = "Current node")
+        val imported = DeviceProfile(short_name = "IMPT")
+        var displayedProfile by mutableStateOf(initial)
+        var confirmedProfile: DeviceProfile? = null
+
+        setContent {
+            EditDeviceProfileDialog(
+                title = title,
+                deviceProfile = displayedProfile,
+                onConfirm = { confirmedProfile = it },
+                onDismiss = {},
+            )
+        }
+
+        runOnIdle { displayedProfile = imported }
+        waitForIdle()
+        onNodeWithText(getString(Res.string.save)).performClick()
+
+        assertEquals(imported, confirmedProfile)
     }
 
     @Test

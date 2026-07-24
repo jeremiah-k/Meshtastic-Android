@@ -56,6 +56,23 @@ class FakeRadioController :
     /** Every [setLocalChannel] call, in order. */
     val localChannels = mutableListOf<Channel>()
 
+    /** Every module configuration write, in order. */
+    val moduleConfigs = mutableListOf<ModuleConfig>()
+
+    /** High-level admin operation order, including edit transaction boundaries. */
+    val adminOperations = mutableListOf<String>()
+
+    /** Test hook invoked after an edit transaction commits. */
+    var onEditSettingsCommitted: suspend () -> Unit = {}
+
+    /** Test hook invoked after a standalone module-config write. */
+    var onStandaloneModuleConfig: suspend (ModuleConfig) -> Unit = {}
+
+    /** Test hook invoked after a standalone general-config write. */
+    var onStandaloneConfig: suspend (Config) -> Unit = {}
+
+    private var insideEditSettings = false
+
     var throwOnSend: Boolean = false
 
     /** When true, [setLocalConfig] throws — simulates the radio link dropping mid config write. */
@@ -81,6 +98,12 @@ class FakeRadioController :
             sentSharedContacts.clear()
             localConfigs.clear()
             localChannels.clear()
+            moduleConfigs.clear()
+            adminOperations.clear()
+            onEditSettingsCommitted = {}
+            onStandaloneModuleConfig = {}
+            onStandaloneConfig = {}
+            insideEditSettings = false
             throwOnSend = false
             throwOnSetLocalConfig = false
             failChannelWriteAfter = null
@@ -132,22 +155,32 @@ class FakeRadioController :
 
     override suspend fun setOwner(destNum: Int, user: User, packetId: Int) {
         lastSetOwnerUser = user
+        adminOperations.add("owner")
     }
 
     override suspend fun setHamMode(destNum: Int, hamParameters: HamParameters, packetId: Int) {}
 
     override suspend fun setConfig(destNum: Int, config: Config, packetId: Int) {
         localConfigs.add(config)
+        adminOperations.add("config:${config.which_payload_variant}")
+        if (!insideEditSettings) onStandaloneConfig(config)
     }
 
-    override suspend fun setModuleConfig(destNum: Int, config: ModuleConfig, packetId: Int) {}
+    override suspend fun setModuleConfig(destNum: Int, config: ModuleConfig, packetId: Int) {
+        moduleConfigs.add(config)
+        adminOperations.add("module:${config.which_payload_variant}")
+        if (!insideEditSettings) onStandaloneModuleConfig(config)
+    }
 
     override suspend fun setRemoteChannel(destNum: Int, channel: Channel, packetId: Int) {
         failChannelWriteAfter?.let { if (localChannels.size >= it) error("Fake channel write failure") }
         localChannels.add(channel)
+        adminOperations.add("channel:${channel.index}")
     }
 
-    override suspend fun setFixedPosition(destNum: Int, position: Position) {}
+    override suspend fun setFixedPosition(destNum: Int, position: Position) {
+        adminOperations.add("fixed-position")
+    }
 
     override suspend fun setRingtone(destNum: Int, ringtone: String) {}
 
@@ -195,22 +228,30 @@ class FakeRadioController :
 
     override suspend fun editSettings(destNum: Int, block: suspend AdminEditScope.() -> Unit) {
         editSettingsCalled = true
-        val scope =
-            object : AdminEditScope {
-                override suspend fun setOwner(user: User) = setOwner(destNum, user, generatePacketId())
+        adminOperations.add("begin")
+        insideEditSettings = true
+        try {
+            val scope =
+                object : AdminEditScope {
+                    override suspend fun setOwner(user: User) = setOwner(destNum, user, generatePacketId())
 
-                override suspend fun setConfig(config: Config) = setConfig(destNum, config, generatePacketId())
+                    override suspend fun setConfig(config: Config) = setConfig(destNum, config, generatePacketId())
 
-                override suspend fun setModuleConfig(config: ModuleConfig) =
-                    setModuleConfig(destNum, config, generatePacketId())
+                    override suspend fun setModuleConfig(config: ModuleConfig) =
+                        setModuleConfig(destNum, config, generatePacketId())
 
-                override suspend fun setChannel(channel: Channel) =
-                    setRemoteChannel(destNum, channel, generatePacketId())
+                    override suspend fun setChannel(channel: Channel) =
+                        setRemoteChannel(destNum, channel, generatePacketId())
 
-                override suspend fun setFixedPosition(position: Position) =
-                    this@FakeRadioController.setFixedPosition(destNum, position)
-            }
-        scope.block()
+                    override suspend fun setFixedPosition(position: Position) =
+                        this@FakeRadioController.setFixedPosition(destNum, position)
+                }
+            scope.block()
+        } finally {
+            insideEditSettings = false
+        }
+        adminOperations.add("commit")
+        onEditSettingsCommitted()
     }
 
     override suspend fun editLocalSettings(block: suspend AdminEditScope.() -> Unit) = editSettings(0, block)

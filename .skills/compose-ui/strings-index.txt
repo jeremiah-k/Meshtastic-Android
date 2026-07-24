@@ -781,6 +781,7 @@ ignore_mqtt
 ignore_remove
 ### IMPORT ###
 import_configuration
+import_configuration_failed
 import_export_label
 import_known_shared_contact_text
 import_label
