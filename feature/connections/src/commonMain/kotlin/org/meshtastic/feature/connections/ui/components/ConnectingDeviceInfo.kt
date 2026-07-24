@@ -38,7 +38,6 @@ import org.meshtastic.core.resources.connected
 import org.meshtastic.core.resources.connected_sleeping
 import org.meshtastic.core.resources.connecting
 import org.meshtastic.core.resources.disconnect
-import org.meshtastic.core.resources.must_set_region
 import org.meshtastic.core.resources.node_restarting
 import org.meshtastic.core.resources.not_connected
 import org.meshtastic.core.resources.reconnecting
@@ -61,7 +60,6 @@ fun ConnectingDeviceInfo(
     val statusLabel =
         when (connectionStatus) {
             ConnectionStatus.CONNECTED -> stringResource(Res.string.connected)
-            ConnectionStatus.MUST_SET_REGION -> stringResource(Res.string.must_set_region)
             ConnectionStatus.CONNECTING -> connectionProgress ?: stringResource(Res.string.connecting)
             ConnectionStatus.RECONNECTING -> stringResource(Res.string.reconnecting)
             ConnectionStatus.RESTARTING -> stringResource(Res.string.node_restarting)
@@ -75,7 +73,6 @@ fun ConnectingDeviceInfo(
         when (connectionStatus) {
             ConnectionStatus.CONNECTED,
             ConnectionStatus.CONNECTED_SLEEPING,
-            ConnectionStatus.MUST_SET_REGION,
             -> stringResource(Res.string.disconnect)
 
             ConnectionStatus.CONNECTING,

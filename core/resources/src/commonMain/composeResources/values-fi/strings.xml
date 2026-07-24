@@ -1108,7 +1108,6 @@
     <string name="mqtt_status_reconnecting">Yhdistetään uudelleen…</string>
     <string name="mqtt_status_reconnecting_with_attempt">Yhdistetään uudelleen (yritys %1$d) — %2$s</string>
     <string name="mqtt_test_connection">Testaa yhteys</string>
-    <string name="must_set_region">Sinun täytyy määrittää alue!</string>
     <string name="must_update">Sinun täytyy päivittää tämä sovellus sovelluskaupassa (tai Githubissa). Sovelluksen versio on liian vanha toimimaan tämän radion ohjelmiston kanssa. Ole hyvä ja lue lisää aiheesta <a href="https://meshtastic.org/docs/software/android/installation">dokumenteistamme</a>.</string>
     <!-- MUTE -->
     <string name="mute_1_week">1 viikko</string>

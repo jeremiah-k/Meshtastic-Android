@@ -1088,7 +1088,6 @@ mqtt_status_inactive
 mqtt_status_reconnecting
 mqtt_status_reconnecting_with_attempt
 mqtt_test_connection
-must_set_region
 must_update
 ### MUTE ###
 mute_1_week

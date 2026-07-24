@@ -296,7 +296,6 @@
     <string name="mqtt_config">MQTT подешавања</string>
     <string name="mqtt_status_connected">Блутут повезан</string>
     <string name="mqtt_status_disconnected">Раскачено</string>
-    <string name="must_set_region">Мораш одабрати регион!</string>
     <string name="must_update">Морате ажурирати ову апликацију у продавници апликација (или на Гитхабу). Превише је стара да би могла комуницирати са овим радио фирмвером. Молимо вас да прочитате наша &lt;a href='https://meshtastic.org/docs/software/android/installation'&gt;документа&lt;/a&gt; на ову тему.</string>
     <!-- MUTE -->
     <string name="mute_1_week">1 седмица</string>

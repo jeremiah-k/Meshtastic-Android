@@ -860,7 +860,6 @@
     <string name="mqtt_status_reconnecting">Erneut verbinden…</string>
     <string name="mqtt_status_reconnecting_with_attempt">Erneut verbinden (Versuch %1$d) - %2$s</string>
     <string name="mqtt_test_connection">Verbindung testen</string>
-    <string name="must_set_region">Sie müssen eine Region festlegen!</string>
     <string name="must_update">Sie müssen diese App über den App Store (oder Github) aktualisieren. Sie ist zu alt, um mit dieser Funkgeräte Firmware zu kommunizieren. Bitte lesen Sie unsere  <a href="https://meshtastic.org/docs/software/android/installation">Dokumentation</a> zu diesem Thema.</string>
     <!-- MUTE -->
     <string name="mute_1_week">Eine Woche</string>

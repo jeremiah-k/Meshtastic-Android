@@ -134,7 +134,6 @@
     <string name="module_settings">Configuració de mòdul</string>
     <!-- MQTT -->
     <string name="mqtt_status_disconnected">Desconnectat</string>
-    <string name="must_set_region">Has de configurar la regió!</string>
     <string name="must_update">Has d'actualitzar aquesta aplicació a la app store (o Github). És massa antiga per comunicar-se amb aquest firmware de la ràdio. Si us plau llegeix el nostre <a href="https://meshtastic.org/docs/software/android/installation">docs</a> sobre aquesta temàtica.</string>
     <!-- MUTE -->
     <string name="mute_1_week">1 setmana</string>

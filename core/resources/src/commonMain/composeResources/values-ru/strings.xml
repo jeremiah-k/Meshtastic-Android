@@ -1115,7 +1115,6 @@
     <string name="mqtt_status_reconnecting">Восстановление связи…</string>
     <string name="mqtt_status_reconnecting_with_attempt">Восстановление (попытка %1$d) — %2$s</string>
     <string name="mqtt_test_connection">Проверить соединение</string>
-    <string name="must_set_region">Вы должны задать регион!</string>
     <string name="must_update">Вам необходимо обновить данное приложение в магазине приложений (или с Github). Оно слишком старо для взаимодействия с прошивкой радиостанции. Пожалуйста, прочитайте нашу <a href="https://meshtastic.org/docs/software/android/installation">документацию</a> по этой теме.</string>
     <!-- MUTE -->
     <string name="mute_1_week">1 неделя</string>

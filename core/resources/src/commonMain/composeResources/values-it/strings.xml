@@ -1102,7 +1102,6 @@
     <string name="mqtt_status_reconnecting">Riconnessione…</string>
     <string name="mqtt_status_reconnecting_with_attempt">Riconnessione (tentativo %1$d) — %2$s</string>
     <string name="mqtt_test_connection">Prova la connessione</string>
-    <string name="must_set_region">Devi impostare una regione!</string>
     <string name="must_update">È necessario aggiornare questa applicazione nell'app store (o Github). È troppo vecchio per parlare con questo firmware radio. Per favore leggi i nostri <a href="https://meshtastic.org/docs/software/android/installation">documenti</a> su questo argomento.</string>
     <!-- MUTE -->
     <string name="mute_1_week">1 settimana</string>
