@@ -221,15 +221,15 @@ class ProfileRoundTripTest {
     private suspend fun TestScope.assertRoundTrip(profile: DeviceProfile) {
         val exportUri = CommonUri.parse("content://test/profile.bin")
         val reExportUri = CommonUri.parse("content://test/profile-reexport.bin")
-        var importedProfile: DeviceProfile? = null
+        var importResult: Result<DeviceProfile>? = null
 
         viewModel.exportProfile(exportUri, profile)
         runCurrent()
 
-        viewModel.importProfile(exportUri) { importedProfile = it }
+        viewModel.importProfile(exportUri) { importResult = it }
         runCurrent()
 
-        val actualImportedProfile = assertNotNull(importedProfile)
+        val actualImportedProfile = assertNotNull(importResult).getOrThrow()
         assertEquals(profile, actualImportedProfile)
         assertContentEquals(profile.encode(), fileService.readBytes(exportUri))
         assertContentEquals(profile.encode(), actualImportedProfile.encode())

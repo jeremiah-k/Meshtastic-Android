@@ -792,6 +792,7 @@ ignore_mqtt
 ignore_remove
 ### IMPORT ###
 import_configuration
+import_configuration_failed
 import_export_label
 import_known_shared_contact_text
 import_label
@@ -805,6 +806,13 @@ insert
 insert_link_message
 insert_link_title
 insert_link_url_hint
+### INSTALL ###
+install_configuration_bluetooth_repair_hint
+install_configuration_failed
+install_configuration_in_progress_title
+install_configuration_in_progress_warning
+install_configuration_preparing
+install_configuration_stage
 installed_firmware_version
 internal
 interval_always_on

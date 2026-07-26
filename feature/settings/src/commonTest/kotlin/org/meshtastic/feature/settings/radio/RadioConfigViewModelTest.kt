@@ -20,6 +20,7 @@ import app.cash.turbine.test
 import dev.mokkery.MockMode
 import dev.mokkery.answering.calls
 import dev.mokkery.answering.returns
+import dev.mokkery.answering.throws
 import dev.mokkery.every
 import dev.mokkery.everySuspend
 import dev.mokkery.matcher.any
@@ -27,6 +28,7 @@ import dev.mokkery.mock
 import dev.mokkery.verify
 import dev.mokkery.verify.VerifyMode.Companion.exactly
 import dev.mokkery.verifySuspend
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -42,12 +44,14 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import okio.ByteString.Companion.encodeUtf8
+import org.meshtastic.core.common.util.CommonUri
 import org.meshtastic.core.domain.usecase.settings.AdminActionsUseCase
 import org.meshtastic.core.domain.usecase.settings.ExportProfileUseCase
 import org.meshtastic.core.domain.usecase.settings.ImportProfileUseCase
 import org.meshtastic.core.domain.usecase.settings.ImportSecurityConfigUseCase
 import org.meshtastic.core.domain.usecase.settings.InstallProfileUseCase
 import org.meshtastic.core.domain.usecase.settings.ProcessRadioResponseUseCase
+import org.meshtastic.core.domain.usecase.settings.ProfileInstallProgress
 import org.meshtastic.core.domain.usecase.settings.RadioConfigUseCase
 import org.meshtastic.core.domain.usecase.settings.RadioResponseResult
 import org.meshtastic.core.model.ConnectionState
@@ -85,6 +89,8 @@ import org.meshtastic.proto.LoRaRegionPresetMap
 import org.meshtastic.proto.LocalConfig
 import org.meshtastic.proto.LocalModuleConfig
 import org.meshtastic.proto.MeshPacket
+import org.meshtastic.proto.ModuleConfig.MeshBeaconConfig
+import org.meshtastic.proto.ModuleConfig.TrafficManagementConfig
 import org.meshtastic.proto.User
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
@@ -125,6 +131,7 @@ class RadioConfigViewModelTest {
     private val snackbarManager: SnackbarManager = mock(MockMode.autofill)
     private val nodeRestartTracker = NodeRestartTracker(CoroutineScope(SupervisorJob()))
 
+    private lateinit var serviceConnectionState: MutableStateFlow<ConnectionState>
     private lateinit var viewModel: RadioConfigViewModel
 
     @BeforeTest
@@ -143,8 +150,8 @@ class RadioConfigViewModelTest {
         every { homoglyphEncodingPrefs.homoglyphEncodingEnabled } returns MutableStateFlow(false)
 
         every { serviceRepository.meshPacketFlow } returns MutableSharedFlow()
-        every { serviceRepository.connectionState } returns
-            MutableStateFlow(org.meshtastic.core.model.ConnectionState.Connected)
+        serviceConnectionState = MutableStateFlow(ConnectionState.Connected)
+        every { serviceRepository.connectionState } returns serviceConnectionState
 
         every { mqttManager.mqttConnectionState } returns
             MutableStateFlow(org.meshtastic.core.model.MqttConnectionState.Inactive)
@@ -185,6 +192,35 @@ class RadioConfigViewModelTest {
         mqttManager = mqttManager,
         lockdownCoordinator = FakeLockdownCoordinator(),
     )
+
+    @Test
+    fun `importProfile reports unreadable file instead of silently dropping result`() = runTest {
+        everySuspend { fileService.read(any(), any()) } returns false
+        var result: Result<DeviceProfile>? = null
+
+        viewModel.importProfile(CommonUri.parse("content://test/missing.cfg")) { result = it }
+        advanceUntilIdle()
+
+        assertFalse(assertNotNull(result).isSuccess)
+    }
+
+    @Test
+    fun `importProfile reports decoder failure exactly once`() = runTest {
+        everySuspend { fileService.read(any(), any()) } calls
+            { args ->
+                val block = args.arg<suspend (okio.BufferedSource) -> Unit>(1)
+                block(okio.Buffer().writeUtf8("not a profile"))
+                true
+            }
+        everySuspend { importProfileUseCase(any()) } returns Result.failure(IllegalArgumentException("bad profile"))
+        val results = mutableListOf<Result<DeviceProfile>>()
+
+        viewModel.importProfile(CommonUri.parse("content://test/bad.cfg"), results::add)
+        advanceUntilIdle()
+
+        assertEquals(1, results.size)
+        assertFalse(results.single().isSuccess)
+    }
 
     @Test
     fun `setConfig calls useCase`() = runTest {
@@ -985,14 +1021,14 @@ class RadioConfigViewModelTest {
         nodeRepository.setNodes(listOf(node))
         viewModel = createViewModel()
 
-        val config =
-            org.meshtastic.proto.ModuleConfig(mqtt = org.meshtastic.proto.ModuleConfig.MQTTConfig(enabled = true))
+        val trafficManagement = TrafficManagementConfig(position_min_interval_secs = 30)
+        val config = org.meshtastic.proto.ModuleConfig(traffic_management = trafficManagement)
         everySuspend { radioConfigUseCase.setModuleConfig(any(), any(), any()) } returns 42
 
         viewModel.setModuleConfig(config)
 
         verifySuspend { radioConfigUseCase.setModuleConfig(123, config, any()) }
-        assertEquals(true, viewModel.radioConfigState.value.moduleConfig.mqtt?.enabled)
+        assertEquals(trafficManagement, viewModel.radioConfigState.value.moduleConfig.traffic_management)
     }
 
     @Test
@@ -1029,11 +1065,106 @@ class RadioConfigViewModelTest {
         viewModel = createViewModel()
 
         val profile = DeviceProfile()
-        everySuspend { installProfileUseCase(any(), any(), any()) } returns Unit
+        everySuspend { installProfileUseCase(any(), any(), any(), any(), any()) } returns Unit
+
+        var result: Result<Unit>? = null
+        viewModel.installProfile(profile) { result = it }
+        advanceUntilIdle()
+
+        verifySuspend { installProfileUseCase(123, profile, any(), true, any()) }
+        assertTrue(assertNotNull(result).isSuccess)
+    }
+
+    @Test
+    fun `installProfile binds owner context at invocation time`() = runTest {
+        val originalNode = Node(num = 123, user = User(id = "!123", long_name = "Original"))
+        val replacementNode = Node(num = 123, user = User(id = "!123", long_name = "Replacement"))
+        nodeRepository.setNodes(listOf(originalNode))
+        viewModel = createViewModel()
+        runCurrent()
+        val profile = DeviceProfile(long_name = "Updated")
+        everySuspend { installProfileUseCase(any(), any(), any(), any(), any()) } returns Unit
 
         viewModel.installProfile(profile)
+        nodeRepository.setNodes(listOf(replacementNode))
+        advanceUntilIdle()
 
-        verifySuspend { installProfileUseCase(123, profile, any()) }
+        verifySuspend { installProfileUseCase(123, profile, originalNode.user, true, any()) }
+    }
+
+    @Test
+    fun `installProfile exposes preparing and staged progress until completion`() = runTest {
+        val node = Node(num = 123, user = User(id = "!123"))
+        nodeRepository.setNodes(listOf(node))
+        viewModel = createViewModel()
+        val allowProgress = CompletableDeferred<Unit>()
+        val releaseInstall = CompletableDeferred<Unit>()
+        everySuspend { installProfileUseCase(any(), any(), any(), any(), any()) } calls
+            { args ->
+                allowProgress.await()
+                args.arg<(ProfileInstallProgress) -> Unit>(4)(ProfileInstallProgress(2, 4))
+                releaseInstall.await()
+            }
+
+        viewModel.installProfile(DeviceProfile())
+        assertEquals(ProfileInstallState.Preparing, viewModel.profileInstallState.value)
+        allowProgress.complete(Unit)
+        runCurrent()
+        assertEquals(ProfileInstallState.Installing(2, 4), viewModel.profileInstallState.value)
+
+        releaseInstall.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(ProfileInstallState.Idle, viewModel.profileInstallState.value)
+    }
+
+    @Test
+    fun `installProfile rejects a second install while the first is active`() = runTest {
+        val node = Node(num = 123, user = User(id = "!123"))
+        nodeRepository.setNodes(listOf(node))
+        viewModel = createViewModel()
+        val releaseInstall = CompletableDeferred<Unit>()
+        everySuspend { installProfileUseCase(any(), any(), any(), any(), any()) } calls { releaseInstall.await() }
+
+        viewModel.installProfile(DeviceProfile())
+        runCurrent()
+        var secondResult: Result<Unit>? = null
+        viewModel.installProfile(DeviceProfile()) { secondResult = it }
+
+        assertFalse(assertNotNull(secondResult).isSuccess)
+        verifySuspend(exactly(1)) { installProfileUseCase(any(), any(), any(), any(), any()) }
+        releaseInstall.complete(Unit)
+        advanceUntilIdle()
+    }
+
+    @Test
+    fun `installProfile reports missing destination`() = runTest {
+        viewModel = createViewModel()
+        var result: Result<Unit>? = null
+
+        viewModel.installProfile(DeviceProfile()) { result = it }
+
+        assertFalse(assertNotNull(result).isSuccess)
+        verifySuspend(exactly(0)) { installProfileUseCase(any(), any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun `installProfile reports staged restore failure`() = runTest {
+        val node = Node(num = 123, user = User(id = "!123"))
+        val profile = DeviceProfile()
+        nodeRepository.setMyNodeInfo(myNodeInfo(myNodeNum = 123))
+        nodeRepository.setNodes(listOf(node))
+        serviceConnectionState.value = ConnectionState.Connected
+        viewModel = createViewModel()
+        runCurrent()
+        everySuspend { installProfileUseCase(123, profile, node.user, true, any()) } throws
+            IllegalStateException("restore interrupted")
+        var result: Result<Unit>? = null
+
+        viewModel.installProfile(profile) { result = it }
+        advanceUntilIdle()
+
+        verifySuspend { installProfileUseCase(123, profile, node.user, true, any()) }
+        assertFalse(assertNotNull(result).isSuccess)
     }
 
     @Test
@@ -1053,14 +1184,31 @@ class RadioConfigViewModelTest {
         assertEquals(5, viewModel.radioConfigState.value.radioConfig.lora?.hop_limit)
 
         // ModuleConfigResponse
-        val moduleResponse =
+        val telemetryResponse =
             org.meshtastic.proto.ModuleConfig(
                 telemetry = org.meshtastic.proto.ModuleConfig.TelemetryConfig(device_update_interval = 300),
             )
         every { processRadioResponseUseCase(any(), 123, any()) } returns
-            RadioResponseResult.ModuleConfigResponse(moduleResponse)
+            RadioResponseResult.ModuleConfigResponse(telemetryResponse)
         packetFlow.emit(MeshPacket())
         assertEquals(300, viewModel.radioConfigState.value.moduleConfig.telemetry?.device_update_interval)
+
+        val meshBeacon = MeshBeaconConfig(broadcast_message = "response beacon")
+        val meshBeaconResponse = org.meshtastic.proto.ModuleConfig(mesh_beacon = meshBeacon)
+        every { processRadioResponseUseCase(any(), 123, any()) } returns
+            RadioResponseResult.ModuleConfigResponse(meshBeaconResponse)
+        packetFlow.emit(MeshPacket())
+        assertEquals(300, viewModel.radioConfigState.value.moduleConfig.telemetry?.device_update_interval)
+        assertEquals(meshBeacon, viewModel.radioConfigState.value.moduleConfig.mesh_beacon)
+
+        val trafficManagement = TrafficManagementConfig(position_min_interval_secs = 30)
+        val trafficManagementResponse = org.meshtastic.proto.ModuleConfig(traffic_management = trafficManagement)
+        every { processRadioResponseUseCase(any(), 123, any()) } returns
+            RadioResponseResult.ModuleConfigResponse(trafficManagementResponse)
+        packetFlow.emit(MeshPacket())
+        assertEquals(300, viewModel.radioConfigState.value.moduleConfig.telemetry?.device_update_interval)
+        assertEquals(meshBeacon, viewModel.radioConfigState.value.moduleConfig.mesh_beacon)
+        assertEquals(trafficManagement, viewModel.radioConfigState.value.moduleConfig.traffic_management)
 
         // Owner
         val user = User(long_name = "New Name")
