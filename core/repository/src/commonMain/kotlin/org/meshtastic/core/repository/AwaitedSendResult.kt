@@ -14,27 +14,22 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
+package org.meshtastic.core.repository
 
-plugins {
-    alias(libs.plugins.meshtastic.kmp.library)
-    alias(libs.plugins.meshtastic.koin)
+/** Outcome of a packet whose caller waited for radio acceptance. */
+enum class AwaitedSendStatus {
+    ACCEPTED,
+    REJECTED,
+    TIMED_OUT,
+    TRANSPORT_STOPPED,
+    SEND_FAILED,
 }
 
-kotlin {
-    android { withHostTest {} }
-
-    sourceSets {
-        commonMain.dependencies {
-            api(projects.core.model)
-            api(libs.meshtastic.protobufs)
-            implementation(projects.core.common)
-            implementation(projects.core.database)
-
-            implementation(libs.kotlinx.coroutines.core)
-            implementation(libs.kotlinx.atomicfu)
-            implementation(libs.kermit)
-            implementation(libs.androidx.paging.common)
-        }
-        commonTest.dependencies { implementation(projects.core.testing) }
-    }
+/**
+ * Detailed result for an awaited send. [dispatched] is true only when an active transport accepted the outbound bytes
+ * for asynchronous delivery.
+ */
+data class AwaitedSendResult(val status: AwaitedSendStatus, val dispatched: Boolean) {
+    val accepted: Boolean
+        get() = status == AwaitedSendStatus.ACCEPTED
 }

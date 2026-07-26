@@ -25,8 +25,13 @@ interface PacketHandler {
     /** Sends a command/packet directly to the radio. */
     fun sendToRadio(p: ToRadio)
 
-    /** Adds a mesh packet to the queue for sending. */
-    suspend fun sendToRadio(packet: MeshPacket)
+    /**
+     * Adds a mesh packet to the queue for sending.
+     *
+     * @return `true` when the packet's non-zero ID was reserved and queued, or `false` when the packet was invalid or
+     *   its ID was already queued/in flight.
+     */
+    suspend fun sendToRadio(packet: MeshPacket): Boolean
 
     /**
      * Adds a mesh packet to the queue and suspends until the radio acknowledges it via [QueueStatus].
@@ -35,9 +40,15 @@ interface PacketHandler {
      * packet has been accepted by the radio before proceeding. This is critical for operations where ordering matters
      * (e.g., sending a shared contact before the first DM).
      *
+     * Time spent behind packets already in the FIFO is not part of the response timeout. The timeout begins when this
+     * packet reaches the head of the queue and is transmitted.
+     *
      * @return `true` if the radio accepted the packet, `false` on timeout or failure.
      */
-    suspend fun sendToRadioAndAwait(packet: MeshPacket): Boolean
+    suspend fun sendToRadioAndAwait(packet: MeshPacket): Boolean = sendToRadioAndAwaitResult(packet).accepted
+
+    /** Detailed form of [sendToRadioAndAwait], including whether an active transport admitted the packet. */
+    suspend fun sendToRadioAndAwaitResult(packet: MeshPacket): AwaitedSendResult
 
     /** Processes queue status updates from the radio. */
     fun handleQueueStatus(queueStatus: QueueStatus)

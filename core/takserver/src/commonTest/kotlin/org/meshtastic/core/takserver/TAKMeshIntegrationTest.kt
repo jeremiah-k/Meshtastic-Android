@@ -16,7 +16,6 @@
  */
 package org.meshtastic.core.takserver
 
-import co.touchlab.kermit.Severity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -28,24 +27,21 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import okio.ByteString.Companion.toByteString
-import org.meshtastic.core.model.ConnectionState
 import org.meshtastic.core.model.DataPacket
 import org.meshtastic.core.model.MyNodeInfo
 import org.meshtastic.core.model.Node
 import org.meshtastic.core.model.NodeSortOption
 import org.meshtastic.core.model.Position
-import org.meshtastic.core.model.service.LockdownState
-import org.meshtastic.core.model.service.LockdownTokenInfo
-import org.meshtastic.core.model.service.TracerouteResponse
+import org.meshtastic.core.repository.AwaitedSendResult
+import org.meshtastic.core.repository.AwaitedSendStatus
 import org.meshtastic.core.repository.CommandSender
 import org.meshtastic.core.repository.MeshConfigHandler
 import org.meshtastic.core.repository.NodeRepository
 import org.meshtastic.core.repository.RadioSessionContext
-import org.meshtastic.core.repository.ServiceRepository
+import org.meshtastic.core.testing.FakeServiceRepository
 import org.meshtastic.proto.AdminMessage
 import org.meshtastic.proto.Channel
 import org.meshtastic.proto.ChannelSet
-import org.meshtastic.proto.ClientNotification
 import org.meshtastic.proto.Config
 import org.meshtastic.proto.Data
 import org.meshtastic.proto.DeviceMetadata
@@ -134,14 +130,12 @@ class TAKMeshIntegrationTest {
             initFn: () -> AdminMessage,
         ) {}
 
-        override fun sendAdminImmediate(destNum: Int, initFn: () -> AdminMessage) {}
-
-        override suspend fun sendAdminAwait(
+        override suspend fun sendAdminAwaitResult(
             destNum: Int,
             requestId: Int,
             wantResponse: Boolean,
             initFn: () -> AdminMessage,
-        ): Boolean = true
+        ): AwaitedSendResult = AwaitedSendResult(AwaitedSendStatus.ACCEPTED, dispatched = true)
 
         override suspend fun sendPosition(pos: org.meshtastic.proto.Position, destNum: Int?, wantResponse: Boolean) {}
 
@@ -166,61 +160,6 @@ class TAKMeshIntegrationTest {
         ) {}
 
         override fun sendLockNow() {}
-    }
-
-    private class FakeServiceRepository : ServiceRepository {
-        private val _meshPacketFlow = MutableSharedFlow<MeshPacket>(replay = 1, extraBufferCapacity = 64)
-        override val meshPacketFlow: Flow<MeshPacket> = _meshPacketFlow
-
-        override val connectionState: StateFlow<ConnectionState> = MutableStateFlow(ConnectionState.Disconnected)
-
-        override fun setConnectionState(connectionState: ConnectionState) {}
-
-        override val clientNotification: StateFlow<ClientNotification?> = MutableStateFlow(null)
-
-        override fun setClientNotification(notification: ClientNotification?) {}
-
-        override fun clearClientNotification() {}
-
-        override val errorMessage: StateFlow<String?> = MutableStateFlow(null)
-
-        override fun setErrorMessage(text: String, severity: Severity) {}
-
-        override fun clearErrorMessage() {}
-
-        override val connectionProgress: StateFlow<String?> = MutableStateFlow(null)
-
-        override fun setConnectionProgress(text: String) {}
-
-        override suspend fun emitMeshPacket(packet: MeshPacket) {
-            _meshPacketFlow.emit(packet)
-        }
-
-        override val tracerouteResponse: StateFlow<TracerouteResponse?> = MutableStateFlow(null)
-
-        override fun setTracerouteResponse(value: TracerouteResponse?) {}
-
-        override fun clearTracerouteResponse() {}
-
-        override val neighborInfoResponse: StateFlow<String?> = MutableStateFlow(null)
-
-        override fun setNeighborInfoResponse(value: String?) {}
-
-        override fun clearNeighborInfoResponse() {}
-
-        override val lockdownState: StateFlow<LockdownState> = MutableStateFlow(LockdownState.None)
-
-        override fun setLockdownState(state: LockdownState) {}
-
-        override fun clearLockdownState() {}
-
-        override val lockdownTokenInfo: StateFlow<LockdownTokenInfo?> = MutableStateFlow(null)
-
-        override fun setLockdownTokenInfo(info: LockdownTokenInfo?) {}
-
-        override val sessionAuthorized: StateFlow<Boolean> = MutableStateFlow(false)
-
-        override fun setSessionAuthorized(authorized: Boolean) {}
     }
 
     private class FakeMeshConfigHandler : MeshConfigHandler {
