@@ -18,6 +18,7 @@ package org.meshtastic.core.ui.util
 
 import kotlinx.coroutines.test.runTest
 import okio.ByteString.Companion.toByteString
+import org.meshtastic.core.model.util.CHANNEL_REPLACEMENT_SLOT_COUNT
 import org.meshtastic.core.testing.FakeRadioConfigRepository
 import org.meshtastic.core.testing.FakeRadioController
 import org.meshtastic.proto.Channel
@@ -32,137 +33,8 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import org.meshtastic.core.model.Channel as ModelChannel
 
-/**
- * Coverage for [getChannelReplacementList]. The REPLACE helper must emit an authoritative slot list for QR imports:
- * every imported index becomes a write (PRIMARY at 0, SECONDARY thereafter), and any trailing slots present in the
- * cached set are emitted as DISABLED so the radio stops using them. Critically, positions where the cache already
- * matches the import are NOT skipped — the diff-skip was the source of stale channels.
- */
+/** Coverage for the channel import and preview surfaces owned by core:ui. */
 class ProtoExtensionsTest {
-    @Test
-    fun index_zero_emits_primary_with_new_settings_even_when_unchanged_from_old() {
-        val same = ChannelSettings(name = "Main", psk = byteArrayOf(1, 2, 3).toByteString())
-
-        val result = getChannelReplacementList(new = listOf(same), currentSettings = listOf(same))
-
-        assertEquals(1, result.size)
-        assertEquals(Channel.Role.PRIMARY, result.single().role)
-        assertEquals(0, result.single().index)
-        assertEquals(same, result.single().settings)
-    }
-
-    @Test
-    fun secondary_indices_emit_secondary_with_new_settings_even_when_unchanged_from_old() {
-        val primary = ChannelSettings(name = "Main")
-        val secondary = ChannelSettings(name = "Chat")
-
-        val result =
-            getChannelReplacementList(new = listOf(primary, secondary), currentSettings = listOf(primary, secondary))
-
-        assertEquals(2, result.size)
-        assertEquals(Channel.Role.PRIMARY, result[0].role)
-        assertEquals(primary, result[0].settings)
-        assertEquals(Channel.Role.SECONDARY, result[1].role)
-        assertEquals(1, result[1].index)
-        assertEquals(secondary, result[1].settings)
-    }
-
-    @Test
-    fun old_trailing_indices_beyond_new_are_emitted_as_disabled_with_empty_settings() {
-        val primary = ChannelSettings(name = "Main")
-
-        val result =
-            getChannelReplacementList(
-                new = listOf(primary),
-                currentSettings = listOf(primary, ChannelSettings(name = "Old")),
-            )
-
-        // index 0 PRIMARY (new), index 1 DISABLED (trailing old slot)
-        assertEquals(2, result.size)
-        assertEquals(Channel.Role.PRIMARY, result[0].role)
-        assertEquals(primary, result[0].settings)
-        assertEquals(Channel.Role.DISABLED, result[1].role)
-        assertEquals(1, result[1].index)
-        assertEquals(ChannelSettings(), result[1].settings)
-    }
-
-    @Test
-    fun empty_new_and_empty_old_produces_empty_list() {
-        val result = getChannelReplacementList(new = emptyList(), currentSettings = emptyList())
-
-        assertTrue(result.isEmpty())
-    }
-
-    @Test
-    fun empty_new_with_non_empty_current_emits_disabled_for_every_current_index() {
-        val currentSettings =
-            listOf(ChannelSettings(name = "A"), ChannelSettings(name = "B"), ChannelSettings(name = "C"))
-
-        val result = getChannelReplacementList(new = emptyList(), currentSettings = currentSettings)
-
-        assertEquals(3, result.size)
-        result.forEachIndexed { i, channel ->
-            assertEquals(Channel.Role.DISABLED, channel.role, "index $i should be DISABLED")
-            assertEquals(i, channel.index)
-            assertEquals(ChannelSettings(), channel.settings, "index $i should carry empty settings")
-        }
-    }
-
-    @Test
-    fun single_entry_new_with_multi_entry_current_emits_primary_then_disabled_trailing() {
-        val newPrimary = ChannelSettings(name = "Imported")
-        val currentSettings =
-            listOf(
-                ChannelSettings(name = "CurrentPrimary"),
-                ChannelSettings(name = "CurrentSecondary"),
-                ChannelSettings(name = "CurrentTertiary"),
-            )
-
-        val result = getChannelReplacementList(new = listOf(newPrimary), currentSettings = currentSettings)
-
-        assertEquals(3, result.size)
-        assertEquals(Channel.Role.PRIMARY, result[0].role)
-        assertEquals(0, result[0].index)
-        assertEquals(newPrimary, result[0].settings)
-        assertEquals(Channel.Role.DISABLED, result[1].role)
-        assertEquals(Channel.Role.DISABLED, result[2].role)
-        assertEquals(ChannelSettings(), result[1].settings)
-        assertEquals(ChannelSettings(), result[2].settings)
-    }
-
-    @Test
-    fun new_larger_than_old_emits_primary_plus_secondaries_for_every_new_index() {
-        val primary = ChannelSettings(name = "Main")
-        val secondaryA = ChannelSettings(name = "Chat")
-        val secondaryB = ChannelSettings(name = "Data")
-
-        val result =
-            getChannelReplacementList(new = listOf(primary, secondaryA, secondaryB), currentSettings = listOf(primary))
-
-        assertEquals(3, result.size)
-        assertEquals(Channel.Role.PRIMARY, result[0].role)
-        assertEquals(0, result[0].index)
-        assertEquals(primary, result[0].settings)
-        assertEquals(Channel.Role.SECONDARY, result[1].role)
-        assertEquals(1, result[1].index)
-        assertEquals(secondaryA, result[1].settings)
-        assertEquals(Channel.Role.SECONDARY, result[2].role)
-        assertEquals(2, result[2].index)
-        assertEquals(secondaryB, result[2].settings)
-    }
-
-    @Test
-    fun replacement_list_rejects_minimum_slot_count_above_maximum_slot_count() {
-        assertFailsWith<IllegalArgumentException> {
-            getChannelReplacementList(
-                new = listOf(ChannelSettings(name = "Main")),
-                currentSettings = emptyList(),
-                minimumSlotCount = 2,
-                maximumSlotCount = 1,
-            )
-        }
-    }
-
     @Test
     fun import_writes_all_eight_slots_with_replacement_roles() = runTest {
         val radioController = FakeRadioController()
@@ -182,7 +54,7 @@ class ProtoExtensionsTest {
             radioConfigRepository = radioConfigRepository,
         )
 
-        assertEquals((0..7).toList(), radioController.localChannels.map { it.index })
+        assertEquals((0 until CHANNEL_REPLACEMENT_SLOT_COUNT).toList(), radioController.localChannels.map { it.index })
         assertEquals(
             listOf(
                 Channel.Role.PRIMARY,
@@ -259,7 +131,7 @@ class ProtoExtensionsTest {
             radioConfigRepository = radioConfigRepository,
         )
 
-        assertEquals((0..7).toList(), radioController.localChannels.map { it.index })
+        assertEquals((0 until CHANNEL_REPLACEMENT_SLOT_COUNT).toList(), radioController.localChannels.map { it.index })
         assertEquals(importedSettings, radioConfigRepository.currentChannelSet.settings)
     }
 
@@ -417,6 +289,23 @@ class ProtoExtensionsTest {
             getChannelPreviewForAdd(listOf(channel), listOf(channel), ModelChannel.default.loraConfig, maxChannels = 8)
 
         assertEquals(listOf(channel), preview.settings)
+    }
+
+    @Test
+    fun preview_blank_existing_slot_does_not_suppress_meaningful_incoming_channel() {
+        val blank = ChannelSettings()
+        val incoming = ChannelSettings(name = "LongFast")
+
+        val preview =
+            getChannelPreviewForAdd(
+                existing = listOf(blank),
+                incoming = listOf(incoming),
+                loraConfig = ModelChannel.default.loraConfig,
+                maxChannels = 8,
+            )
+
+        assertEquals(listOf(blank, incoming), preview.settings)
+        assertTrue(preview.selections[1])
     }
 
     @Test
@@ -585,128 +474,5 @@ class ProtoExtensionsTest {
 
         assertTrue(preview.settings.isEmpty())
         assertTrue(preview.selections.isEmpty())
-    }
-
-    // --- normalizeReplacementSettings tests ---
-
-    @Test
-    fun normalize_empty_list_passes_through() {
-        assertEquals(emptyList(), normalizeReplacementSettings(emptyList(), ModelChannel.default.loraConfig))
-    }
-
-    @Test
-    fun normalize_single_element_passes_through() {
-        val primary = ChannelSettings(name = "Solo", psk = byteArrayOf(1).toByteString())
-
-        assertEquals(listOf(primary), normalizeReplacementSettings(listOf(primary), ModelChannel.default.loraConfig))
-    }
-
-    @Test
-    fun normalize_drops_blank_placeholder_secondary() {
-        val primary = ChannelSettings(name = "Main", psk = byteArrayOf(1, 2).toByteString())
-        val real = ChannelSettings(name = "Chat", psk = byteArrayOf(3).toByteString())
-
-        val result =
-            normalizeReplacementSettings(listOf(primary, ChannelSettings(), real), ModelChannel.default.loraConfig)
-
-        assertEquals(listOf(primary, real), result)
-    }
-
-    @Test
-    fun normalize_preserves_blank_primary() {
-        val blankPrimary = ChannelSettings()
-        val real = ChannelSettings(name = "Chat", psk = byteArrayOf(3).toByteString())
-
-        // Slot 0 is always preserved, even when blank (deliberate disable signal).
-        val result = normalizeReplacementSettings(listOf(blankPrimary, real), ModelChannel.default.loraConfig)
-
-        assertEquals(2, result.size)
-        assertEquals(blankPrimary, result[0])
-        assertEquals(real, result[1])
-    }
-
-    @Test
-    fun normalize_blank_primary_does_not_seed_duplicate_tracking() {
-        val blankPrimary = ChannelSettings()
-        val publicSecondary = ChannelSettings(psk = byteArrayOf(1).toByteString())
-
-        val result =
-            normalizeReplacementSettings(listOf(blankPrimary, publicSecondary), ModelChannel.default.loraConfig)
-
-        assertEquals(listOf(blankPrimary, publicSecondary), result)
-    }
-
-    @Test
-    fun normalize_drops_semantic_duplicate_secondary() {
-        val primary = ChannelSettings(name = "Main", psk = byteArrayOf(1).toByteString())
-        val dup = ChannelSettings(name = "Main", psk = byteArrayOf(1).toByteString())
-
-        val result = normalizeReplacementSettings(listOf(primary, dup), ModelChannel.default.loraConfig)
-
-        assertEquals(listOf(primary), result)
-    }
-
-    @Test
-    fun normalize_keeps_same_name_different_psk() {
-        val primary = ChannelSettings(name = "A", psk = byteArrayOf(1).toByteString())
-        val other = ChannelSettings(name = "A", psk = byteArrayOf(2).toByteString())
-
-        val result = normalizeReplacementSettings(listOf(primary, other), ModelChannel.default.loraConfig)
-
-        assertEquals(listOf(primary, other), result)
-    }
-
-    @Test
-    fun normalize_keeps_same_psk_different_name() {
-        val psk = byteArrayOf(1, 2).toByteString()
-        val primary = ChannelSettings(name = "A", psk = psk)
-        val other = ChannelSettings(name = "B", psk = psk)
-
-        val result = normalizeReplacementSettings(listOf(primary, other), ModelChannel.default.loraConfig)
-
-        assertEquals(listOf(primary, other), result)
-    }
-
-    @Test
-    fun normalize_compacts_valid_secondaries_into_sequential_slots() {
-        val primary = ChannelSettings(name = "Main", psk = byteArrayOf(1).toByteString())
-        val b = ChannelSettings(name = "B", psk = byteArrayOf(2).toByteString())
-        val c = ChannelSettings(name = "C", psk = byteArrayOf(3).toByteString())
-
-        // blank + duplicate mixed in; valid B and C must compact to slots 1 and 2 with no gap
-        val result =
-            normalizeReplacementSettings(
-                listOf(
-                    primary,
-                    ChannelSettings(),
-                    b,
-                    ChannelSettings(name = "Main", psk = byteArrayOf(1).toByteString()),
-                    c,
-                ),
-                ModelChannel.default.loraConfig,
-            )
-
-        assertEquals(listOf(primary, b, c), result)
-    }
-
-    @Test
-    fun normalize_null_lora_falls_back_to_defaults_without_crashing() {
-        val primary = ChannelSettings(name = "Main", psk = byteArrayOf(1).toByteString())
-
-        val result = normalizeReplacementSettings(listOf(primary, ChannelSettings()), loraConfig = null)
-
-        assertEquals(listOf(primary), result)
-    }
-
-    @Test
-    fun normalize_all_blank_input_preserves_only_primary() {
-        // Primary is always preserved (even blank); both blank placeholder secondaries are dropped.
-        val result =
-            normalizeReplacementSettings(
-                listOf(ChannelSettings(), ChannelSettings(), ChannelSettings()),
-                ModelChannel.default.loraConfig,
-            )
-
-        assertEquals(1, result.size)
     }
 }
