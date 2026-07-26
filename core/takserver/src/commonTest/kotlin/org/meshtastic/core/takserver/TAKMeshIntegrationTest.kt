@@ -17,6 +17,7 @@
 package org.meshtastic.core.takserver
 
 import co.touchlab.kermit.Severity
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -39,6 +40,7 @@ import org.meshtastic.core.repository.MeshConfigHandler
 import org.meshtastic.core.repository.NodeRepository
 import org.meshtastic.core.repository.RadioSessionContext
 import org.meshtastic.core.repository.ServiceRepository
+import org.meshtastic.core.testing.FakeServiceRepository
 import org.meshtastic.core.testing.FakeTakPrefs
 import org.meshtastic.proto.AdminMessage
 import org.meshtastic.proto.Channel
