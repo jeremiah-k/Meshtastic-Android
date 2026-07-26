@@ -816,6 +816,7 @@
     <string name="ignore_remove">Remove '%1$s' from ignore list?</string>
     <!-- IMPORT -->
     <string name="import_configuration">Import configuration</string>
+    <string name="import_configuration_failed">Unable to import the selected configuration</string>
     <string name="import_export_label">Import/Export</string>
     <string name="import_known_shared_contact_text">Warning: This contact is known, importing will overwrite the previous contact information.</string>
     <string name="import_label">Import</string>
@@ -829,6 +830,8 @@
     <string name="insert_link_message">Enter the URL for the selected text</string>
     <string name="insert_link_title">Insert Link</string>
     <string name="insert_link_url_hint">https://</string>
+    <string name="install_configuration_bluetooth_repair_hint">Configuration restored. If Bluetooth does not reconnect, forget this device in Android Bluetooth settings and pair it again.</string>
+    <string name="install_configuration_failed">Unable to apply the selected configuration to the device</string>
     <string name="installed_firmware_version">Currently Installed</string>
     <string name="internal">Internal</string>
     <string name="interval_always_on">Always On</string>

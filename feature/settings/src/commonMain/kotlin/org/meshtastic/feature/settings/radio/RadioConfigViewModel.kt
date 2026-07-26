@@ -568,6 +568,7 @@ open class RadioConfigViewModel(
                         paxcounter = config.paxcounter ?: state.moduleConfig.paxcounter,
                         statusmessage = config.statusmessage ?: state.moduleConfig.statusmessage,
                         tak = config.tak ?: state.moduleConfig.tak,
+                        mesh_beacon = config.mesh_beacon ?: state.moduleConfig.mesh_beacon,
                     ),
                 )
             }
@@ -643,13 +644,19 @@ open class RadioConfigViewModel(
         safeLaunch(tag = "removeFixedPosition") { radioConfigUseCase.removeFixedPosition(destNum) }
     }
 
-    fun importProfile(uri: CommonUri, onResult: (DeviceProfile) -> Unit) {
-        safeLaunch(tag = "importProfile") {
-            var profile: DeviceProfile? = null
-            fileService.read(uri) { source ->
-                importProfileUseCase(source).onSuccess { profile = it }.onFailure { throw it }
+    fun importProfile(uri: CommonUri, onResult: (Result<DeviceProfile>) -> Unit) {
+        viewModelScope.launch {
+            val result = safeCatching {
+                var profile: DeviceProfile? = null
+                val wasRead = fileService.read(uri) { source -> profile = importProfileUseCase(source).getOrThrow() }
+                check(wasRead) { "Unable to read the selected configuration profile" }
+                checkNotNull(profile) { "The selected configuration profile was empty" }
             }
-            profile?.let { onResult(it) }
+            // Do not attach the exception: parser messages can quote profile bytes containing credentials.
+            result.onFailure { error ->
+                Logger.e { "[importProfile] Failed to import profile; cause=${error.safeLogType()}" }
+            }
+            onResult(result)
         }
     }
 
@@ -720,9 +727,28 @@ open class RadioConfigViewModel(
         }
     }
 
-    fun installProfile(protobuf: DeviceProfile) {
-        val destNum = destNum ?: destNode.value?.num ?: return
-        safeLaunch(tag = "installProfile") { installProfileUseCase(destNum, protobuf, destNode.value?.user) }
+    fun installProfile(protobuf: DeviceProfile, onResult: (Result<Unit>) -> Unit = {}) {
+        val destNum = destNum ?: destNode.value?.num
+        if (destNum == null) {
+            onResult(Result.failure(IllegalStateException("No destination is available for profile installation")))
+            return
+        }
+        viewModelScope.launch {
+            val result = safeCatching {
+                installProfileUseCase(
+                    destNum = destNum,
+                    profile = protobuf,
+                    currentUser = destNode.value?.user,
+                    isLocal = radioConfigState.value.isLocal,
+                )
+                Unit
+            }
+            // Keep device/profile identifiers and exception messages out of logs while retaining the failure type.
+            result.onFailure { error ->
+                Logger.e { "[installProfile] Failed to install profile; cause=${error.safeLogType()}" }
+            }
+            onResult(result)
+        }
     }
 
     fun clearPacketResponse() {
@@ -1103,6 +1129,7 @@ open class RadioConfigViewModel(
                             paxcounter = response.paxcounter ?: state.moduleConfig.paxcounter,
                             statusmessage = response.statusmessage ?: state.moduleConfig.statusmessage,
                             tak = response.tak ?: state.moduleConfig.tak,
+                            mesh_beacon = response.mesh_beacon ?: state.moduleConfig.mesh_beacon,
                         ),
                     )
                 }
@@ -1235,3 +1262,6 @@ internal fun Config.saveRebootBehavior(): RebootBehavior = when {
 /** Firmware `AdminModule::handleSetModuleConfig` reboots for every module section except status message. */
 internal fun ModuleConfig.saveRebootBehavior(): RebootBehavior =
     if (statusmessage != null) RebootBehavior.NEVER else RebootBehavior.ALWAYS
+
+/** Returns diagnostic type information without logging a potentially sensitive exception message. */
+private fun Throwable.safeLogType(): String = this::class.simpleName ?: "Throwable"

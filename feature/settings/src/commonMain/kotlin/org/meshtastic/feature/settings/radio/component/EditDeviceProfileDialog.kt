@@ -42,18 +42,27 @@ import org.meshtastic.core.ui.component.MeshtasticDialog
 import org.meshtastic.core.ui.component.SwitchPreference
 import org.meshtastic.proto.DeviceProfile
 
-private const val UNMESSAGABLE_TAG = 9
-private const val LICENSED_TAG = 10
+private enum class ProfileField(val labelRes: StringResource) {
+    LONG_NAME(Res.string.long_name),
+    SHORT_NAME(Res.string.short_name),
+    CHANNEL_URL(Res.string.channel_url),
+    CONFIG(Res.string.radio_configuration),
+    MODULE_CONFIG(Res.string.module_settings),
+    FIXED_POSITION(Res.string.fixed_position),
+    UNMESSAGABLE(Res.string.unmessageable),
+    LICENSED(Res.string.licensed_amateur_radio),
+    ;
 
-private enum class ProfileField(val tag: Int, val labelRes: StringResource) {
-    LONG_NAME(1, Res.string.long_name),
-    SHORT_NAME(2, Res.string.short_name),
-    CHANNEL_URL(3, Res.string.channel_url),
-    CONFIG(4, Res.string.radio_configuration),
-    MODULE_CONFIG(5, Res.string.module_settings),
-    FIXED_POSITION(6, Res.string.fixed_position),
-    UNMESSAGABLE(UNMESSAGABLE_TAG, Res.string.unmessageable),
-    LICENSED(LICENSED_TAG, Res.string.licensed_amateur_radio),
+    fun isPresent(profile: DeviceProfile): Boolean = when (this) {
+        LONG_NAME -> profile.long_name != null
+        SHORT_NAME -> profile.short_name != null
+        CHANNEL_URL -> profile.channel_url != null
+        CONFIG -> profile.config != null
+        MODULE_CONFIG -> profile.module_config != null
+        FIXED_POSITION -> profile.fixed_position != null
+        UNMESSAGABLE -> profile.is_unmessagable != null
+        LICENSED -> profile.is_licensed != null
+    }
 }
 
 @Suppress("LongMethod", "CyclomaticComplexMethod")
@@ -65,24 +74,12 @@ fun EditDeviceProfileDialog(
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val state = remember {
-        mutableStateMapOf<ProfileField, Boolean>().apply {
-            putAll(
-                ProfileField.entries.associateWith { field ->
-                    when (field) {
-                        ProfileField.LONG_NAME -> deviceProfile.long_name != null
-                        ProfileField.SHORT_NAME -> deviceProfile.short_name != null
-                        ProfileField.CHANNEL_URL -> deviceProfile.channel_url != null
-                        ProfileField.CONFIG -> deviceProfile.config != null
-                        ProfileField.MODULE_CONFIG -> deviceProfile.module_config != null
-                        ProfileField.FIXED_POSITION -> deviceProfile.fixed_position != null
-                        ProfileField.UNMESSAGABLE -> deviceProfile.is_unmessagable != null
-                        ProfileField.LICENSED -> deviceProfile.is_licensed != null
-                    }
-                },
-            )
+    val state =
+        remember(deviceProfile) {
+            mutableStateMapOf<ProfileField, Boolean>().apply {
+                putAll(ProfileField.entries.associateWith { field -> field.isPresent(deviceProfile) })
+            }
         }
-    }
 
     MeshtasticDialog(
         title = title,
@@ -119,21 +116,10 @@ fun EditDeviceProfileDialog(
             Column(modifier = Modifier.fillMaxWidth()) {
                 HorizontalDivider()
                 ProfileField.entries.forEach { field ->
-                    val isAvailable =
-                        when (field) {
-                            ProfileField.LONG_NAME -> deviceProfile.long_name != null
-                            ProfileField.SHORT_NAME -> deviceProfile.short_name != null
-                            ProfileField.CHANNEL_URL -> deviceProfile.channel_url != null
-                            ProfileField.CONFIG -> deviceProfile.config != null
-                            ProfileField.MODULE_CONFIG -> deviceProfile.module_config != null
-                            ProfileField.FIXED_POSITION -> deviceProfile.fixed_position != null
-                            ProfileField.UNMESSAGABLE -> deviceProfile.is_unmessagable != null
-                            ProfileField.LICENSED -> deviceProfile.is_licensed != null
-                        }
                     SwitchPreference(
                         title = stringResource(field.labelRes),
                         checked = state[field] == true,
-                        enabled = isAvailable,
+                        enabled = field.isPresent(deviceProfile),
                         onCheckedChange = { state[field] = it },
                         padding = PaddingValues(0.dp),
                     )

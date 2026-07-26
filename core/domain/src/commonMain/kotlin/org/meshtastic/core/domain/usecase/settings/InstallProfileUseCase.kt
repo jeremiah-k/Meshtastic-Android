@@ -16,97 +16,242 @@
  */
 package org.meshtastic.core.domain.usecase.settings
 
+import co.touchlab.kermit.Logger
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.koin.core.annotation.Single
-import org.meshtastic.core.model.Position
-import org.meshtastic.core.repository.AdminEditScope
+import org.meshtastic.core.model.ConnectionState
+import org.meshtastic.core.model.DeviceType
+import org.meshtastic.core.repository.NodeRepository
+import org.meshtastic.core.repository.NodeRestartTracker
+import org.meshtastic.core.repository.RadioConfigRepository
 import org.meshtastic.core.repository.RadioController
+import org.meshtastic.core.repository.RadioInterfaceService
 import org.meshtastic.proto.Config
 import org.meshtastic.proto.DeviceProfile
 import org.meshtastic.proto.LocalConfig
 import org.meshtastic.proto.LocalModuleConfig
 import org.meshtastic.proto.ModuleConfig
 import org.meshtastic.proto.User
+import kotlin.time.Duration.Companion.seconds
 
-/** Use case for installing a device profile onto a radio. */
+/** Installs a local device profile using firmware-compatible, restart-aware phases. */
 @Single
-open class InstallProfileUseCase constructor(private val radioController: RadioController) {
+open class InstallProfileUseCase
+constructor(
+    private val radioController: RadioController,
+    private val radioInterfaceService: RadioInterfaceService,
+    private val radioConfigRepository: RadioConfigRepository,
+    private val nodeRepository: NodeRepository,
+    private val nodeRestartTracker: NodeRestartTracker,
+) {
+    private val installMutex = Mutex()
+
     /**
-     * Installs the provided [DeviceProfile] onto the radio at [destNum].
+     * Installs [profile] onto the locally connected radio at [destNum].
      *
-     * @param destNum The destination node number.
-     * @param profile The device profile to install.
-     * @param currentUser The current user configuration of the destination node (to preserve names if not in profile).
+     * Firmware edit transactions defer normal config persistence until `commit_edit_settings`, but firmware versions
+     * already in the field can interrupt Bluetooth as soon as MQTT or Serial configuration is processed. Those
+     * transport-sensitive commands therefore cannot be sent inside the transaction: a BLE link can disappear before the
+     * remaining writes and commit reach the device. Every committed edit and standalone config write also schedules a
+     * firmware reboot, regardless of transport, so each non-terminal stage must complete a fresh application handshake
+     * before the next write.
+     *
+     * The profile is applied in this order:
+     * 1. owner, channels, non-terminal config, fixed position, and non-disruptive modules in one edit transaction;
+     * 2. MQTT as a standalone stage;
+     * 3. configuration for transports other than the active one;
+     * 4. the active transport's own configuration last, because it may prevent that transport from reconnecting.
+     *
+     * Bluetooth and Network are always kept out of the ordinary transaction. If more than one general-config write
+     * would end the active transport, those writes share one final edit transaction so firmware accepts all of them
+     * before the connection disappears. This covers, for example, enabling Wi-Fi while disabling Bluetooth over BLE.
+     *
+     * Every stage observes the firmware restart. Stages that need another write also wait for the application handshake
+     * to return to [ConnectionState.Connected], then resolve the current local node number so a security restore that
+     * changes identity cannot strand later writes on the old destination.
      */
-    open suspend operator fun invoke(destNum: Int, profile: DeviceProfile, currentUser: User?) {
-        radioController.editSettings(destNum) {
-            installOwner(profile, currentUser)
-            installConfig(profile.config)
-            installFixedPosition(profile.fixed_position)
-            installModuleConfig(profile.module_config)
+    open suspend operator fun invoke(destNum: Int, profile: DeviceProfile, currentUser: User?, isLocal: Boolean) =
+        installMutex.withLock {
+            require(isLocal) { "Device profiles can only be installed on the locally connected node" }
+            require(radioController.connectionState.value is ConnectionState.Connected) {
+                "A connected local node is required to install a device profile"
+            }
+            val activeTransport =
+                checkNotNull(radioInterfaceService.getDeviceAddress()?.let(DeviceType::fromAddress)) {
+                    "The connected node transport is unavailable"
+                }
+            require(destNum == currentLocalNodeNum()) {
+                "The profile destination no longer matches the connected local node"
+            }
+
+            validateOwnerRestore(profile, currentUser)
+            val currentConfig = radioConfigRepository.localConfigFlow.first()
+            val currentModuleConfig = radioConfigRepository.moduleConfigFlow.first()
+            val plan =
+                ProfileInstallPlanner.create(
+                    profile = profile,
+                    currentConfig = currentConfig,
+                    currentModuleConfig = currentModuleConfig,
+                    currentUser = currentUser,
+                    activeTransport = activeTransport,
+                )
+
+            if (plan.hasTransactionalWrites) {
+                installTransactionStage(
+                    profile = plan.profile,
+                    currentUser = currentUser,
+                    config = plan.config,
+                    moduleConfig = plan.moduleConfig,
+                    channelRestore = plan.channelRestore,
+                )
+            }
+
+            installTransportSensitiveStages(plan.transportPlan)
         }
+
+    /**
+     * Applies the ordinary edit transaction while keeping the local channel cache aligned with commands that were
+     * actually issued. A failure before the first channel command leaves the cache untouched. After a successful send,
+     * the imported authoritative set is reconciled on both normal and exceptional exits.
+     */
+    private suspend fun installTransactionStage(
+        profile: DeviceProfile,
+        currentUser: User?,
+        config: LocalConfig?,
+        moduleConfig: LocalModuleConfig?,
+        channelRestore: ChannelRestore?,
+    ) {
+        var channelWriteIssued = false
+        var channelCacheReconciliationAttempted = false
+
+        suspend fun reconcileChannelCache() {
+            val restore = channelRestore ?: return
+            if (!channelWriteIssued || channelCacheReconciliationAttempted) return
+
+            channelCacheReconciliationAttempted = true
+            // Replace the whole list: handshake persistence ignores DISABLED slots, so replaying individual packets
+            // cannot reliably clear stale trailing channels after an interrupted authoritative restore.
+            withContext(NonCancellable) { radioConfigRepository.replaceAllSettings(restore.normalizedSettings) }
+        }
+
+        var primaryFailure: Exception? = null
+        var reconciliationFailure: Throwable? = null
+        try {
+            runInstallStage(stage = ProfileInstallStage.TRANSACTION, expectReconnect = true) {
+                radioController.editLocalSettings {
+                    installOwner(profile, currentUser)
+                    installConfig(config)
+                    installChannels(channelRestore) { channelWriteIssued = true }
+                    installFixedPosition(profile.fixed_position)
+                    installModuleConfig(moduleConfig)
+                }
+                // Reconcile before waiting for the reboot handshake. Incoming channel packets can then only refine the
+                // authoritative imported set instead of merging into the pre-import cache.
+                reconcileChannelCache()
+            }
+        } catch (@Suppress("TooGenericExceptionCaught") error: Exception) {
+            primaryFailure = error
+        } finally {
+            // A later channel/config/commit failure can occur after earlier set_channel commands reached firmware.
+            // Preserve the imported authoritative set in that case, even though the stage itself failed. This is
+            // cleanup, so retain its failure until the original stage failure can be restored after `finally`.
+            reconciliationFailure = runCatching { reconcileChannelCache() }.exceptionOrNull()
+        }
+
+        primaryFailure?.let { failure ->
+            reconciliationFailure?.let(failure::addSuppressed)
+            throw failure
+        }
+        reconciliationFailure?.let { throw it }
     }
 
-    // is_licensed is deliberately not installed here: enabling ham mode is a dedicated onboarding flow
-    // (set_ham_mode — rewrites the owner, disables encryption, applies tx power/frequency) that a plain
-    // set_owner would bypass, leaving the radio flagged licensed without those required side effects.
-    private suspend fun AdminEditScope.installOwner(profile: DeviceProfile, currentUser: User?) {
-        if (profile.long_name != null || profile.short_name != null || profile.is_unmessagable != null) {
-            currentUser?.let {
-                setOwner(
-                    it.copy(
-                        long_name = profile.long_name ?: it.long_name,
-                        short_name = profile.short_name ?: it.short_name,
-                        is_unmessagable = profile.is_unmessagable ?: it.is_unmessagable,
-                    ),
-                )
+    private suspend fun installTransportSensitiveStages(plan: TransportSensitivePlan) {
+        plan.mqtt?.let { mqtt -> installModuleConfigStage(ProfileInstallStage.MQTT, mqtt, expectReconnect = true) }
+
+        (plan.continuingStages + plan.terminalStages).forEach { stage ->
+            when (stage) {
+                is TransportSensitiveStage.ConfigWrite ->
+                    installConfigStage(stage.profileStage, stage.config, stage.expectsReconnect)
+
+                is TransportSensitiveStage.ModuleConfigWrite ->
+                    installModuleConfigStage(stage.profileStage, stage.config, stage.expectsReconnect)
+            }
+        }
+
+        if (plan.groupedTerminalConfig.isNotEmpty()) {
+            runInstallStage(ProfileInstallStage.TRANSPORT_CONFIG, expectReconnect = false) {
+                radioController.editLocalSettings { plan.groupedTerminalConfig.forEach { setConfig(it.config) } }
             }
         }
     }
 
-    private suspend fun AdminEditScope.installConfig(config: LocalConfig?) {
-        config?.let { lc ->
-            lc.device?.let { setConfig(Config(device = it)) }
-            lc.position?.let { setConfig(Config(position = it)) }
-            lc.power?.let { setConfig(Config(power = it)) }
-            lc.network?.let { setConfig(Config(network = it)) }
-            lc.display?.let { setConfig(Config(display = it)) }
-            lc.lora?.let { setConfig(Config(lora = it)) }
-            lc.bluetooth?.let { setConfig(Config(bluetooth = it)) }
-            lc.security?.let { setConfig(Config(security = it)) }
+    private suspend fun installConfigStage(stage: ProfileInstallStage, config: Config, expectReconnect: Boolean) =
+        runInstallStage(stage, expectReconnect) {
+            radioController.setConfig(currentLocalNodeNum(), config, radioController.generatePacketId())
+        }
+
+    private suspend fun installModuleConfigStage(
+        stage: ProfileInstallStage,
+        config: ModuleConfig,
+        expectReconnect: Boolean,
+    ) = runInstallStage(stage, expectReconnect) {
+        radioController.setModuleConfig(currentLocalNodeNum(), config, radioController.generatePacketId())
+    }
+
+    private suspend fun runInstallStage(
+        stage: ProfileInstallStage,
+        expectReconnect: Boolean,
+        action: suspend () -> Unit,
+    ) {
+        Logger.i { "Installing device profile stage=${stage.logName}" }
+        val baselineEpochs = radioController.connectionEpochs.value
+        nodeRestartTracker.expectRestart()
+        var completed = false
+        try {
+            action()
+            val departureEpochs =
+                checkNotNull(
+                    withTimeoutOrNull(PROFILE_DEPARTURE_TIMEOUT) {
+                        radioController.connectionEpochs.first { it.departures > baselineEpochs.departures }
+                    },
+                ) {
+                    "Device did not begin the ${stage.logName} profile restart"
+                }
+            if (expectReconnect) {
+                checkNotNull(
+                    withTimeoutOrNull(PROFILE_RECONNECT_TIMEOUT) {
+                        radioController.connectionEpochs.first {
+                            it.departures >= departureEpochs.departures &&
+                                it.completedHandshakes > it.handshakesAtLastDeparture
+                        }
+                    },
+                ) {
+                    "Device did not reconnect after the ${stage.logName} profile stage"
+                }
+            }
+            nodeRestartTracker.onConnected()
+            completed = true
+            Logger.i { "Installed device profile stage=${stage.logName}" }
+        } finally {
+            if (!completed && radioController.connectionState.value is ConnectionState.Connected) {
+                nodeRestartTracker.onConnected()
+            }
         }
     }
 
-    private suspend fun AdminEditScope.installFixedPosition(fixedPosition: org.meshtastic.proto.Position?) {
-        if (fixedPosition != null) {
-            setFixedPosition(Position(fixedPosition))
-        }
-    }
+    private fun currentLocalNodeNum(): Int =
+        checkNotNull(nodeRepository.myNodeInfo.value?.myNodeNum) { "The connected local node identity is unavailable" }
 
-    private suspend fun AdminEditScope.installModuleConfig(moduleConfig: LocalModuleConfig?) {
-        moduleConfig?.let { lmc ->
-            installModuleConfigPart1(lmc)
-            installModuleConfigPart2(lmc)
-        }
-    }
-
-    private suspend fun AdminEditScope.installModuleConfigPart1(lmc: LocalModuleConfig) {
-        lmc.mqtt?.let { setModuleConfig(ModuleConfig(mqtt = it)) }
-        lmc.serial?.let { setModuleConfig(ModuleConfig(serial = it)) }
-        lmc.external_notification?.let { setModuleConfig(ModuleConfig(external_notification = it)) }
-        lmc.store_forward?.let { setModuleConfig(ModuleConfig(store_forward = it)) }
-        lmc.range_test?.let { setModuleConfig(ModuleConfig(range_test = it)) }
-        lmc.telemetry?.let { setModuleConfig(ModuleConfig(telemetry = it)) }
-        lmc.canned_message?.let { setModuleConfig(ModuleConfig(canned_message = it)) }
-        lmc.audio?.let { setModuleConfig(ModuleConfig(audio = it)) }
-    }
-
-    private suspend fun AdminEditScope.installModuleConfigPart2(lmc: LocalModuleConfig) {
-        lmc.remote_hardware?.let { setModuleConfig(ModuleConfig(remote_hardware = it)) }
-        lmc.neighbor_info?.let { setModuleConfig(ModuleConfig(neighbor_info = it)) }
-        lmc.ambient_lighting?.let { setModuleConfig(ModuleConfig(ambient_lighting = it)) }
-        lmc.detection_sensor?.let { setModuleConfig(ModuleConfig(detection_sensor = it)) }
-        lmc.paxcounter?.let { setModuleConfig(ModuleConfig(paxcounter = it)) }
-        lmc.statusmessage?.let { setModuleConfig(ModuleConfig(statusmessage = it)) }
-        lmc.tak?.let { setModuleConfig(ModuleConfig(tak = it)) }
+    private companion object {
+        // Firmware normally begins its seven-second reboot promptly. Bound only the departure separately so a rejected
+        // MQTT/Serial payload fails visibly instead of consuming the full reconnection allowance without ever
+        // rebooting.
+        val PROFILE_DEPARTURE_TIMEOUT = 20.seconds
+        val PROFILE_RECONNECT_TIMEOUT = 90.seconds
     }
 }
