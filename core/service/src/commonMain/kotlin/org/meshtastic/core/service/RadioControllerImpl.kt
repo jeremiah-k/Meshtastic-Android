@@ -31,6 +31,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.meshtastic.core.common.database.DatabaseManager
+import org.meshtastic.core.model.ConnectionEpochs
 import org.meshtastic.core.model.ConnectionState
 import org.meshtastic.core.repository.AdminController
 import org.meshtastic.core.repository.CommandSender
@@ -95,7 +96,7 @@ class RadioControllerImpl(
     scope: CoroutineScope,
     private val onDeviceAddressChanged: (() -> Unit)? = null,
 ) : RadioController,
-    AdminController by AdminControllerImpl(commandSender, nodeManager, radioConfigRepository, scope),
+    AdminController by AdminControllerImpl(commandSender, nodeManager, radioConfigRepository, serviceRepository, scope),
     MessagingController by MessagingControllerImpl(
         commandSender,
         nodeManager,
@@ -197,6 +198,9 @@ class RadioControllerImpl(
 
     override val connectionState: StateFlow<ConnectionState>
         get() = serviceRepository.connectionState
+
+    override val connectionEpochs: StateFlow<ConnectionEpochs>
+        get() = serviceRepository.connectionEpochs
 
     override val clientNotification: StateFlow<ClientNotification?>
         get() = serviceRepository.clientNotification

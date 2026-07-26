@@ -72,6 +72,20 @@ interface RadioSessionAuthority {
         runWithSessionLease(session) { block() }
 }
 
+/** Writes raw protocol frames to the currently admitted transport. */
+interface RadioTransportWriter {
+    /** Sends [bytes] when a transport is available; callers that need admission evidence use [trySendToRadio]. */
+    fun sendToRadio(bytes: ByteArray)
+
+    /**
+     * Attempts to dispatch [bytes] to the active transport.
+     *
+     * @return `true` when an active transport accepted the bytes for asynchronous delivery, or `false` when no send
+     *   could be scheduled or confirmed.
+     */
+    fun trySendToRadio(bytes: ByteArray): Boolean
+}
+
 /**
  * Interface for the low-level radio interface that handles raw byte communication.
  *
@@ -89,7 +103,8 @@ interface RadioSessionAuthority {
  */
 interface RadioInterfaceService :
     RadioTransportCallback,
-    RadioSessionAuthority {
+    RadioSessionAuthority,
+    RadioTransportWriter {
     /** The device types supported by this platform's radio interface. */
     val supportedDeviceTypes: List<DeviceType>
 
@@ -144,9 +159,6 @@ interface RadioInterfaceService :
      * collector was attached do not get replayed ahead of the next session's handshake.
      */
     fun resetReceivedBuffer()
-
-    /** Sends a raw byte array to the radio. */
-    fun sendToRadio(bytes: ByteArray)
 
     /** Initiates the connection to the radio. */
     fun connect()

@@ -17,6 +17,7 @@
 package org.meshtastic.core.repository
 
 import kotlinx.coroutines.flow.StateFlow
+import org.meshtastic.core.model.ConnectionEpochs
 import org.meshtastic.core.model.ConnectionState
 
 /**
@@ -37,4 +38,10 @@ interface ConnectionStateProvider {
      * @see ServiceRepository.connectionState
      */
     val connectionState: StateFlow<ConnectionState>
+
+    /**
+     * Monotonic departures and completed handshakes. Use these counters when every lifecycle boundary matters, because
+     * rapid intermediate [connectionState] values may be conflated before a collector observes them.
+     */
+    val connectionEpochs: StateFlow<ConnectionEpochs>
 }

@@ -52,7 +52,8 @@ interface CommandSender {
      * Sends an admin message and suspends until the radio acknowledges it.
      *
      * This is used when the caller needs to guarantee a packet has been accepted by the radio before proceeding, such
-     * as sending a shared contact before the first DM to a node.
+     * as sending a shared contact before the first DM to a node. Time spent behind existing FIFO entries does not count
+     * against the radio-response timeout.
      *
      * @return `true` if the radio accepted the packet, `false` on timeout or failure.
      */
@@ -61,7 +62,15 @@ interface CommandSender {
         requestId: Int = generatePacketId(),
         wantResponse: Boolean = false,
         initFn: () -> AdminMessage,
-    ): Boolean
+    ): Boolean = sendAdminAwaitResult(destNum, requestId, wantResponse, initFn).accepted
+
+    /** Detailed form of [sendAdminAwait], including whether an active transport admitted the packet. */
+    suspend fun sendAdminAwaitResult(
+        destNum: Int,
+        requestId: Int = generatePacketId(),
+        wantResponse: Boolean = false,
+        initFn: () -> AdminMessage,
+    ): AwaitedSendResult
 
     /** Sends our current position to the mesh. */
     suspend fun sendPosition(pos: org.meshtastic.proto.Position, destNum: Int? = null, wantResponse: Boolean = false)

@@ -145,7 +145,9 @@ interface AdminController {
      * SDK's `AdminApi.editSettings { }`.
      *
      * All admin packets for the session — begin, the [block]'s writes, and commit — are issued from the calling
-     * coroutine, which is required for the firmware to associate them with one transaction.
+     * coroutine, which is required for the firmware to associate them with one transaction. The implementation waits
+     * for radio queue acceptance at both boundaries, so callers cannot start a later rebooting stage while this
+     * transaction is still queued or uncommitted.
      */
     suspend fun editSettings(destNum: Int, block: suspend AdminEditScope.() -> Unit)
 

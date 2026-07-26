@@ -17,17 +17,22 @@
 package org.meshtastic.core.data.manager
 
 import co.touchlab.kermit.Logger
+import kotlinx.atomicfu.AtomicBoolean
+import kotlinx.atomicfu.atomic
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.asDeferred
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import org.koin.core.annotation.Named
@@ -41,6 +46,8 @@ import org.meshtastic.core.model.MessageStatus
 import org.meshtastic.core.model.RadioNotConnectedException
 import org.meshtastic.core.model.util.toOneLineString
 import org.meshtastic.core.model.util.toPIIString
+import org.meshtastic.core.repository.AwaitedSendResult
+import org.meshtastic.core.repository.AwaitedSendStatus
 import org.meshtastic.core.repository.ConnectionStateProvider
 import org.meshtastic.core.repository.MeshLogRepository
 import org.meshtastic.core.repository.PacketHandler
@@ -78,6 +85,7 @@ class PacketHandlerImpl(
     }
 
     private var queueJob: Job? = null
+    private var queueGeneration = 0L
 
     private val queueMutex = Mutex()
     private val queuedPackets = mutableListOf<MeshPacket>()
@@ -87,15 +95,24 @@ class PacketHandlerImpl(
     private var queueStopped = false
 
     private val responseMutex = Mutex()
-    private val queueResponse = mutableMapOf<Int, CompletableDeferred<Boolean>>()
+
+    private data class PendingResponse(
+        val deferred: CompletableDeferred<AwaitedSendStatus> = CompletableDeferred(),
+        val dispatched: AtomicBoolean = atomic(false),
+    )
+
+    private val queueResponse = mutableMapOf<Int, PendingResponse>()
 
     override fun sendToRadio(p: ToRadio) {
+        dispatchToRadio(p)
+    }
+
+    private fun dispatchToRadio(p: ToRadio): Boolean {
         Logger.d { "Sending to radio ${p.toPIIString()}" }
-        val b = p.encode()
+        val dispatched = radioInterfaceService.trySendToRadio(p.encode())
+        if (!dispatched) return false
 
-        radioInterfaceService.sendToRadio(b)
         p.packet?.id?.let { changeStatus(it, MessageStatus.ENROUTE) }
-
         val packet = p.packet
         if (packet?.decoded != null) {
             val packetToSave =
@@ -110,6 +127,7 @@ class PacketHandlerImpl(
                 )
             insertMeshLog(packetToSave)
         }
+        return true
     }
 
     /**
@@ -118,37 +136,60 @@ class PacketHandlerImpl(
      * multiple calls — e.g. an `editSettings { … }` begin → writes → commit sequence — MUST be issued from a single
      * coroutine; concurrent senders share FIFO only at the per-call grain.
      */
-    override suspend fun sendToRadio(packet: MeshPacket) {
-        queueMutex.withLock {
-            queueStopped = false
-            queuedPackets.add(packet)
-            startPacketQueueLocked()
+    override suspend fun sendToRadio(packet: MeshPacket): Boolean {
+        val pending = packet.takeIf { it.id != 0 }?.let { enqueuePacket(it) }
+        when {
+            packet.id == 0 -> Logger.w { "Dropping queued packet without an ID" }
+            pending == null -> Logger.w { "Dropping duplicate queued packet id=${packet.id.toUInt()}" }
         }
+        return pending != null
     }
 
     @Suppress("TooGenericExceptionCaught", "SwallowedException")
-    override suspend fun sendToRadioAndAwait(packet: MeshPacket): Boolean {
-        // Pre-register the deferred so the queue processor and QueueStatus handler
-        // can find it immediately — no polling required.
-        val deferred = CompletableDeferred<Boolean>()
-        responseMutex.withLock { queueResponse[packet.id] = deferred }
-        queueMutex.withLock {
-            queueStopped = false // Allow queue to resume after a disconnect/reconnect cycle.
-            queuedPackets.add(packet)
-            startPacketQueueLocked()
+    override suspend fun sendToRadioAndAwaitResult(packet: MeshPacket): AwaitedSendResult {
+        val pending = packet.takeIf { it.id != 0 }?.let { enqueuePacket(it) }
+        if (pending == null) {
+            if (packet.id == 0) {
+                Logger.w { "Rejecting awaited packet without an ID" }
+            } else {
+                Logger.w { "Rejecting duplicate awaited packet id=${packet.id.toUInt()}" }
+            }
+            return AwaitedSendResult(status = AwaitedSendStatus.SEND_FAILED, dispatched = false)
         }
         return try {
-            withTimeout(TIMEOUT) { deferred.await() }
-        } catch (e: TimeoutCancellationException) {
-            Logger.d { "sendToRadioAndAwait packet id=${packet.id.toUInt()} timeout" }
-            false
+            // The queue processor owns the response timeout and starts it only after this packet reaches the head of
+            // the FIFO and is sent. A caller-level timeout here would incorrectly include time spent behind earlier
+            // packets and can reject a valid transaction boundary before it has even left the phone.
+            AwaitedSendResult(status = pending.deferred.await(), dispatched = pending.dispatched.value)
         } catch (e: CancellationException) {
             throw e // Preserve structured concurrency cancellation propagation.
         } catch (e: Exception) {
             Logger.d { "sendToRadioAndAwait packet id=${packet.id.toUInt()} failed: ${e.message}" }
-            false
+            AwaitedSendResult(status = AwaitedSendStatus.SEND_FAILED, dispatched = pending.dispatched.value)
         } finally {
-            responseMutex.withLock { queueResponse.remove(packet.id) }
+            // The queue lifecycle owns an incomplete reservation. In particular, cancellation while this packet is
+            // still behind the FIFO backlog must not release its ID for a newer packet that the stale queue entry could
+            // accidentally satisfy.
+            if (pending.deferred.isCompleted) {
+                responseMutex.withLock { if (queueResponse[packet.id] === pending) queueResponse.remove(packet.id) }
+            }
+        }
+    }
+
+    /**
+     * Reserves [packet]'s non-zero ID and queues it as one atomic admission. The reservation spans both queued and
+     * in-flight work, so a second sender cannot replace the original caller's [PendingResponse].
+     */
+    private suspend fun enqueuePacket(packet: MeshPacket): PendingResponse? = queueMutex.withLock {
+        responseMutex.withLock responseLock@{
+            if (queueResponse.containsKey(packet.id)) return@responseLock null
+
+            val pending = PendingResponse()
+            queueResponse[packet.id] = pending
+            queueStopped = false // Allow queue to resume after a disconnect/reconnect cycle.
+            queuedPackets.add(packet)
+            startPacketQueueLocked()
+            pending
         }
     }
 
@@ -161,11 +202,9 @@ class PacketHandlerImpl(
                 queueStopped = true
                 queueJob?.cancel()
                 queueJob = null
+                queueGeneration++
                 queuedPackets.clear()
-            }
-            responseMutex.withLock {
-                queueResponse.values.forEach { if (!it.isCompleted) it.complete(false) }
-                queueResponse.clear()
+                completePendingResponses(AwaitedSendStatus.TRANSPORT_STOPPED)
             }
         }
     }
@@ -182,16 +221,21 @@ class PacketHandlerImpl(
         scope.launch {
             responseMutex.withLock {
                 if (requestId != 0) {
-                    queueResponse.remove(requestId)?.complete(success)
+                    queueResponse.remove(requestId)?.deferred?.complete(success.toAwaitedSendStatus())
                 } else {
-                    queueResponse.values.firstOrNull { !it.isCompleted }?.complete(success)
+                    queueResponse.values
+                        .firstOrNull { !it.deferred.isCompleted }
+                        ?.deferred
+                        ?.complete(success.toAwaitedSendStatus())
                 }
             }
         }
     }
 
     override suspend fun removeResponse(dataRequestId: Int, complete: Boolean) {
-        responseMutex.withLock { queueResponse.remove(dataRequestId)?.complete(complete) }
+        responseMutex.withLock {
+            queueResponse.remove(dataRequestId)?.deferred?.complete(complete.toAwaitedSendStatus())
+        }
     }
 
     /**
@@ -201,6 +245,7 @@ class PacketHandlerImpl(
     private fun startPacketQueueLocked() {
         if (queueStopped) return
         if (queueJob?.isActive == true) return
+        val generation = ++queueGeneration
         queueJob =
             scope.handledLaunch {
                 try {
@@ -210,30 +255,60 @@ class PacketHandlerImpl(
                         try {
                             val response = sendPacket(packet)
                             Logger.d { "queueJob packet id=${packet.id.toUInt()} waiting" }
-                            val success = withTimeout(TIMEOUT) { response.await() }
-                            Logger.d { "queueJob packet id=${packet.id.toUInt()} success $success" }
+                            val status = withTimeout(TIMEOUT) { response.await() }
+                            Logger.d { "queueJob packet id=${packet.id.toUInt()} status $status" }
+                            // QueueStatus normally removes keyed responses before completing them. Keep cleanup here
+                            // as well for local send failures and legacy ID-less statuses, which complete the deferred
+                            // without removing its map entry.
+                            responseMutex.withLock { queueResponse.remove(packet.id) }
                         } catch (e: TimeoutCancellationException) {
                             Logger.d { "queueJob packet id=${packet.id.toUInt()} timeout" }
-                            // Clean up the deferred for this packet. sendToRadioAndAwait callers
-                            // also clean up in their own finally block (idempotent remove).
-                            responseMutex.withLock { queueResponse.remove(packet.id) }
+                            // Complete an awaiting caller before removing the response. Its timeout starts here, after
+                            // the packet is actually sent, rather than while it waits behind the existing FIFO backlog.
+                            responseMutex.withLock {
+                                queueResponse.remove(packet.id)?.deferred?.complete(AwaitedSendStatus.TIMED_OUT)
+                            }
                         } catch (e: CancellationException) {
                             throw e // Preserve structured concurrency cancellation propagation.
                         } catch (e: Exception) {
                             Logger.d { "queueJob packet id=${packet.id.toUInt()} failed" }
-                            responseMutex.withLock { queueResponse.remove(packet.id) }
+                            responseMutex.withLock {
+                                queueResponse.remove(packet.id)?.deferred?.complete(AwaitedSendStatus.SEND_FAILED)
+                            }
                         }
-                        // Deferred cleanup is now handled in the catch blocks above.
-                        // handleQueueStatus (normal success) and stopPacketQueue (bulk cleanup)
-                        // also remove entries, and these removals are idempotent.
+                        // handleQueueStatus and stopPacketQueue also remove entries; every path is intentionally
+                        // idempotent because the queue worker and caller can observe completion concurrently.
                     }
                 } finally {
-                    // Hold queueMutex so that clearing queueJob and the restart decision are
-                    // atomic with respect to new senders calling startPacketQueueLocked().
-                    queueMutex.withLock {
-                        queueJob = null
-                        if (!queueStopped && queuedPackets.isNotEmpty()) {
-                            startPacketQueueLocked()
+                    // Keep completion, replacement, and disconnect draining atomic with new admissions. An older
+                    // cancelled processor must not clear a replacement job started for a newer generation.
+                    withContext(NonCancellable) {
+                        queueMutex.withLock {
+                            if (generation != queueGeneration) return@withLock
+                            queueJob = null
+                            when {
+                                queueStopped || !scope.isActive -> {
+                                    queueStopped = true
+                                    queuedPackets.clear()
+                                    completePendingResponses(AwaitedSendStatus.TRANSPORT_STOPPED)
+                                }
+
+                                connectionStateProvider.connectionState.value == ConnectionState.Connected ->
+                                    if (queuedPackets.isEmpty()) {
+                                        // A normally completed worker has no pending response. Anything left here
+                                        // belongs to an in-flight packet interrupted by cancellation or an unexpected
+                                        // worker exit.
+                                        completePendingResponses(AwaitedSendStatus.TRANSPORT_STOPPED)
+                                    } else {
+                                        startPacketQueueLocked()
+                                    }
+
+                                else -> {
+                                    queueStopped = true
+                                    queuedPackets.clear()
+                                    completePendingResponses(AwaitedSendStatus.TRANSPORT_STOPPED)
+                                }
+                            }
                         }
                     }
                 }
@@ -259,25 +334,45 @@ class PacketHandlerImpl(
     }
 
     @Suppress("TooGenericExceptionCaught")
-    private suspend fun sendPacket(packet: MeshPacket): Deferred<Boolean> {
-        // Reuse a deferred pre-registered by sendToRadioAndAwait, or create a new one.
-        val deferred = responseMutex.withLock { queueResponse.getOrPut(packet.id) { CompletableDeferred() } }
-        try {
-            if (connectionStateProvider.connectionState.value != ConnectionState.Connected) {
-                throw RadioNotConnectedException()
+    private suspend fun sendPacket(packet: MeshPacket): Deferred<AwaitedSendStatus> {
+        val pending =
+            checkNotNull(responseMutex.withLock { queueResponse[packet.id] }) {
+                "Queued packet id=${packet.id.toUInt()} lost its response reservation"
             }
-            sendToRadio(ToRadio(packet = packet))
+        try {
+            requireConnected()
+            pending.dispatched.value = dispatchToRadio(ToRadio(packet = packet))
+            if (!pending.dispatched.value) {
+                throw RadioNotConnectedException("No active transport accepted the packet")
+            }
         } catch (ex: RadioNotConnectedException) {
             Logger.w(ex) { "sendToRadio skipped: Not connected to radio" }
-            deferred.complete(false)
+            pending.deferred.complete(AwaitedSendStatus.SEND_FAILED)
+        } catch (ex: CancellationException) {
+            throw ex
         } catch (ex: Exception) {
             Logger.e(ex) { "sendToRadio error: ${ex.message}" }
-            deferred.complete(false)
+            pending.deferred.complete(AwaitedSendStatus.SEND_FAILED)
         }
-        // Return a read-only Deferred view (kotlinx.coroutines 1.11+) so callers can await it
-        // without being able to complete the underlying CompletableDeferred; cancellation is
-        // still exposed via Deferred/Job.
-        return deferred.asDeferred()
+        // Return a read-only Deferred view (kotlinx.coroutines 1.11+) so callers can await it without completing the
+        // underlying response; cancellation is still exposed via Deferred/Job.
+        return pending.deferred.asDeferred()
+    }
+
+    private fun requireConnected() {
+        if (connectionStateProvider.connectionState.value != ConnectionState.Connected) {
+            throw RadioNotConnectedException()
+        }
+    }
+
+    private fun Boolean.toAwaitedSendStatus(): AwaitedSendStatus =
+        if (this) AwaitedSendStatus.ACCEPTED else AwaitedSendStatus.REJECTED
+
+    private suspend fun completePendingResponses(status: AwaitedSendStatus) {
+        responseMutex.withLock {
+            queueResponse.values.forEach { pending -> pending.deferred.complete(status) }
+            queueResponse.clear()
+        }
     }
 
     private fun insertMeshLog(packetToSave: MeshLog) {

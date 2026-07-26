@@ -21,14 +21,22 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.meshtastic.core.database.entity.FirmwareRelease
 import org.meshtastic.core.database.entity.QuickChatAction
+import org.meshtastic.core.model.ConnectionEpochs
+import org.meshtastic.core.model.ConnectionState
 import org.meshtastic.core.model.DeviceHardware
 import org.meshtastic.proto.Channel
 import org.meshtastic.proto.ChannelSettings
+import org.meshtastic.proto.Config
+import org.meshtastic.proto.ModuleConfig
 import org.meshtastic.proto.Position
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertIs
 import kotlin.test.assertNull
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
+import org.meshtastic.core.model.Position as ModelPosition
 
 class RepositoryFakesTest {
 
@@ -130,6 +138,98 @@ class RepositoryFakesTest {
         assertEquals("active", manager.lastAssociatedAddress)
         assertEquals(3, manager.lastAssociatedNode)
         assertEquals("fresh", manager.lastAssociatedDeviceId)
+    }
+
+    @Test
+    fun `service repository fake preserves connection epoch semantics`() {
+        val repository = FakeServiceRepository()
+
+        repository.setConnectionState(ConnectionState.Connected)
+        assertEquals(ConnectionEpochs(completedHandshakes = 1), repository.connectionEpochs.value)
+
+        repository.setConnectionState(ConnectionState.Connected)
+        assertEquals(ConnectionEpochs(completedHandshakes = 1), repository.connectionEpochs.value)
+
+        repository.setConnectionState(ConnectionState.Connecting)
+        assertEquals(
+            ConnectionEpochs(
+                departures = 1,
+                completedHandshakes = 1,
+                handshakesAtLastDeparture = 1,
+                lastDepartureState = ConnectionState.Connecting,
+            ),
+            repository.connectionEpochs.value,
+        )
+
+        repository.setConnectionState(ConnectionState.Connected)
+        assertEquals(
+            ConnectionEpochs(
+                departures = 1,
+                completedHandshakes = 2,
+                handshakesAtLastDeparture = 1,
+                lastDepartureState = ConnectionState.Connecting,
+            ),
+            repository.connectionEpochs.value,
+        )
+    }
+
+    @Test
+    fun `FakeRadioController preserves configuration and fixed-position evidence until reset`() = runTest {
+        val controller = FakeRadioController()
+        val local = Config(device = Config.DeviceConfig())
+        val admin = Config(lora = Config.LoRaConfig(hop_limit = 5))
+        val module = ModuleConfig(serial = ModuleConfig.SerialConfig(enabled = true))
+        val position = ModelPosition(latitude = 1.0, longitude = 2.0, altitude = 3)
+
+        controller.setLocalConfig(local)
+        controller.setConfig(destNum = 7, config = admin, packetId = 8)
+        controller.setModuleConfig(destNum = 7, config = module, packetId = 9)
+        controller.setFixedPosition(destNum = 7, position = position)
+        controller.setConnectionState(ConnectionState.Connected)
+
+        assertEquals(
+            listOf(
+                FakeRadioController.ConfigWrite(destination = null, config = local),
+                FakeRadioController.ConfigWrite(destination = 7, config = admin),
+            ),
+            controller.configWrites,
+        )
+        assertEquals(listOf(local, admin), controller.localConfigs)
+        assertEquals(
+            listOf(FakeRadioController.ModuleConfigWrite(destination = 7, config = module)),
+            controller.moduleConfigWrites,
+        )
+        assertEquals(listOf(module), controller.moduleConfigs)
+        assertEquals(listOf(7), controller.moduleConfigDestinations)
+        assertEquals(listOf(position), controller.fixedPositions)
+        assertEquals(ConnectionState.Connected, controller.connectionState.value)
+        assertEquals(ConnectionEpochs(completedHandshakes = 1), controller.connectionEpochs.value)
+
+        controller.reset()
+
+        assertTrue(controller.configWrites.isEmpty())
+        assertTrue(controller.localConfigs.isEmpty())
+        assertTrue(controller.moduleConfigWrites.isEmpty())
+        assertTrue(controller.moduleConfigs.isEmpty())
+        assertTrue(controller.moduleConfigDestinations.isEmpty())
+        assertTrue(controller.fixedPositions.isEmpty())
+        assertEquals(ConnectionState.Disconnected, controller.connectionState.value)
+        assertEquals(ConnectionEpochs(), controller.connectionEpochs.value)
+    }
+
+    @Test
+    fun `FakeRadioController commits after block failure and preserves failure precedence`() = runTest {
+        val controller = FakeRadioController()
+        val blockFailure = IllegalStateException("write failed")
+        val commitFailure = IllegalArgumentException("commit failed")
+        controller.onEditSettingsCommitted = { throw commitFailure }
+
+        val failure = assertFailsWith<IllegalStateException> { controller.editLocalSettings { throw blockFailure } }
+
+        assertSame(blockFailure, failure)
+        val suppressedCommitFailure = assertIs<IllegalArgumentException>(failure.suppressedExceptions.single())
+        assertEquals(commitFailure.message, suppressedCommitFailure.message)
+        assertEquals(listOf("begin", "commit"), controller.adminOperations)
     }
 
     @Test
