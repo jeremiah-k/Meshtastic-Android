@@ -93,10 +93,14 @@ class FakeRadioConfigRepository :
     var lastSetModuleConfig: ModuleConfig? = null
         private set
 
+    /** Optional failure thrown by [replaceAllSettings], for exercising reconciliation error paths. */
+    var replaceAllSettingsFailure: Exception? = null
+
     init {
         registerResetAction {
             lastSetLocalConfig = null
             lastSetModuleConfig = null
+            replaceAllSettingsFailure = null
         }
     }
 
@@ -105,6 +109,7 @@ class FakeRadioConfigRepository :
     }
 
     override suspend fun replaceAllSettings(settingsList: List<ChannelSettings>) {
+        replaceAllSettingsFailure?.let { throw it }
         channelSetBacking.value = channelSetBacking.value.copy(settings = settingsList)
     }
 

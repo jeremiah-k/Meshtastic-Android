@@ -135,6 +135,15 @@ data class RadioConfigState(
     val nodeDbResetPreserveFavorites: Boolean = false,
 )
 
+/** UI state for a local device-profile installation. */
+sealed interface ProfileInstallState {
+    data object Idle : ProfileInstallState
+
+    data object Preparing : ProfileInstallState
+
+    data class Installing(val currentStage: Int, val totalStages: Int) : ProfileInstallState
+}
+
 @KoinViewModel
 @Suppress("LongParameterList", "LargeClass")
 open class RadioConfigViewModel(
@@ -186,6 +195,9 @@ open class RadioConfigViewModel(
             lockdownCoordinator.submitPassphrase(passphrase, boots, hours, maxSessionSeconds, disable)
         }
     }
+
+    private val _profileInstallState = MutableStateFlow<ProfileInstallState>(ProfileInstallState.Idle)
+    val profileInstallState: StateFlow<ProfileInstallState> = _profileInstallState.asStateFlow()
 
     val analyticsAllowedFlow = analyticsPrefs.analyticsAllowed
 
@@ -544,33 +556,10 @@ open class RadioConfigViewModel(
         }
     }
 
-    @Suppress("CyclomaticComplexMethod")
     fun setModuleConfig(config: ModuleConfig) {
         val destNum = destNum ?: destNode.value?.num ?: return
         safeLaunch(tag = "setModuleConfig") {
-            _radioConfigState.update { state ->
-                state.copy(
-                    moduleConfig =
-                    state.moduleConfig.copy(
-                        mqtt = config.mqtt ?: state.moduleConfig.mqtt,
-                        serial = config.serial ?: state.moduleConfig.serial,
-                        external_notification =
-                        config.external_notification ?: state.moduleConfig.external_notification,
-                        store_forward = config.store_forward ?: state.moduleConfig.store_forward,
-                        range_test = config.range_test ?: state.moduleConfig.range_test,
-                        telemetry = config.telemetry ?: state.moduleConfig.telemetry,
-                        canned_message = config.canned_message ?: state.moduleConfig.canned_message,
-                        audio = config.audio ?: state.moduleConfig.audio,
-                        remote_hardware = config.remote_hardware ?: state.moduleConfig.remote_hardware,
-                        neighbor_info = config.neighbor_info ?: state.moduleConfig.neighbor_info,
-                        ambient_lighting = config.ambient_lighting ?: state.moduleConfig.ambient_lighting,
-                        detection_sensor = config.detection_sensor ?: state.moduleConfig.detection_sensor,
-                        paxcounter = config.paxcounter ?: state.moduleConfig.paxcounter,
-                        statusmessage = config.statusmessage ?: state.moduleConfig.statusmessage,
-                        tak = config.tak ?: state.moduleConfig.tak,
-                    ),
-                )
-            }
+            _radioConfigState.update { state -> state.copy(moduleConfig = state.moduleConfig.updatedWith(config)) }
             expectRestartIfLocal(config.saveRebootBehavior())
             radioConfigUseCase.setModuleConfig(destNum, config, onRequestId = ::registerRequestId)
         }
@@ -643,13 +632,19 @@ open class RadioConfigViewModel(
         safeLaunch(tag = "removeFixedPosition") { radioConfigUseCase.removeFixedPosition(destNum) }
     }
 
-    fun importProfile(uri: CommonUri, onResult: (DeviceProfile) -> Unit) {
-        safeLaunch(tag = "importProfile") {
-            var profile: DeviceProfile? = null
-            fileService.read(uri) { source ->
-                importProfileUseCase(source).onSuccess { profile = it }.onFailure { throw it }
+    fun importProfile(uri: CommonUri, onResult: (Result<DeviceProfile>) -> Unit) {
+        viewModelScope.launch {
+            val result = safeCatching {
+                var profile: DeviceProfile? = null
+                val wasRead = fileService.read(uri) { source -> profile = importProfileUseCase(source).getOrThrow() }
+                check(wasRead) { "Unable to read the selected configuration profile" }
+                checkNotNull(profile) { "The selected configuration profile was empty" }
             }
-            profile?.let { onResult(it) }
+            // Do not attach the exception: parser messages can quote profile bytes containing credentials.
+            result.onFailure { error ->
+                Logger.w { "[importProfile] Failed to import profile; cause=${error.safeLogType()}" }
+            }
+            onResult(result)
         }
     }
 
@@ -720,9 +715,41 @@ open class RadioConfigViewModel(
         }
     }
 
-    fun installProfile(protobuf: DeviceProfile) {
-        val destNum = destNum ?: destNode.value?.num ?: return
-        safeLaunch(tag = "installProfile") { installProfileUseCase(destNum, protobuf, destNode.value?.user) }
+    fun installProfile(protobuf: DeviceProfile, onResult: (Result<Unit>) -> Unit = {}) {
+        val destNum = destNum ?: destNode.value?.num
+        val currentUser = destNode.value?.user
+        val isLocal = radioConfigState.value.isLocal
+        if (destNum == null) {
+            onResult(Result.failure(IllegalStateException("No destination is available for profile installation")))
+            return
+        }
+        if (!_profileInstallState.compareAndSet(ProfileInstallState.Idle, ProfileInstallState.Preparing)) {
+            onResult(Result.failure(IllegalStateException("A device profile installation is already in progress")))
+            return
+        }
+        viewModelScope.launch {
+            try {
+                val result = safeCatching {
+                    installProfileUseCase(
+                        destNum = destNum,
+                        profile = protobuf,
+                        currentUser = currentUser,
+                        isLocal = isLocal,
+                    ) { progress ->
+                        _profileInstallState.value =
+                            ProfileInstallState.Installing(progress.currentStage, progress.totalStages)
+                    }
+                    Unit
+                }
+                // Keep device/profile identifiers and exception messages out of logs while retaining the failure type.
+                result.onFailure { error ->
+                    Logger.w { "[installProfile] Failed to install profile; cause=${error.safeLogType()}" }
+                }
+                onResult(result)
+            } finally {
+                _profileInstallState.value = ProfileInstallState.Idle
+            }
+        }
     }
 
     fun clearPacketResponse() {
@@ -1097,29 +1124,8 @@ open class RadioConfigViewModel(
             }
 
             is RadioResponseResult.ModuleConfigResponse -> {
-                val response = result.config
                 _radioConfigState.update { state ->
-                    state.copy(
-                        moduleConfig =
-                        state.moduleConfig.copy(
-                            mqtt = response.mqtt ?: state.moduleConfig.mqtt,
-                            serial = response.serial ?: state.moduleConfig.serial,
-                            external_notification =
-                            response.external_notification ?: state.moduleConfig.external_notification,
-                            store_forward = response.store_forward ?: state.moduleConfig.store_forward,
-                            range_test = response.range_test ?: state.moduleConfig.range_test,
-                            telemetry = response.telemetry ?: state.moduleConfig.telemetry,
-                            canned_message = response.canned_message ?: state.moduleConfig.canned_message,
-                            audio = response.audio ?: state.moduleConfig.audio,
-                            remote_hardware = response.remote_hardware ?: state.moduleConfig.remote_hardware,
-                            neighbor_info = response.neighbor_info ?: state.moduleConfig.neighbor_info,
-                            ambient_lighting = response.ambient_lighting ?: state.moduleConfig.ambient_lighting,
-                            detection_sensor = response.detection_sensor ?: state.moduleConfig.detection_sensor,
-                            paxcounter = response.paxcounter ?: state.moduleConfig.paxcounter,
-                            statusmessage = response.statusmessage ?: state.moduleConfig.statusmessage,
-                            tak = response.tak ?: state.moduleConfig.tak,
-                        ),
-                    )
+                    state.copy(moduleConfig = state.moduleConfig.updatedWith(result.config))
                 }
                 incrementCompleted()
             }
@@ -1250,3 +1256,28 @@ internal fun Config.saveRebootBehavior(): RebootBehavior = when {
 /** Firmware `AdminModule::handleSetModuleConfig` reboots for every module section except status message. */
 internal fun ModuleConfig.saveRebootBehavior(): RebootBehavior =
     if (statusmessage != null) RebootBehavior.NEVER else RebootBehavior.ALWAYS
+
+/** Applies the single populated ModuleConfig one-of arm to the locally cached aggregate. */
+@Suppress("CyclomaticComplexMethod")
+private fun LocalModuleConfig.updatedWith(config: ModuleConfig): LocalModuleConfig = copy(
+    mqtt = config.mqtt ?: mqtt,
+    serial = config.serial ?: serial,
+    external_notification = config.external_notification ?: external_notification,
+    store_forward = config.store_forward ?: store_forward,
+    range_test = config.range_test ?: range_test,
+    telemetry = config.telemetry ?: telemetry,
+    canned_message = config.canned_message ?: canned_message,
+    audio = config.audio ?: audio,
+    remote_hardware = config.remote_hardware ?: remote_hardware,
+    neighbor_info = config.neighbor_info ?: neighbor_info,
+    ambient_lighting = config.ambient_lighting ?: ambient_lighting,
+    detection_sensor = config.detection_sensor ?: detection_sensor,
+    paxcounter = config.paxcounter ?: paxcounter,
+    statusmessage = config.statusmessage ?: statusmessage,
+    traffic_management = config.traffic_management ?: traffic_management,
+    tak = config.tak ?: tak,
+    mesh_beacon = config.mesh_beacon ?: mesh_beacon,
+)
+
+/** Returns diagnostic type information without logging a potentially sensitive exception message. */
+private fun Throwable.safeLogType(): String = this::class.simpleName ?: "Throwable"
