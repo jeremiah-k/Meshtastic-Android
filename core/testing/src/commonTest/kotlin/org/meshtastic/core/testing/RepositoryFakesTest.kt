@@ -197,6 +197,7 @@ class RepositoryFakesTest {
             controller.configWrites,
         )
         assertEquals(listOf(local), controller.localConfigs)
+        assertEquals(listOf(admin), controller.adminConfigs)
         assertEquals(local, controller.lastLocalConfig)
         assertEquals(
             listOf(FakeRadioController.ModuleConfigWrite(destination = 7, config = module)),
@@ -212,6 +213,7 @@ class RepositoryFakesTest {
 
         assertTrue(controller.configWrites.isEmpty())
         assertTrue(controller.localConfigs.isEmpty())
+        assertTrue(controller.adminConfigs.isEmpty())
         assertTrue(controller.moduleConfigWrites.isEmpty())
         assertTrue(controller.moduleConfigs.isEmpty())
         assertTrue(controller.moduleConfigDestinations.isEmpty())
