@@ -451,6 +451,24 @@ class PacketHandlerImplTest {
         }
 
     @Test
+    fun `completed packet id can be reused by a later retry`() = runTest(testDispatcher) {
+        connectionStateFlow.value = ConnectionState.Connected
+        assertTrue(handler.sendToRadio(MeshPacket(id = 810)))
+        testScheduler.runCurrent()
+
+        handler.handleQueueStatus(QueueStatus(mesh_packet_id = 810, res = 0, free = 16))
+        testScheduler.runCurrent()
+
+        assertTrue(handler.sendToRadio(MeshPacket(id = 810)))
+        testScheduler.runCurrent()
+
+        verify(exactly(2)) { radioInterfaceService.trySendToRadio(any()) }
+
+        handler.stopPacketQueue()
+        testScheduler.runCurrent()
+    }
+
+    @Test
     fun `handleQueueStatus property test`() = runTest(testDispatcher) {
         checkAll(Arb.int(0, 10), Arb.int(0, 32), Arb.int(0, 100000)) { res, free, packetId ->
             val status = QueueStatus(res = res, free = free, mesh_packet_id = packetId)

@@ -329,6 +329,25 @@ class CommandSenderImplTest {
         verifySuspend { packetHandler.sendToRadio(any<MeshPacket>()) }
     }
 
+    @Test
+    fun requestNeighborInfo_localNode_doesNotStartTimerWhenQueueRejectsPacket() = runTest {
+        every { neighborInfoHandler.lastNeighborInfo } returns null
+        everySuspend { packetHandler.sendToRadio(any<MeshPacket>()) } returns false
+
+        commandSender.requestNeighborInfo(requestId = 1, destNum = MY_NODE_NUM)
+
+        verify(exactly(0)) { neighborInfoHandler.recordStartTime(any()) }
+    }
+
+    @Test
+    fun requestNeighborInfo_remoteNode_doesNotStartTimerWhenQueueRejectsPacket() = runTest {
+        everySuspend { packetHandler.sendToRadio(any<MeshPacket>()) } returns false
+
+        commandSender.requestNeighborInfo(requestId = 1, destNum = DEST_NODE)
+
+        verify(exactly(0)) { neighborInfoHandler.recordStartTime(any()) }
+    }
+
     // --- sendPosition ---
 
     @Test

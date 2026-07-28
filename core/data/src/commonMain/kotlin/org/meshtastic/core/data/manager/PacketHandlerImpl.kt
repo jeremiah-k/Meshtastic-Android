@@ -152,7 +152,7 @@ class PacketHandlerImpl(
             pending == null && !scope.isActive ->
                 Logger.w { "Rejecting packet id=${packet.id.toUInt()}: service scope is no longer active" }
 
-            pending == null -> Logger.w { "Dropping duplicate queued packet id=${packet.id.toUInt()}" }
+            pending == null -> Logger.w { "Rejecting packet with reserved id=${packet.id.toUInt()}" }
         }
         return pending != null
     }
