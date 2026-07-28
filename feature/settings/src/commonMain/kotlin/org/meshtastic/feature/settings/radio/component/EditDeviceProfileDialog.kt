@@ -31,7 +31,6 @@ import org.meshtastic.core.resources.Res
 import org.meshtastic.core.resources.cancel
 import org.meshtastic.core.resources.channel_url
 import org.meshtastic.core.resources.fixed_position
-import org.meshtastic.core.resources.licensed_amateur_radio
 import org.meshtastic.core.resources.long_name
 import org.meshtastic.core.resources.module_settings
 import org.meshtastic.core.resources.radio_configuration
@@ -50,7 +49,6 @@ private enum class ProfileField(val labelRes: StringResource) {
     MODULE_CONFIG(Res.string.module_settings),
     FIXED_POSITION(Res.string.fixed_position),
     UNMESSAGABLE(Res.string.unmessageable),
-    LICENSED(Res.string.licensed_amateur_radio),
     ;
 
     fun isPresent(profile: DeviceProfile): Boolean = when (this) {
@@ -61,7 +59,6 @@ private enum class ProfileField(val labelRes: StringResource) {
         MODULE_CONFIG -> profile.module_config != null
         FIXED_POSITION -> profile.fixed_position != null
         UNMESSAGABLE -> profile.is_unmessagable != null
-        LICENSED -> profile.is_licensed != null
     }
 }
 
@@ -107,7 +104,8 @@ fun EditDeviceProfileDialog(
                     },
                     is_unmessagable =
                     if (state[ProfileField.UNMESSAGABLE] == true) deviceProfile.is_unmessagable else null,
-                    is_licensed = if (state[ProfileField.LICENSED] == true) deviceProfile.is_licensed else null,
+                    // Licensing is established through onboarding and is intentionally never restored from profiles.
+                    is_licensed = null,
                 )
             onConfirm(result)
         },
