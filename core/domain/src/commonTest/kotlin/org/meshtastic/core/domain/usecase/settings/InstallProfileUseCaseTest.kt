@@ -379,7 +379,7 @@ class InstallProfileUseCaseTest {
 
         assertEquals(
             listOf(DisplayConfig(compass_north_top = true)),
-            radioController.localConfigs.mapNotNull { it.display },
+            radioController.adminConfigs.mapNotNull { it.display },
         )
         assertEquals(
             listOf(MeshBeaconConfig(broadcast_message = "new beacon"), SerialConfig(enabled = true)),
@@ -462,8 +462,8 @@ class InstallProfileUseCaseTest {
         useCase(1234, profile, User(), isLocal = true)
 
         assertEquals(listOf(mqtt, serial), radioController.moduleConfigs.mapNotNull { it.mqtt ?: it.serial })
-        assertEquals(bluetooth, radioController.localConfigs.first().bluetooth)
-        assertEquals(network, radioController.localConfigs.last().network)
+        assertEquals(bluetooth, radioController.adminConfigs.first().bluetooth)
+        assertEquals(network, radioController.adminConfigs.last().network)
         assertEquals(
             listOf("module:update", "module:update", "begin", "config:update", "config:update", "commit"),
             radioController.adminOperations,
@@ -492,8 +492,8 @@ class InstallProfileUseCaseTest {
         useCase(1234, profile, User(), isLocal = true)
 
         assertEquals(listOf(mqtt, serial), radioController.moduleConfigs.mapNotNull { it.mqtt ?: it.serial })
-        assertEquals(listOf(bluetooth, null), radioController.localConfigs.map { it.bluetooth })
-        assertEquals(listOf(null, network), radioController.localConfigs.map { it.network })
+        assertEquals(listOf(bluetooth, null), radioController.adminConfigs.map { it.bluetooth })
+        assertEquals(listOf(null, network), radioController.adminConfigs.map { it.network })
         assertEquals(
             listOf("module:update", "config:update", "config:update", "module:update"),
             radioController.adminOperations,
@@ -515,8 +515,8 @@ class InstallProfileUseCaseTest {
             isLocal = true,
         )
 
-        assertEquals(listOf(bluetooth, null), radioController.localConfigs.map { it.bluetooth })
-        assertEquals(listOf(null, network), radioController.localConfigs.map { it.network })
+        assertEquals(listOf(bluetooth, null), radioController.adminConfigs.map { it.bluetooth })
+        assertEquals(listOf(null, network), radioController.adminConfigs.map { it.network })
         assertEquals(listOf("begin", "config:update", "config:update", "commit"), radioController.adminOperations)
         assertEquals(ConnectionState.Disconnected, radioController.connectionState.value)
         assertFalse(restartTracker.restartExpected.value)
@@ -694,7 +694,7 @@ class InstallProfileUseCaseTest {
             useCase(1234, profile, User(), isLocal = true)
 
             assertEquals(ConnectionState.Disconnected, radioController.connectionState.value)
-            assertEquals(BluetoothConfig(enabled = false), radioController.localConfigs.last().bluetooth)
+            assertEquals(BluetoothConfig(enabled = false), radioController.adminConfigs.last().bluetooth)
             assertFalse(restartTracker.restartExpected.value)
         }
 
@@ -714,7 +714,7 @@ class InstallProfileUseCaseTest {
             isLocal = true,
         )
 
-        assertTrue(radioController.localConfigs.none { it.lora != null })
+        assertTrue(radioController.adminConfigs.none { it.lora != null })
         assertEquals(
             (0 until CHANNEL_REPLACEMENT_SLOT_COUNT).toList(),
             radioController.localChannels.map(Channel::index),
@@ -736,7 +736,7 @@ class InstallProfileUseCaseTest {
 
         useCase(1234, profile, User(), isLocal = true)
 
-        assertEquals(channelLora, radioController.localConfigs.single().lora)
+        assertEquals(channelLora, radioController.adminConfigs.single().lora)
         assertEquals(settings, radioConfigRepository.currentChannelSet.settings)
     }
 
@@ -839,8 +839,8 @@ class InstallProfileUseCaseTest {
                 it.external_notification ?: it.mesh_beacon ?: it.mqtt ?: it.serial
             },
         )
-        assertEquals(BluetoothConfig(enabled = true), radioController.localConfigs.mapNotNull { it.bluetooth }.last())
-        assertEquals(NetworkConfig(), radioController.localConfigs.mapNotNull { it.network }.last())
+        assertEquals(BluetoothConfig(enabled = true), radioController.adminConfigs.mapNotNull { it.bluetooth }.last())
+        assertEquals(NetworkConfig(), radioController.adminConfigs.mapNotNull { it.network }.last())
         assertEquals(1e-7, radioController.fixedPositions.single().latitude, absoluteTolerance = 1e-12)
         assertEquals(2e-7, radioController.fixedPositions.single().longitude, absoluteTolerance = 1e-12)
         assertEquals(

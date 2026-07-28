@@ -339,7 +339,7 @@ class ProtoExtensionsTest {
         )
 
         // LoRa write is the last op in the edit session, with no settle delays around it.
-        assertEquals(listOf(Config(lora = imported)), radioController.localConfigs)
+        assertEquals(listOf(Config(lora = imported)), radioController.adminConfigs)
     }
 
     @Test
@@ -366,8 +366,8 @@ class ProtoExtensionsTest {
             radioConfigRepository = unchangedRepo,
         )
 
-        assertTrue(absent.localConfigs.isEmpty())
-        assertTrue(unchanged.localConfigs.isEmpty())
+        assertTrue(absent.adminConfigs.isEmpty())
+        assertTrue(unchanged.adminConfigs.isEmpty())
     }
 
     // --- getChannelPreviewForAdd tests ---

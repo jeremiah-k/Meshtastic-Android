@@ -66,6 +66,10 @@ class FakeRadioController :
     val localConfigs: List<Config>
         get() = configWrites.filter { it.destination == null }.map(ConfigWrite::config)
 
+    /** Admin configuration payloads in call order, including edit-local-settings transactions. */
+    val adminConfigs: List<Config>
+        get() = configWrites.filter { it.destination != null }.map(ConfigWrite::config)
+
     val lastLocalConfig: Config?
         get() = configWrites.lastOrNull { it.destination == null }?.config
 
