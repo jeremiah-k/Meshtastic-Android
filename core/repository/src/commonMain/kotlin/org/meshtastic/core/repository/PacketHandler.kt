@@ -28,8 +28,11 @@ interface PacketHandler {
     /**
      * Adds a mesh packet to the queue for sending.
      *
-     * @return `true` when the packet's non-zero ID was reserved and queued, or `false` when the packet was invalid or
-     *   its ID was already queued/in flight.
+     * A completed packet ID may be reused by a later retry. A duplicate is rejected only while that ID is still queued
+     * or in flight, preserving single ownership of its response.
+     *
+     * @return `true` when the packet's non-zero ID was reserved and queued, or `false` when the packet was invalid, its
+     *   ID was already reserved, or the owning service scope has shut down.
      */
     suspend fun sendToRadio(packet: MeshPacket): Boolean
 
