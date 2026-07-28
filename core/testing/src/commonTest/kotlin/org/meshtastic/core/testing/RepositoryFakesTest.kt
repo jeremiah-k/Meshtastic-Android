@@ -25,6 +25,7 @@ import org.meshtastic.core.database.entity.FirmwareRelease
 import org.meshtastic.core.database.entity.QuickChatAction
 import org.meshtastic.core.model.ConnectionEpochs
 import org.meshtastic.core.model.ConnectionState
+import org.meshtastic.core.model.DataPacket
 import org.meshtastic.core.model.DeviceHardware
 import org.meshtastic.proto.Channel
 import org.meshtastic.proto.ChannelSettings
@@ -34,6 +35,7 @@ import org.meshtastic.proto.Position
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertSame
@@ -173,6 +175,33 @@ class RepositoryFakesTest {
             ),
             repository.connectionEpochs.value,
         )
+    }
+
+    @Test
+    fun `FakeCommandSender captures shared evidence and resets it`() = runTest {
+        val sender = FakeCommandSender()
+
+        sender.sendData(DataPacket(to = null, channel = 0, text = "test"))
+        sender.sendLockdownPassphrase("secret", boots = 2, hours = 3, maxSessionSeconds = 4, disable = true)
+        sender.sendLockNow()
+
+        assertEquals(1, sender.sentPackets.size)
+        assertEquals("secret", sender.lastPassphrase)
+        assertEquals(2, sender.lastBoots)
+        assertEquals(3, sender.lastHours)
+        assertEquals(4, sender.lastMaxSessionSeconds)
+        assertTrue(sender.lastDisable)
+        assertTrue(sender.lockNowCalled)
+
+        sender.reset()
+
+        assertTrue(sender.sentPackets.isEmpty())
+        assertNull(sender.lastPassphrase)
+        assertEquals(0, sender.lastBoots)
+        assertEquals(0, sender.lastHours)
+        assertEquals(0, sender.lastMaxSessionSeconds)
+        assertFalse(sender.lastDisable)
+        assertFalse(sender.lockNowCalled)
     }
 
     @Test
