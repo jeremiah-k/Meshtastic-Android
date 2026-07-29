@@ -22,7 +22,10 @@ import com.juul.kable.Peripheral
 import com.juul.kable.PeripheralBuilder
 import com.juul.kable.PooledThreadingStrategy
 import com.juul.kable.toIdentifier
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.withTimeoutOrNull
 import org.meshtastic.core.model.util.anonymize
+import kotlin.time.Duration.Companion.seconds
 
 /** Android's scanner filters on address in hardware, so Kable's `Filter.Address` works natively here. */
 internal actual val supportsNativeAddressScanFilter: Boolean = true
@@ -37,6 +40,9 @@ internal actual val supportsNativeAddressScanFilter: Boolean = true
  * A single app-wide instance is used because Kable recommends exactly one pool per application.
  */
 private val sharedThreadingStrategy = PooledThreadingStrategy()
+
+/** Keeps a lost Android MTU callback from blocking the complete GATT connection lifecycle. */
+private val MTU_NEGOTIATION_TIMEOUT = 5.seconds
 
 internal actual fun PeripheralBuilder.platformConfig(device: BleDevice, autoConnect: () -> Boolean) {
     // Bonded devices without a fresh advertisement must use autoConnect = true. Otherwise,
@@ -58,8 +64,17 @@ internal actual fun PeripheralBuilder.platformConfig(device: BleDevice, autoConn
             // Android defaults to 23 bytes MTU. Meshtastic packets can be 512 bytes.
             // Requesting the max MTU is critical for preventing dropped packets and stalls.
             @Suppress("MagicNumber")
-            val negotiatedMtu = requestMtu(512)
-            Logger.i { "[${device.address.anonymize()}] Negotiated MTU: $negotiatedMtu" }
+            val negotiatedMtu = withTimeoutOrNull(MTU_NEGOTIATION_TIMEOUT) { requestMtu(512) }
+            if (negotiatedMtu == null) {
+                Logger.w {
+                    "[${device.address.anonymize()}] MTU callback timed out after $MTU_NEGOTIATION_TIMEOUT; " +
+                        "continuing with the current ATT MTU"
+                }
+            } else {
+                Logger.i { "[${device.address.anonymize()}] Negotiated MTU: $negotiatedMtu" }
+            }
+        } catch (e: CancellationException) {
+            throw e
         } catch (@Suppress("TooGenericExceptionCaught") e: Exception) {
             Logger.w(e) { "[${device.address.anonymize()}] Failed to request MTU" }
         }
