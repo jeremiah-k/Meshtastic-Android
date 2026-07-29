@@ -42,6 +42,7 @@ import org.meshtastic.core.model.ConnectionState
 import org.meshtastic.core.model.MeshLog
 import org.meshtastic.core.model.MessageStatus
 import org.meshtastic.core.model.RadioNotConnectedException
+import org.meshtastic.core.model.util.anonymize
 import org.meshtastic.core.model.util.toOneLineString
 import org.meshtastic.core.model.util.toPIIString
 import org.meshtastic.core.repository.AwaitedSendResult
@@ -458,8 +459,8 @@ class PacketHandlerImpl(
     private fun insertMeshLog(packetToSave: MeshLog) {
         scope.handledLaunch {
             Logger.d {
-                "insert: ${packetToSave.message_type} = " +
-                    "${packetToSave.raw_message.toOneLineString()} from=${packetToSave.fromNum}"
+                "insert: ${packetToSave.message_type} " +
+                    "port=${packetToSave.portNum} from=${packetToSave.fromNum.anonymize()}"
             }
             meshLogRepository.value.insert(packetToSave)
         }
