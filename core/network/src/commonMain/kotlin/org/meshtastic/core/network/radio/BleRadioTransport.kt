@@ -65,6 +65,7 @@ import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 
 private const val SCAN_RETRY_COUNT = 3
+private const val MAX_LOG_CAUSE_DEPTH = 6
 private val SCAN_RETRY_DELAY = 1.seconds
 private val CONNECTION_TIMEOUT = 15.seconds
 
@@ -148,8 +149,11 @@ class BleRadioTransport(
     private val bluetoothRepository: BluetoothRepository,
     private val connectionFactory: BleConnectionFactory,
     private val callback: RadioTransportCallback,
-    internal val address: String,
+    private val address: String,
 ) : RadioTransport {
+
+    private val anonymizedAddress = address.anonymize()
+    private val logAddress = "[$anonymizedAddress]"
 
     // Detached cleanup scope for last-ditch GATT teardown from the exception handler.
     // Must NOT be a child of `scope`: when an uncaught exception fires in connectionScope,
@@ -160,7 +164,7 @@ class BleRadioTransport(
     private val cleanupScope: CoroutineScope = CoroutineScope(SupervisorJob() + scope.coroutineContext.minusKey(Job))
 
     private val exceptionHandler = CoroutineExceptionHandler { _, throwable ->
-        Logger.w(throwable) { "[$address] Uncaught exception in connectionScope" }
+        Logger.w { "$logAddress Uncaught exception in connectionScope cause=${throwable.safeLogType()}" }
         if (throwable !is CancellationException) {
             // Record the cause BEFORE the CAS so there is no window where another coroutine
             // sees sessionFailed == true but sessionFailureCause == null. first-cause is
@@ -177,7 +181,7 @@ class BleRadioTransport(
             try {
                 bleConnection.disconnect()
             } catch (e: Exception) {
-                Logger.w(e) { "[$address] Failed to disconnect in exception handler" }
+                Logger.w { "$logAddress Failed to disconnect in exception handler cause=${e.safeLogType()}" }
             }
         }
     }
@@ -225,7 +229,7 @@ class BleRadioTransport(
                 delay(HEARTBEAT_DRAIN_DELAY)
                 radioService?.requestDrain()
             },
-            logTag = address,
+            logTag = anonymizedAddress,
         )
 
     override fun start() {
@@ -244,9 +248,9 @@ class BleRadioTransport(
             // Use one bounded, address-filtered scan. Splitting this into a short scan plus an escalated scan consumed
             // two Android scanner registrations per reconnect and could hit SCAN_FAILED_SCANNING_TOO_FREQUENTLY when a
             // user switched devices while the reconnect policy and the Connections screen were also scanning.
-            Logger.i { "[${address.anonymize()}] Bonded device found; scanning once for a fresh advertisement" }
+            Logger.i { "$logAddress Bonded device found; scanning once for a fresh advertisement" }
             scanForFreshDevice(SCAN_TIMEOUT)?.let {
-                Logger.i { "[${address.anonymize()}] Fresh advertisement found; using scanned device" }
+                Logger.i { "$logAddress Fresh advertisement found; using scanned device" }
                 return it
             }
 
@@ -255,14 +259,14 @@ class BleRadioTransport(
             // This remains bounded by CONNECTION_TIMEOUT in connectAndAwait(), after which BleReconnectPolicy owns
             // retry/backoff.
             Logger.w {
-                "[${address.anonymize()}] No fresh advertisement within $SCAN_TIMEOUT; " +
+                "$logAddress No fresh advertisement within $SCAN_TIMEOUT; " +
                     "falling back to bonded handle for bounded autoConnect"
             }
             return bondedDevice
         }
 
         // Non-bonded path: preserve existing retry behavior (SCAN_RETRY_COUNT attempts at SCAN_TIMEOUT).
-        Logger.i { "[${address.anonymize()}] Device not found in bonded list, scanning" }
+        Logger.i { "$logAddress Device not found in bonded list, scanning" }
         repeat(SCAN_RETRY_COUNT) { attempt ->
             scanForFreshDevice(SCAN_TIMEOUT)?.let {
                 return it
@@ -271,7 +275,8 @@ class BleRadioTransport(
                 delay(SCAN_RETRY_DELAY)
             }
         }
-        throw RadioNotConnectedException("Device not found at address $address")
+        Logger.w { "$logAddress Selected radio was not found after BLE scan retries" }
+        throw RadioNotConnectedException("Selected radio was not found")
     }
 
     /**
@@ -299,7 +304,7 @@ class BleRadioTransport(
     } catch (e: CancellationException) {
         throw e
     } catch (e: Exception) {
-        Logger.v(e) { "[${address.anonymize()}] Scan failed (timeout=$timeout)" }
+        Logger.v { "$logAddress Scan failed (timeout=$timeout) cause=${e.safeLogType()}" }
         null
     }
 
@@ -314,7 +319,7 @@ class BleRadioTransport(
                             throw e
                         } catch (e: Exception) {
                             val failureTime = (nowMillis - connectionStartTime).milliseconds
-                            Logger.w(e) { "[$address] Failed to connect after $failureTime" }
+                            Logger.w { "$logAddress Failed to connect after $failureTime cause=${e.safeLogType()}" }
                             BleReconnectPolicy.Outcome.Failed(e)
                         }
                     },
@@ -325,8 +330,11 @@ class BleRadioTransport(
                         // a modal dialog would just confuse the user. The warning log is the
                         // observability surface for this transient event.
                         if (!sessionFailed.value) {
-                            error?.let {
-                                Logger.w(it) { "[$address] BLE reconnect attempt failed; continuing automatic retry" }
+                            error?.let { failure ->
+                                Logger.w {
+                                    "$logAddress BLE reconnect attempt failed; continuing automatic retry " +
+                                        "cause=${failure.safeLogType()}"
+                                }
                             }
                             callback.onDisconnect(isPermanent = false)
                         }
@@ -352,7 +360,7 @@ class BleRadioTransport(
         connectionStartTime = nowMillis
         sessionFailed.value = false
         sessionFailureCause = null
-        Logger.i { "[$address] BLE connection attempt started" }
+        Logger.i { "$logAddress BLE connection attempt started" }
 
         val device = findDevice()
 
@@ -361,7 +369,8 @@ class BleRadioTransport(
         val state = bleConnection.connectAndAwait(device, CONNECTION_TIMEOUT)
 
         if (state !is BleConnectionState.Connected) {
-            throw RadioNotConnectedException("Failed to connect to device at address $address")
+            Logger.w { "$logAddress BLE connection completed without a connected state: $state" }
+            throw RadioNotConnectedException("Failed to connect to the selected radio")
         }
 
         // Post-OTA GATT cache invalidation: the device rebooted with potentially different
@@ -370,11 +379,9 @@ class BleRadioTransport(
         val radioServiceForCache = callback as? RadioInterfaceService
         if (radioServiceForCache?.consumeGattCacheInvalidationRequest() == true) {
             val invalidated = bleConnection.invalidateServiceCache()
-            Logger.d { "[${address.anonymize()}] Post-OTA GATT cache invalidation requested: $invalidated" }
+            Logger.d { "$logAddress Post-OTA GATT cache invalidation requested: $invalidated" }
             if (invalidated) {
-                Logger.i {
-                    "[${address.anonymize()}] Reconnecting after GATT cache refresh to force service rediscovery"
-                }
+                Logger.i { "$logAddress Reconnecting after GATT cache refresh to force service rediscovery" }
                 bleConnection.disconnect()
                 delay(POST_INVALIDATION_RECONNECT_DELAY)
                 val reconnectState = bleConnection.connectAndAwait(device, CONNECTION_TIMEOUT)
@@ -383,7 +390,7 @@ class BleRadioTransport(
                         "Failed to reconnect after post-OTA GATT cache refresh (state=$reconnectState)",
                     )
                 }
-                Logger.i { "[${address.anonymize()}] Reconnected after GATT cache refresh" }
+                Logger.i { "$logAddress Reconnected after GATT cache refresh" }
             }
         }
 
@@ -395,11 +402,13 @@ class BleRadioTransport(
 
         // If a fatal session failure (fromRadio/logRadio error) forced disconnect during setup,
         // skip the Connected gate — return a retryable failure so BleReconnectPolicy handles it.
-        if (sessionFailureCause != null) {
-            Logger.w(sessionFailureCause) {
-                "[$address] Session failed during profile setup — returning failed outcome"
+        val setupFailure = sessionFailureCause
+        if (setupFailure != null) {
+            Logger.w {
+                "$logAddress Session failed during profile setup — returning failed outcome " +
+                    "cause=${setupFailure.safeLogType()}"
             }
-            return BleReconnectPolicy.Outcome.Failed(sessionFailureCause ?: RuntimeException("Session setup failed"))
+            return BleReconnectPolicy.Outcome.Failed(setupFailure)
         }
 
         // Wait for the StateFlow to actually reflect Connected before watching for the next
@@ -421,7 +430,10 @@ class BleRadioTransport(
             }
         if (connectedReached == null) {
             val failure = sessionFailureCause ?: RuntimeException("Timed out waiting for Connected state gate")
-            Logger.w(failure) { "[$address] Session failed before Connected gate — returning failed outcome" }
+            Logger.w {
+                "$logAddress Session failed before Connected gate — returning failed outcome " +
+                    "cause=${failure.safeLogType()}"
+            }
             // CRITICAL: force GATT cleanup before returning Failed so we don't start a new
             // attempt over an uncleared session. Without this, a timeout caused by flow lag or
             // a stale-Disconnected state mismatch would leave a live/half-live GATT handle behind.
@@ -431,7 +443,10 @@ class BleRadioTransport(
                 try {
                     bleConnection.disconnect()
                 } catch (ignored: Exception) {
-                    Logger.w(ignored) { "[$address] disconnect() failed during Connected-gate timeout cleanup" }
+                    Logger.w {
+                        "$logAddress disconnect() failed during Connected-gate timeout cleanup " +
+                            "cause=${ignored.safeLogType()}"
+                    }
                 }
             }
             return BleReconnectPolicy.Outcome.Failed(failure)
@@ -449,14 +464,16 @@ class BleRadioTransport(
             onDisconnected()
         }
 
-        Logger.i { "[$address] BLE connection dropped (reason: $disconnectReason), preparing to reconnect" }
+        Logger.i { "$logAddress BLE connection dropped (reason: $disconnectReason), preparing to reconnect" }
 
         // Internal session failures (write/read exceptions that triggered handleFailure →
         // disconnect) must NOT be treated as intentional/user disconnects — the reconnect policy
         // needs to escalate backoff for these.
         val internalFailure = sessionFailureCause
         if (internalFailure != null) {
-            Logger.w(internalFailure) { "[$address] Session forced disconnect due to internal failure" }
+            Logger.w {
+                "$logAddress Session forced disconnect due to internal failure cause=${internalFailure.safeLogType()}"
+            }
         }
         val wasIntentional =
             if (internalFailure != null) {
@@ -469,7 +486,7 @@ class BleRadioTransport(
 
         if (!wasStable && !wasIntentional) {
             Logger.w {
-                "[$address] Connection lasted only $connectionUptime " +
+                "$logAddress Connection lasted only $connectionUptime " +
                     "(< ${reconnectPolicy.minStableConnection}) — treating as unstable"
             }
         }
@@ -482,10 +499,10 @@ class BleRadioTransport(
 
         // Bond before connecting: firmware may require an encrypted link, and without a bond Android fails with
         // status 5 or 133. Non-Android targets use repository-specific no-op behavior.
-        Logger.i { "[$address] Device not bonded, initiating bonding" }
+        Logger.i { "$logAddress Device not bonded, initiating bonding" }
         try {
             bluetoothRepository.bond(device)
-            Logger.i { "[$address] Bonding successful" }
+            Logger.i { "$logAddress Bonding successful" }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -493,9 +510,14 @@ class BleRadioTransport(
             // setup. If the device is still not bonded, continuing would fail later with a cryptic status (5/133), so
             // stop now and let BleReconnectPolicy own the retry/backoff.
             if (bluetoothRepository.isBonded(address)) {
-                Logger.w(e) { "[$address] Bonding reported failure but device is bonded; continuing" }
+                Logger.w {
+                    "$logAddress Bonding reported failure but device is bonded; continuing cause=${e.safeLogType()}"
+                }
             } else {
-                Logger.w(e) { "[$address] Bonding failed and device is still not bonded; stopping connection attempt" }
+                Logger.w {
+                    "$logAddress Bonding failed and device is still not bonded; stopping connection attempt " +
+                        "cause=${e.safeLogType()}"
+                }
                 throw RadioNotConnectedException("Bonding failed and device is still not bonded", e)
             }
         }
@@ -504,16 +526,13 @@ class BleRadioTransport(
     private suspend fun onConnected() {
         try {
             bleConnection.deviceFlow.first()?.let { device ->
-                val rssi = retryBleOperation(tag = address) { device.readRssi() }
-                Logger.d {
-                    "[${address.anonymize()}] Connection confirmed. " +
-                        "Initial RSSI: ${rssi?.let { "$it dBm" } ?: "unknown"}"
-                }
+                val rssi = retryBleOperation(tag = anonymizedAddress) { device.readRssi() }
+                Logger.d { "$logAddress Connection confirmed. Initial RSSI: ${rssi?.let { "$it dBm" } ?: "unknown"}" }
             }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Logger.w(e) { "[$address] Failed to read initial connection RSSI" }
+            Logger.w { "$logAddress Failed to read initial connection RSSI cause=${e.safeLogType()}" }
         }
     }
 
@@ -526,7 +545,7 @@ class BleRadioTransport(
         // onDisconnect calls (one with the real error message from handleFailure, one
         // generic from here).
         val firstWriter = sessionFailed.compareAndSet(expect = false, update = true)
-        Logger.i { "[$address] BLE disconnected - ${formatSessionStats()}" }
+        Logger.i { "$logAddress BLE disconnected - ${formatSessionStats()}" }
         if (firstWriter) {
             // Signal immediately so the UI reflects the disconnect while reconnect continues.
             callback.onDisconnect(isPermanent = false)
@@ -541,29 +560,29 @@ class BleRadioTransport(
 
                 radioService.fromRadio
                     .onEach { packet ->
-                        Logger.v { "[$address] Received packet fromRadio (${packet.size} bytes)" }
+                        Logger.v { "$logAddress Received packet fromRadio (${packet.size} bytes)" }
                         dispatchPacket(packet)
                     }
                     .catch { e ->
-                        Logger.w(e) { "[$address] Error in fromRadio flow" }
+                        Logger.w { "$logAddress Error in fromRadio flow cause=${e.safeLogType()}" }
                         handleFailure(e)
                     }
                     .launchIn(this)
 
                 radioService.logRadio
                     .onEach { packet ->
-                        Logger.v { "[$address] Received packet logRadio (${packet.size} bytes)" }
+                        Logger.v { "$logAddress Received packet logRadio (${packet.size} bytes)" }
                         dispatchPacket(packet)
                     }
                     .catch { e ->
-                        Logger.w(e) { "[$address] Error in logRadio flow" }
+                        Logger.w { "$logAddress Error in logRadio flow cause=${e.safeLogType()}" }
                         handleFailure(e)
                     }
                     .launchIn(this)
 
                 this@BleRadioTransport.radioService = radioService
 
-                Logger.i { "[$address] Profile service active and characteristics subscribed" }
+                Logger.i { "$logAddress Profile service active and characteristics subscribed" }
 
                 // Wait for FROMNUM CCCD write before triggering the Meshtastic handshake.
                 // Bounded: if fromRadio fails before subscriptionReady completes, handleFailure
@@ -579,16 +598,16 @@ class BleRadioTransport(
                 if (!subscriptionReady || sessionFailed.value) {
                     val cause =
                         sessionFailureCause ?: RuntimeException("Timed out waiting for FROMNUM subscription readiness")
-                    Logger.w(cause) {
+                    Logger.w {
                         val reason = if (!subscriptionReady) "timed out" else "failed"
-                        "[$address] Subscription wait $reason — aborting setup"
+                        "$logAddress Subscription wait $reason — aborting setup cause=${cause.safeLogType()}"
                     }
                     throw cause
                 }
 
                 // Log negotiated MTU for diagnostics
                 val maxLen = bleConnection.maximumWriteValueLength(BleWriteType.WITHOUT_RESPONSE)
-                Logger.i { "[$address] BLE Radio Session Ready. Max write length (WITHOUT_RESPONSE): $maxLen bytes" }
+                Logger.i { "$logAddress BLE Radio Session Ready. Max write length (WITHOUT_RESPONSE): $maxLen bytes" }
 
                 requestHighPriorityAndScheduleDowngrade()
 
@@ -616,7 +635,7 @@ class BleRadioTransport(
                 if (!sessionFailed.value) {
                     this@BleRadioTransport.callback.onConnect()
                 } else {
-                    Logger.w { "[$address] Session failed during setup — skipping onConnect" }
+                    Logger.w { "$logAddress Session failed during setup — skipping onConnect" }
                 }
             }
         } catch (e: CancellationException) {
@@ -628,12 +647,14 @@ class BleRadioTransport(
                 try {
                     bleConnection.disconnect()
                 } catch (ignored: Exception) {
-                    Logger.w(ignored) { "[$address] disconnect() failed during cancellation cleanup" }
+                    Logger.w {
+                        "$logAddress disconnect() failed during cancellation cleanup cause=${ignored.safeLogType()}"
+                    }
                 }
             }
             throw e
         } catch (e: Exception) {
-            Logger.w(e) { "[$address] Profile service discovery or operation failed" }
+            Logger.w { "$logAddress Profile service discovery or operation failed cause=${e.safeLogType()}" }
             // Clear stale state so the next attempt starts clean — if failure happened after
             // radioService assignment but before callback.onConnect(), stale state would survive.
             radioService = null
@@ -642,7 +663,7 @@ class BleRadioTransport(
                 try {
                     bleConnection.disconnect()
                 } catch (ignored: Exception) {
-                    Logger.w(ignored) { "[$address] disconnect() failed after profile error" }
+                    Logger.w { "$logAddress disconnect() failed after profile error cause=${ignored.safeLogType()}" }
                 }
             }
             throw e // Re-throw so attemptConnection() returns Outcome.Failed(e) for policy backoff.
@@ -655,14 +676,14 @@ class BleRadioTransport(
      */
     private suspend fun CoroutineScope.requestHighPriorityAndScheduleDowngrade() {
         if (bleConnection.requestHighConnectionPriority()) {
-            Logger.d { "[$address] Requested high BLE connection priority" }
+            Logger.d { "$logAddress Requested high BLE connection priority" }
             // Wait for the connection parameter update before starting heavy traffic.
             delay(1.seconds)
         }
         launch {
             delay(PRIORITY_DOWNGRADE_DELAY)
             if (bleConnection.requestBalancedConnectionPriority()) {
-                Logger.d { "[$address] Downgraded to balanced BLE connection priority" }
+                Logger.d { "$logAddress Downgraded to balanced BLE connection priority" }
             }
         }
     }
@@ -686,7 +707,7 @@ class BleRadioTransport(
     override fun handleSendToRadio(p: ByteArray) {
         // Fast-path check: skip coroutine launch entirely if no transport is active.
         if (radioService == null) {
-            Logger.w { "[$address] toRadio characteristic unavailable, can't send data" }
+            Logger.w { "$logAddress toRadio characteristic unavailable, can't send data" }
             return
         }
         connectionScope.launch {
@@ -697,17 +718,17 @@ class BleRadioTransport(
                 val currentService =
                     radioService
                         ?: run {
-                            Logger.w { "[$address] toRadio characteristic cleared during write queue" }
+                            Logger.w { "$logAddress toRadio characteristic cleared during write queue" }
                             return@withLock
                         }
                 try {
-                    retryBleOperation(tag = address, retryWhile = { currentService === radioService }) {
+                    retryBleOperation(tag = anonymizedAddress, retryWhile = { currentService === radioService }) {
                         currentService.sendToRadio(p)
                     }
                     val sent = packetsSent.incrementAndGet()
                     val txBytes = bytesSent.addAndGet(p.size.toLong())
                     Logger.v {
-                        "[$address] Wrote packet #$sent " + "to toRadio (${p.size} bytes, total TX: $txBytes bytes)"
+                        "$logAddress Wrote packet #$sent " + "to toRadio (${p.size} bytes, total TX: $txBytes bytes)"
                     }
                 } catch (e: CancellationException) {
                     throw e
@@ -716,13 +737,16 @@ class BleRadioTransport(
                     // If radioService was replaced (new reconnect cycle) or cleared (handleFailure
                     // already ran), this is a stale write from the old session — silently discard.
                     if (currentService === radioService) {
-                        Logger.w(e) {
-                            "[$address] Failed to write packet to toRadioCharacteristic after " +
-                                "${packetsSent.value} successful writes"
+                        Logger.w {
+                            "$logAddress Failed to write packet to toRadioCharacteristic after " +
+                                "${packetsSent.value} successful writes cause=${e.safeLogType()}"
                         }
                         handleFailure(e)
                     } else {
-                        Logger.d(e) { "[$address] Stale write failure ignored because the session was replaced" }
+                        Logger.d {
+                            "$logAddress Stale write failure ignored because the session was replaced " +
+                                "cause=${e.safeLogType()}"
+                        }
                     }
                 }
             }
@@ -738,7 +762,7 @@ class BleRadioTransport(
 
     /** Closes the connection to the device. */
     override suspend fun close() {
-        Logger.i { "[$address] Disconnecting. ${formatSessionStats()}" }
+        Logger.i { "$logAddress Disconnecting. ${formatSessionStats()}" }
         connectionScope.cancel()
         // GATT cleanup must run under NonCancellable so a cancelled caller cannot skip it,
         // which would leak BluetoothGatt and trigger status 133 on the next reconnect.
@@ -748,7 +772,7 @@ class BleRadioTransport(
             try {
                 withTimeoutOrNull(GATT_CLEANUP_TIMEOUT) { bleConnection.disconnect() }
             } catch (@Suppress("TooGenericExceptionCaught") e: Exception) {
-                Logger.w(e) { "[$address] Failed to disconnect in close()" }
+                Logger.w { "$logAddress Failed to disconnect in close() cause=${e.safeLogType()}" }
             }
         }
         // Our own disconnect succeeded — the exception-handler safety net is no longer
@@ -760,7 +784,7 @@ class BleRadioTransport(
     private fun dispatchPacket(packet: ByteArray) {
         val received = packetsReceived.incrementAndGet()
         val rxBytes = bytesReceived.addAndGet(packet.size.toLong())
-        Logger.v { "[$address] Dispatching packet #$received " + "(${packet.size} bytes, total RX: $rxBytes bytes)" }
+        Logger.v { "$logAddress Dispatching packet #$received " + "(${packet.size} bytes, total RX: $rxBytes bytes)" }
         callback.handleFromRadio(packet)
     }
 
@@ -800,7 +824,7 @@ class BleRadioTransport(
         // user-facing.
         callback.onDisconnect(isPermanent, errorMessage = if (isPermanent) msg else null)
 
-        Logger.w(throwable) { "[$address] Session failure — forcing cleanup for reconnect" }
+        Logger.w { "$logAddress Session failure — forcing cleanup for reconnect cause=${throwable.safeLogType()}" }
 
         // Force GATT disconnect on the detached cleanupScope (matching the pattern used by
         // the exceptionHandler defined above). This causes Kable's connectionState
@@ -809,7 +833,7 @@ class BleRadioTransport(
             try {
                 bleConnection.disconnect()
             } catch (e: Exception) {
-                Logger.w(e) { "[$address] Failed to disconnect after session failure" }
+                Logger.w { "$logAddress Failed to disconnect after session failure cause=${e.safeLogType()}" }
             }
         }
     }
@@ -838,5 +862,26 @@ class BleRadioTransport(
                 else -> this.message ?: this::class.simpleName ?: "Unknown"
             }
         return false to msg
+    }
+
+    /** Retains actionable BLE status and exception type without forwarding platform text or device identifiers. */
+    private fun Throwable.safeLogType(): String {
+        val outerType = this::class.simpleName ?: "Exception"
+        var current: Throwable? = this
+        var classifiedType: String? = null
+        var remainingDepth = MAX_LOG_CAUSE_DEPTH
+        while (current != null && classifiedType == null && remainingDepth > 0) {
+            val failure = current
+            val info = failure.classifyBleException()
+            if (info != null) {
+                val bleType = failure::class.simpleName ?: "BleException"
+                val classified = info.gattStatus?.let { "$bleType(status=$it)" } ?: bleType
+                classifiedType = if (failure === this) classified else "$outerType(cause=$classified)"
+            } else {
+                current = failure.cause
+            }
+            remainingDepth--
+        }
+        return classifiedType ?: outerType
     }
 }

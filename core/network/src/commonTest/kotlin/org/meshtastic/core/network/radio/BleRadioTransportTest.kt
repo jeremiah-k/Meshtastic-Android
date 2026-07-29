@@ -27,6 +27,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.meshtastic.core.ble.MeshtasticBleConstants.FROMNUM_CHARACTERISTIC
 import org.meshtastic.core.ble.MeshtasticBleConstants.FROMRADIO_CHARACTERISTIC
@@ -72,7 +73,7 @@ class BleRadioTransportTest {
 
         val bleTransport =
             BleRadioTransport(
-                scope = testScope,
+                scope = backgroundScope,
                 scanner = scanner,
                 bluetoothRepository = bluetoothRepository,
                 connectionFactory = connectionFactory,
@@ -81,27 +82,12 @@ class BleRadioTransportTest {
             )
         bleTransport.start()
         try {
-            // start() begins connect() which is async
-            // In a real test we'd verify the connection state,
-            // but for now this confirms it works with the fakes.
-            assertEquals(address, bleTransport.address)
+            advanceTimeBy(BleReconnectPolicy.DEFAULT_SETTLE_DELAY.inWholeMilliseconds)
+            runCurrent()
+            assertEquals(address, scanner.lastScanAddress)
         } finally {
             bleTransport.close()
         }
-    }
-
-    @Test
-    fun `address returns correct value`() {
-        val bleTransport =
-            BleRadioTransport(
-                scope = testScope,
-                scanner = scanner,
-                bluetoothRepository = bluetoothRepository,
-                connectionFactory = connectionFactory,
-                callback = service,
-                address = address,
-            )
-        assertEquals(address, bleTransport.address)
     }
 
     /**
