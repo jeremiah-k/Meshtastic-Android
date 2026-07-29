@@ -33,8 +33,8 @@ import org.meshtastic.core.model.ChannelOption
 import org.meshtastic.core.model.RegionInfo
 import org.meshtastic.core.model.RegionPresetConstraint
 import org.meshtastic.core.model.constraintFor
-import org.meshtastic.core.model.defaultPresetFor
 import org.meshtastic.core.model.numChannels
+import org.meshtastic.core.model.presetForFreshRegion
 import org.meshtastic.core.model.repairPresetFor
 import org.meshtastic.core.resources.Res
 import org.meshtastic.core.resources.advanced
@@ -68,6 +68,7 @@ import org.meshtastic.core.ui.component.SignedIntegerEditTextPreference
 import org.meshtastic.core.ui.component.SwitchPreference
 import org.meshtastic.core.ui.component.TitledCard
 import org.meshtastic.feature.settings.radio.RadioConfigViewModel
+import org.meshtastic.feature.settings.radio.loRaRegionPresetContext
 import org.meshtastic.feature.settings.util.hopLimits
 import org.meshtastic.proto.Config
 import org.meshtastic.proto.Config.LoRaConfig.ModemPreset
@@ -146,9 +147,12 @@ fun LoRaConfigScreen(viewModel: RadioConfigViewModel, onBack: () -> Unit) {
                 // instance, so the locally-cached map (from our own handshake) is reused for remote admin too. Gated
                 // on the *target* node's firmware capability (metadata is per-target): pre-2.8 nodes don't get the
                 // map or the new TINY presets, which also keeps older remotes unconstrained.
-                val capabilities =
-                    remember(state.metadata?.firmware_version) { Capabilities(state.metadata?.firmware_version) }
-                val regionPresetMap = if (capabilities.supportsLoraRegionPresetMap) state.loraRegionPresetMap else null
+                val presetContext =
+                    remember(state.metadata?.firmware_version, state.loraRegionPresetMap) {
+                        state.loRaRegionPresetContext()
+                    }
+                val capabilities = presetContext.capabilities
+                val regionPresetMap = presetContext.regionPresetMap
                 val presetConstraint =
                     remember(regionPresetMap, formState.value.region) {
                         regionPresetMap.constraintFor(formState.value.region)
@@ -165,14 +169,11 @@ fun LoRaConfigScreen(viewModel: RadioConfigViewModel, onBack: () -> Unit) {
                         // When the region changes, snap the preset to the region's default if the current one is
                         // no longer legal there (R7); a no-op when the region is unconstrained.
                         val repaired = regionPresetMap.repairPresetFor(region, formState.value.modem_preset)
-                        // At fresh setup (region was UNSET) adopt the region's advertised default rather than keeping
-                        // a merely-legal preset: the firmware map's default when present, else the app's built-in
-                        // default (e.g. US -> LongTurbo on pre-2.8 firmware that sends no map).
+                        // At fresh setup, use the firmware-advertised default when available. Firmware 2.8 falls back
+                        // to its built-in regional default (US Long Turbo); older firmware retains Long Fast.
                         val preset =
                             if (freshSetup) {
-                                regionPresetMap.constraintFor(region)?.defaultPreset
-                                    ?: defaultPresetFor(region)
-                                    ?: repaired
+                                regionPresetMap.presetForFreshRegion(region, capabilities)
                             } else {
                                 repaired
                             }

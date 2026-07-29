@@ -108,6 +108,14 @@ class CapabilitiesTest {
     }
 
     @Test
+    fun usesV28LoraDefaults_ignores_debug_capability_override() {
+        val capabilities = Capabilities(firmwareVersion = "2.7.21", forceEnableAll = true)
+
+        assertFalse(capabilities.usesV28LoraDefaults)
+        assertTrue(capabilities.supportsLoraRegionPresetMap)
+    }
+
+    @Test
     fun forceEnableAll_returns_true_regardless_of_version() {
         val c = Capabilities(firmwareVersion = null, forceEnableAll = true)
         assertTrue(c.canMuteNode)

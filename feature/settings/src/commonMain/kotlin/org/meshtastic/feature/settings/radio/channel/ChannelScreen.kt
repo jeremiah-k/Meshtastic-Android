@@ -63,7 +63,7 @@ import org.jetbrains.compose.resources.stringResource
 import org.koin.compose.viewmodel.koinViewModel
 import org.meshtastic.core.model.Channel
 import org.meshtastic.core.model.ConnectionState
-import org.meshtastic.core.model.defaultPresetFor
+import org.meshtastic.core.model.presetForFreshRegion
 import org.meshtastic.core.navigation.Route
 import org.meshtastic.core.resources.Res
 import org.meshtastic.core.resources.add
@@ -95,6 +95,7 @@ import org.meshtastic.feature.settings.navigation.ConfigRoute
 import org.meshtastic.feature.settings.navigation.getNavRouteFrom
 import org.meshtastic.feature.settings.radio.RadioConfigViewModel
 import org.meshtastic.feature.settings.radio.RebootBehavior
+import org.meshtastic.feature.settings.radio.loRaRegionPresetContext
 import org.meshtastic.feature.settings.radio.component.PacketResponseStateDialog
 import org.meshtastic.proto.ChannelSet
 import org.meshtastic.proto.ChannelSettings
@@ -200,9 +201,9 @@ fun ChannelScreen(
             messageRes = Res.string.are_you_sure_change_default,
             onConfirm = {
                 Logger.d { "Switching back to default channel" }
-                // The default channel takes the region's preferred preset (e.g. US -> LongTurbo) so its derived name,
-                // hash, and frequency match what a freshly-set-up node in that region would use.
-                val preset = defaultPresetFor(viewModel.region) ?: Channel.default.loraConfig.modem_preset
+                val presetContext = radioConfigState.loRaRegionPresetContext()
+                val preset =
+                    presetContext.regionPresetMap.presetForFreshRegion(viewModel.region, presetContext.capabilities)
                 val lora =
                     Channel.default.loraConfig.copy(
                         region = viewModel.region,
