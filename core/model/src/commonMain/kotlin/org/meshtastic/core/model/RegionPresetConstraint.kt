@@ -76,13 +76,23 @@ fun LoRaRegionPresetMap?.repairPresetFor(region: RegionCode, current: ModemPrese
 
 /**
  * The app's built-in default modem presets for regions whose default differs from the global [ChannelOption.DEFAULT].
- * Mirrors the per-region defaults newer firmware advertises in [LoRaRegionPresetMap], so the default channel and a
- * fresh setup over old firmware (which sends no map) land on the same preset a new node would.
+ * Mirrors the per-region defaults firmware 2.8 and later advertises in [LoRaRegionPresetMap]. Older firmware retains
+ * the global [ChannelOption.DEFAULT] instead.
  */
 private val REGION_DEFAULT_PRESETS = mapOf(RegionCode.US to ModemPreset.LONG_TURBO)
 
 /**
- * The app's preferred default preset for [region], or `null` when it has no region-specific default and the caller
- * should fall back to [ChannelOption.DEFAULT] / the current preset.
+ * The app's preferred 2.8 default preset for [region], or `null` when the target firmware predates 2.8 or there is no
+ * region-specific default.
  */
-fun defaultPresetFor(region: RegionCode): ModemPreset? = REGION_DEFAULT_PRESETS[region]
+fun defaultPresetFor(region: RegionCode, capabilities: Capabilities): ModemPreset? =
+    REGION_DEFAULT_PRESETS[region].takeIf { capabilities.usesV28LoraDefaults }
+
+/** Selects the recommended preset when a previously-unset LoRa region is configured for the first time. */
+fun LoRaRegionPresetMap?.presetForFreshRegion(region: RegionCode, capabilities: Capabilities): ModemPreset {
+    val constraint = constraintFor(region)
+    if (constraint != null) {
+        return constraint.defaultPreset.takeIf { it in constraint.presets } ?: constraint.presets.first()
+    }
+    return defaultPresetFor(region, capabilities) ?: ChannelOption.DEFAULT.modemPreset
+}
