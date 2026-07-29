@@ -18,6 +18,7 @@ package org.meshtastic.app.map
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableDoubleStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -39,6 +40,8 @@ import org.osmdroid.views.MapView
 private const val MIN_ZOOM_LEVEL = 1.5
 private const val MAX_ZOOM_LEVEL = 20.0
 private const val DEFAULT_ZOOM_LEVEL = 15.0
+
+private class MapViewReference(var current: MapView? = null)
 
 @Suppress("MagicNumber")
 @Composable
@@ -76,54 +79,81 @@ internal fun rememberMapViewWithLifecycle(
         }
 
     val context = LocalContext.current
-    val mapView = remember {
-        MapView(context).apply {
-            clipToOutline = true
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val lifecycle = lifecycleOwner.lifecycle
+    val mapViewReference = remember { MapViewReference() }
+    val mapView =
+        remember(context, lifecycle) {
+            // Keyed remember creates the replacement before the old DisposableEffect is disposed. Read the live
+            // viewport directly so an unsaved pan or zoom survives a context or lifecycle-owner replacement.
+            val previousMapView = mapViewReference.current?.takeIf { it.width > 0 && it.height > 0 }
+            val initialCenter = previousMapView?.projection?.currentCenter ?: savedCenter
+            val initialZoom = previousMapView?.zoomLevelDouble ?: savedZoom
+            MapView(context)
+                .apply {
+                    clipToOutline = true
 
-            setTileSource(tileSource)
-            isVerticalMapRepetitionEnabled = false // disables map repetition
-            setMultiTouchControls(true)
-            val bounds = overlayManager.tilesOverlay.bounds // bounds scrollable map
-            setScrollableAreaLimitLatitude(bounds.actualNorth, bounds.actualSouth, 0)
-            // scales the map tiles to the display density of the screen
-            isTilesScaledToDpi = true
-            // sets the minimum zoom level (the furthest out you can zoom)
-            minZoomLevel = MIN_ZOOM_LEVEL
-            maxZoomLevel = MAX_ZOOM_LEVEL
-            // Disables default +/- button for zooming
-            zoomController.setVisibility(CustomZoomButtonsController.Visibility.SHOW_AND_FADEOUT)
+                    setTileSource(tileSource)
+                    isVerticalMapRepetitionEnabled = false // disables map repetition
+                    setMultiTouchControls(true)
+                    val bounds = overlayManager.tilesOverlay.bounds // bounds scrollable map
+                    setScrollableAreaLimitLatitude(bounds.actualNorth, bounds.actualSouth, 0)
+                    // scales the map tiles to the display density of the screen
+                    isTilesScaledToDpi = true
+                    // sets the minimum zoom level (the furthest out you can zoom)
+                    minZoomLevel = MIN_ZOOM_LEVEL
+                    maxZoomLevel = MAX_ZOOM_LEVEL
+                    // Disables default +/- button for zooming
+                    zoomController.setVisibility(CustomZoomButtonsController.Visibility.SHOW_AND_FADEOUT)
 
-            controller.setZoom(savedZoom)
-            controller.setCenter(savedCenter)
+                    controller.setZoom(initialZoom)
+                    controller.setCenter(initialCenter)
+                }
+                .also { mapViewReference.current = it }
         }
-    }
-    val lifecycle = LocalLifecycleOwner.current.lifecycle
-    DisposableEffect(lifecycle) {
+    LaunchedEffect(mapView, tileSource) { mapView.setTileSource(tileSource) }
+    DisposableEffect(mapView, lifecycle) {
+        var isResumed = false
+
+        fun saveViewport() {
+            if (mapView.width > 0 && mapView.height > 0) {
+                savedCenter = mapView.projection.currentCenter
+                savedZoom = mapView.zoomLevelDouble
+            }
+        }
+
+        fun resumeMap() {
+            if (!isResumed) {
+                mapView.onResume()
+                isResumed = true
+            }
+        }
+
+        fun pauseMap() {
+            if (isResumed) {
+                mapView.onPause()
+                isResumed = false
+            }
+        }
+
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
-                Lifecycle.Event.ON_PAUSE -> {
-                    mapView.onPause()
-                }
-
-                Lifecycle.Event.ON_RESUME -> {
-                    mapView.onResume()
-                }
-
-                Lifecycle.Event.ON_STOP -> {
-                    savedCenter = mapView.projection.currentCenter
-                    savedZoom = mapView.zoomLevelDouble
-                }
-
+                Lifecycle.Event.ON_PAUSE -> pauseMap()
+                Lifecycle.Event.ON_RESUME -> resumeMap()
+                Lifecycle.Event.ON_STOP -> saveViewport()
                 else -> {}
             }
         }
 
         lifecycle.addObserver(observer)
+        if (lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) resumeMap()
 
         onDispose {
-            savedCenter = mapView.projection.currentCenter
-            savedZoom = mapView.zoomLevelDouble
+            saveViewport()
             lifecycle.removeObserver(observer)
+            pauseMap()
+            mapView.onDetach()
+            if (mapViewReference.current === mapView) mapViewReference.current = null
         }
     }
     return mapView
