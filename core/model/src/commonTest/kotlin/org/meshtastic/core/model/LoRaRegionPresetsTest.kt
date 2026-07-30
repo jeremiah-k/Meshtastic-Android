@@ -173,8 +173,9 @@ class LoRaRegionPresetsTest {
     fun `fresh US region keeps LongFast on 2_7 and recommends LongTurbo on 2_8`() {
         val firmware27 = Capabilities("2.7.19", forceEnableAll = false)
         val firmware28 = Capabilities("2.8.0", forceEnableAll = false)
+        val unconstrained: LoRaRegionPresetMap? = null
 
-        assertEquals(ModemPreset.LONG_FAST, null.presetForFreshRegion(RegionCode.US, firmware27))
-        assertEquals(ModemPreset.LONG_TURBO, null.presetForFreshRegion(RegionCode.US, firmware28))
+        assertEquals(ModemPreset.LONG_FAST, unconstrained.presetForFreshRegion(RegionCode.US, firmware27))
+        assertEquals(ModemPreset.LONG_TURBO, unconstrained.presetForFreshRegion(RegionCode.US, firmware28))
     }
 }
