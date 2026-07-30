@@ -137,14 +137,7 @@ class InstallProfileUseCaseTest {
             object : RadioConfigRepository by radioConfigRepository {
                 override val localConfigFlow = MutableSharedFlow<LocalConfig>()
             }
-        useCase =
-            InstallProfileUseCase(
-                radioController,
-                radioInterfaceService,
-                stalledRepository,
-                nodeRepository,
-                restartTracker,
-            )
+        useCase = useCaseWith(stalledRepository)
 
         val result = async { runCatching { useCase(1234, DeviceProfile(), User(), isLocal = true) } }
         advanceTimeBy(10_001)
@@ -159,22 +152,7 @@ class InstallProfileUseCaseTest {
     fun `profile snapshot is rejected after connection lifecycle rollover`() = runTest(testDispatcher) {
         val snapshotStarted = CompletableDeferred<Unit>()
         val releaseSnapshot = CompletableDeferred<Unit>()
-        val delayedRepository =
-            object : RadioConfigRepository by radioConfigRepository {
-                override val localConfigFlow = flow {
-                    snapshotStarted.complete(Unit)
-                    releaseSnapshot.await()
-                    emit(LocalConfig())
-                }
-            }
-        useCase =
-            InstallProfileUseCase(
-                radioController,
-                radioInterfaceService,
-                delayedRepository,
-                nodeRepository,
-                restartTracker,
-            )
+        useCase = useCaseWith(gatedConfigRepository(snapshotStarted, releaseSnapshot))
 
         val result = async { runCatching { useCase(1234, DeviceProfile(), User(), isLocal = true) } }
         snapshotStarted.await()
@@ -192,22 +170,7 @@ class InstallProfileUseCaseTest {
     fun `profile snapshot is rejected after transport selection changes`() = runTest(testDispatcher) {
         val snapshotStarted = CompletableDeferred<Unit>()
         val releaseSnapshot = CompletableDeferred<Unit>()
-        val delayedRepository =
-            object : RadioConfigRepository by radioConfigRepository {
-                override val localConfigFlow = flow {
-                    snapshotStarted.complete(Unit)
-                    releaseSnapshot.await()
-                    emit(LocalConfig())
-                }
-            }
-        useCase =
-            InstallProfileUseCase(
-                radioController,
-                radioInterfaceService,
-                delayedRepository,
-                nodeRepository,
-                restartTracker,
-            )
+        useCase = useCaseWith(gatedConfigRepository(snapshotStarted, releaseSnapshot))
 
         val result = async { runCatching { useCase(1234, DeviceProfile(), User(), isLocal = true) } }
         snapshotStarted.await()
@@ -786,6 +749,24 @@ class InstallProfileUseCaseTest {
         assertEquals(true, radioController.lastSetOwnerUser?.is_unmessagable)
         assertEquals(false, radioController.lastSetOwnerUser?.is_licensed)
     }
+
+    private fun useCaseWith(repository: RadioConfigRepository) =
+        InstallProfileUseCase(
+            radioController,
+            radioInterfaceService,
+            repository,
+            nodeRepository,
+            restartTracker,
+        )
+
+    private fun gatedConfigRepository(started: CompletableDeferred<Unit>, release: CompletableDeferred<Unit>) =
+        object : RadioConfigRepository by radioConfigRepository {
+            override val localConfigFlow = flow {
+                started.complete(Unit)
+                release.await()
+                emit(LocalConfig())
+            }
+        }
 
     private fun fullProfile(channelUrl: String) = DeviceProfile(
         long_name = "Full Node",
