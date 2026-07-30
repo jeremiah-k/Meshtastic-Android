@@ -308,6 +308,7 @@ class CommandSenderImplTest {
         commandSender.requestNeighborInfo(requestId = 1, destNum = MY_NODE_NUM)
 
         verifySuspend { packetHandler.sendToRadio(any<MeshPacket>()) }
+        verify { neighborInfoHandler.recordStartTime(1) }
     }
 
     @Test
@@ -318,6 +319,7 @@ class CommandSenderImplTest {
         commandSender.requestNeighborInfo(requestId = 1, destNum = MY_NODE_NUM)
 
         verifySuspend { packetHandler.sendToRadio(any<MeshPacket>()) }
+        verify { neighborInfoHandler.recordStartTime(1) }
     }
 
     @Test
@@ -327,6 +329,7 @@ class CommandSenderImplTest {
         commandSender.requestNeighborInfo(requestId = 1, destNum = DEST_NODE)
 
         verifySuspend { packetHandler.sendToRadio(any<MeshPacket>()) }
+        verify { neighborInfoHandler.recordStartTime(1) }
     }
 
     @Test
