@@ -32,7 +32,9 @@ import dev.mokkery.verify
 import dev.mokkery.verify.VerifyMode.Companion.exactly
 import dev.mokkery.verifySuspend
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.Flow
@@ -152,40 +154,48 @@ class KableBleConnectionTest {
 
     @Test
     fun `disconnect invalidates an attempt before peripheral ownership is installed`() = runTest {
-        val state = MutableStateFlow<State>(State.Disconnected(status = null))
-        val peripheral: Peripheral = mock(MockMode.autofill)
-        val factoryStarted = CompletableDeferred<Unit>()
-        val releaseFactory = CompletableDeferred<Unit>()
-        every { peripheral.state } returns state
-        everySuspend { peripheral.disconnect() } returns Unit
-        every { peripheral.close() } returns Unit
-        val connection =
-            KableBleConnection(
-                scope = backgroundScope,
-                loggingConfig = BleLoggingConfig.Release,
-                peripheralFactory =
-                KablePeripheralFactory { _, _ ->
-                    factoryStarted.complete(Unit)
-                    releaseFactory.await()
-                    peripheral
-                },
-            )
+        val fixture = deferredPeripheralFixture(backgroundScope)
         val device = MeshtasticBleDevice("AA:BB:CC:DD:EE:01")
 
-        val attempt = backgroundScope.launch { connection.connect(device) }
-        factoryStarted.await()
-        connection.disconnect()
-        releaseFactory.complete(Unit)
-        attempt.join()
+        val attempt = backgroundScope.async { runCatching { fixture.connection.connect(device) } }
+        fixture.factoryStarted.await()
+        fixture.connection.disconnect()
+        fixture.releaseFactory.complete(Unit)
+        val failure = attempt.await().exceptionOrNull()
 
+        assertTrue(failure != null && failure !is CancellationException)
         assertEquals(
             BleConnectionState.Disconnected(DisconnectReason.LocalDisconnect),
-            connection.connectionState.value,
+            fixture.connection.connectionState.value,
         )
-        assertNull(connection.device)
+        assertNull(fixture.connection.device)
         assertNull(ActiveBleConnection.active)
-        verifySuspend(exactly(1)) { peripheral.disconnect() }
-        verify(exactly(1)) { peripheral.close() }
+        verifySuspend(exactly(1)) { fixture.peripheral.disconnect() }
+        verify(exactly(1)) { fixture.peripheral.close() }
+    }
+
+    @Test
+    fun `connectAndAwait maps a superseded attempt to a retryable failure`() = runTest {
+        val fixture = deferredPeripheralFixture(backgroundScope)
+        val device = MeshtasticBleDevice("AA:BB:CC:DD:EE:01")
+
+        val attempt = backgroundScope.async { fixture.connection.connectAndAwait(device, 5.seconds) }
+        fixture.factoryStarted.await()
+        fixture.connection.disconnect()
+        fixture.releaseFactory.complete(Unit)
+
+        assertEquals(
+            BleConnectionState.Disconnected(DisconnectReason.ConnectionFailed),
+            attempt.await(),
+        )
+        assertEquals(
+            BleConnectionState.Disconnected(DisconnectReason.LocalDisconnect),
+            fixture.connection.connectionState.value,
+        )
+        assertNull(fixture.connection.device)
+        assertNull(ActiveBleConnection.active)
+        verifySuspend(exactly(1)) { fixture.peripheral.disconnect() }
+        verify(exactly(1)) { fixture.peripheral.close() }
     }
 
     @Test
@@ -511,6 +521,35 @@ class KableBleConnectionTest {
 
         assertEquals("Unexpected scanner state", failure.message)
     }
+
+    private fun deferredPeripheralFixture(scope: CoroutineScope): DeferredPeripheralFixture {
+        val state = MutableStateFlow<State>(State.Disconnected(status = null))
+        val peripheral: Peripheral = mock(MockMode.autofill)
+        val factoryStarted = CompletableDeferred<Unit>()
+        val releaseFactory = CompletableDeferred<Unit>()
+        every { peripheral.state } returns state
+        everySuspend { peripheral.disconnect() } returns Unit
+        every { peripheral.close() } returns Unit
+        val connection =
+            KableBleConnection(
+                scope = scope,
+                loggingConfig = BleLoggingConfig.Release,
+                peripheralFactory =
+                KablePeripheralFactory { _, _ ->
+                    factoryStarted.complete(Unit)
+                    releaseFactory.await()
+                    peripheral
+                },
+            )
+        return DeferredPeripheralFixture(connection, peripheral, factoryStarted, releaseFactory)
+    }
+
+    private data class DeferredPeripheralFixture(
+        val connection: KableBleConnection,
+        val peripheral: Peripheral,
+        val factoryStarted: CompletableDeferred<Unit>,
+        val releaseFactory: CompletableDeferred<Unit>,
+    )
 
     private class TestKableBleScanner(
         private val scanResults: Flow<KableScanResult>,

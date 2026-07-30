@@ -160,6 +160,8 @@ internal constructor(
         var owned: Peripheral? = null
         try {
             connectInternal(device) { owned = it }
+        } catch (e: SupersededConnectionAttemptException) {
+            closeAfterConnectFailure(owned, e)
         } catch (e: CancellationException) {
             closeAfterCancellation(owned, e)
         } catch (@Suppress("TooGenericExceptionCaught") e: Exception) {
@@ -209,11 +211,11 @@ internal constructor(
                     }
                 }
             }
-        if (!ownership.installed) throw CancellationException("BLE connection attempt was superseded")
+        if (!ownership.installed) throw SupersededConnectionAttemptException()
         closePeripheralBounded(ownership.previous, "replace")
 
         if (lifecycleMutex.withLock { peripheral !== p || attemptGeneration != lifecycleGeneration }) {
-            throw CancellationException("BLE connection attempt was superseded")
+            throw SupersededConnectionAttemptException()
         }
 
         var hasStartedConnecting = false
@@ -241,11 +243,11 @@ internal constructor(
         // The outer reconnect loop (BleRadioTransport) owns the macro retry budget — see class kdoc.
         repeat(2) {
             if (!isOwned(p, attemptGeneration)) {
-                throw CancellationException("BLE connection attempt was superseded")
+                throw SupersededConnectionAttemptException()
             }
             if (p.state.value is State.Connected) {
                 if (!publishStateIfOwned(p, attemptGeneration, meshtasticDevice, BleConnectionState.Connected)) {
-                    throw CancellationException("BLE connection attempt was superseded")
+                    throw SupersededConnectionAttemptException()
                 }
                 return
             }
@@ -254,7 +256,7 @@ internal constructor(
                     val oldScope =
                         lifecycleMutex.withLock {
                             if (peripheral !== p || attemptGeneration != lifecycleGeneration) {
-                                throw CancellationException("BLE connection attempt was superseded")
+                                throw SupersededConnectionAttemptException()
                             }
                             connectionScope.also { connectionScope = null }
                         }
@@ -276,14 +278,16 @@ internal constructor(
                         }
                     if (!installed) {
                         connectedScope.coroutineContext.job.cancel()
-                        throw CancellationException("BLE connection attempt was superseded")
+                        throw SupersededConnectionAttemptException()
                     }
                     false
+                } catch (e: SupersededConnectionAttemptException) {
+                    throw e
                 } catch (e: CancellationException) {
                     throw e
                 } catch (@Suppress("TooGenericExceptionCaught", "SwallowedException") e: Exception) {
                     if (!isOwned(p, attemptGeneration)) {
-                        throw CancellationException("BLE connection attempt was superseded")
+                        throw SupersededConnectionAttemptException()
                     }
                     if (autoConnect) {
                         // Already on the autoConnect path and still failing: surface a clear Disconnected
@@ -310,7 +314,7 @@ internal constructor(
         // Guard against false-positive Connected by verifying state here.
         if (p.state.value !is State.Connected) {
             if (!isOwned(p, attemptGeneration)) {
-                throw CancellationException("BLE connection attempt was superseded")
+                throw SupersededConnectionAttemptException()
             }
             publishStateIfOwned(
                 p,
@@ -323,7 +327,7 @@ internal constructor(
             )
         }
         if (!publishStateIfOwned(p, attemptGeneration, meshtasticDevice, BleConnectionState.Connected)) {
-            throw CancellationException("BLE connection attempt was superseded")
+            throw SupersededConnectionAttemptException()
         }
     }
 
@@ -338,6 +342,8 @@ internal constructor(
                 }
             } catch (_: TimeoutCancellationException) {
                 BleConnectionState.Disconnected(DisconnectReason.Timeout)
+            } catch (_: SupersededConnectionAttemptException) {
+                BleConnectionState.Disconnected(DisconnectReason.ConnectionFailed)
             } catch (e: CancellationException) {
                 closeAfterCancellation(owned, e)
             } catch (@Suppress("TooGenericExceptionCaught") e: Exception) {
@@ -421,6 +427,8 @@ internal constructor(
 
             closePeripheralBounded(owned, "disconnect")
         }
+
+    private class SupersededConnectionAttemptException : Exception()
 
     private data class OwnershipInstallResult(val installed: Boolean, val previous: Peripheral?)
 
