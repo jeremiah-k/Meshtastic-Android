@@ -216,6 +216,21 @@ class ChannelReplacementTest {
     }
 
     @Test
+    fun `additions drop matches against existing and duplicates within incoming`() {
+        val existing = ChannelSettings(name = "Primary", psk = byteArrayOf(1).toByteString())
+        val fresh = ChannelSettings(name = "Fresh", psk = byteArrayOf(2).toByteString())
+
+        val additions =
+            getUniqueChannelAdditions(
+                existing = listOf(existing),
+                incoming = listOf(existing, fresh, fresh),
+                loraConfig = ModelChannel.default.loraConfig,
+            )
+
+        assertEquals(listOf(fresh), additions)
+    }
+
+    @Test
     fun `replacement disables stale trailing slots`() {
         val primary = ChannelSettings(name = "Primary")
 

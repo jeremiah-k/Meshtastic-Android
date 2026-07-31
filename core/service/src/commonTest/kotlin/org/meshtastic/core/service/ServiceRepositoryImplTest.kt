@@ -80,6 +80,8 @@ class ServiceRepositoryImplTest {
         assertEquals(ConnectionState.Connected, repository.connectionState.value)
         assertEquals(baseline.departures + 1, repository.connectionEpochs.value.departures)
         assertEquals(baseline.completedHandshakes + 1, repository.connectionEpochs.value.completedHandshakes)
+        assertEquals(baseline.completedHandshakes, repository.connectionEpochs.value.handshakesAtLastDeparture)
+        assertEquals(ConnectionState.Disconnected, repository.connectionEpochs.value.lastDepartureState)
     }
 
     @Test

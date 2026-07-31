@@ -59,6 +59,7 @@ import org.meshtastic.core.resources.app_functions_settings
 import org.meshtastic.core.resources.app_functions_settings_summary
 import org.meshtastic.core.resources.app_settings
 import org.meshtastic.core.resources.bottom_nav_settings
+import org.meshtastic.core.resources.cancel
 import org.meshtastic.core.resources.device_links
 import org.meshtastic.core.resources.export_configuration
 import org.meshtastic.core.resources.filter_settings
@@ -130,6 +131,8 @@ fun SettingsScreen(
     if (profileInstallState !is ProfileInstallState.Idle) {
         MeshtasticDialog(
             titleRes = Res.string.install_configuration_in_progress_title,
+            dismissTextRes = Res.string.cancel,
+            onDismiss = viewModel::cancelProfileInstall,
             dismissable = false,
             text = {
                 Column(
@@ -202,10 +205,11 @@ fun SettingsScreen(
                 showEditDeviceProfileDialog = false
                 if (deviceProfile != null) {
                     val selectedProfile = it
+                    val installIsLocal = state.isLocal
                     viewModel.installProfile(selectedProfile) { result ->
                         result
                             .onSuccess {
-                                if (selectedProfile.shouldSuggestBluetoothRepair(isLocal = state.isLocal)) {
+                                if (selectedProfile.shouldSuggestBluetoothRepair(isLocal = installIsLocal)) {
                                     snackbarManager.showSnackbar(bluetoothRepairHint)
                                 }
                             }

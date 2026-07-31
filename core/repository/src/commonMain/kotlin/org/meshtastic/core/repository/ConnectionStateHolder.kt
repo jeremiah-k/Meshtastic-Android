@@ -47,7 +47,13 @@ class ConnectionStateHolder(
     override val connectionState: StateFlow<ConnectionState> = mutableConnectionState.asStateFlow()
     override val connectionEpochs: StateFlow<ConnectionEpochs> = mutableConnectionEpochs.asStateFlow()
 
-    /** Applies [newState] and advances epochs exactly once when the state changes. */
+    /**
+     * Applies [newState] and advances epochs exactly once when the state changes.
+     *
+     * [connectionLifecycle] is authoritative on return. A concurrent publisher may update the compatibility
+     * [connectionState] and [connectionEpochs] mirrors immediately afterward, so they are not read-after-write
+     * consistent for the caller under contention.
+     */
     fun setConnectionState(newState: ConnectionState) {
         while (true) {
             val current = mutableConnectionLifecycle.value
@@ -66,7 +72,10 @@ class ConnectionStateHolder(
         }
     }
 
-    /** Restores a known baseline, primarily for reusable test fakes. */
+    /**
+     * Restores a known baseline, primarily for reusable test fakes. The version remains monotonic even when state and
+     * epochs return to earlier values, so a reader cannot mistake a reset snapshot for an older publication.
+     */
     fun reset(state: ConnectionState = ConnectionState.Disconnected, epochs: ConnectionEpochs = ConnectionEpochs()) {
         while (true) {
             val current = mutableConnectionLifecycle.value
@@ -92,10 +101,9 @@ class ConnectionStateHolder(
                 publicationInProgress.value = false
             }
 
-            // An updater can publish a new lifecycle after the final loop check but before the publisher flag is
-            // released. AtomicFU's sequentially-consistent lifecycle CAS, failed flag CAS, and flag release order
-            // that update before this post-release comparison. Recheck so its compatibility projection cannot be
-            // stranded; do not weaken the flag or reorder publication without replacing that handoff guarantee.
+            // An updater can commit after the final loop check, lose the publisher race, and return before this owner
+            // releases the flag. Sequentially consistent atomics make that lifecycle write visible here. The
+            // post-release recheck ensures its compatibility projection cannot be stranded.
             if (publishedVersion.value == mutableConnectionLifecycle.value.version) return
         }
     }

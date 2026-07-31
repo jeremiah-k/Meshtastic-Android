@@ -47,6 +47,24 @@ class ChannelCacheReconciliationTest {
     }
 
     @Test
+    fun `normal cleanup reconciles once when only the write was marked`() = runTest {
+        val backing = FakeRadioConfigRepository()
+        var replacementCalls = 0
+        val repository =
+            object : RadioConfigRepository by backing {
+                override suspend fun replaceAllSettings(settingsList: List<ChannelSettings>) {
+                    replacementCalls += 1
+                    backing.replaceAllSettings(settingsList)
+                }
+            }
+
+        repository.withChannelCacheReconciliation(normalizedSettings) { markChannelWriteIssued() }
+
+        assertEquals(1, replacementCalls)
+        assertEquals(normalizedSettings, backing.currentChannelSet.settings)
+    }
+
+    @Test
     fun `successful explicit reconciliation runs exactly once`() = runTest {
         val backing = FakeRadioConfigRepository()
         var replacementCalls = 0

@@ -40,11 +40,16 @@ internal object ProfileInstallPlanner {
     ): ProfileInstallPlan {
         val channelRestore = prepareChannelRestore(profile, currentConfig, currentChannels)
         val pendingProfile = profile.withoutUnchangedFields(currentConfig, currentModuleConfig, currentUser)
+        val pendingConfig = pendingProfile.config
+        val transactionConfig =
+            pendingConfig
+                ?.copy(lora = pendingConfig.lora.takeIf { channelRestore?.loraConfig == null })
+                .withoutTransportSensitiveConfig()
 
         return ProfileInstallPlan(
             profile = pendingProfile,
-            config = pendingProfile.config.withoutTransportSensitiveConfig(),
-            moduleConfig = pendingProfile.module_config.withoutTransportDisruptiveModules(),
+            config = transactionConfig,
+            moduleConfig = pendingProfile.module_config.withoutTransportSensitiveModules(),
             channelRestore = channelRestore,
             transportPlan = pendingProfile.transportSensitivePlan(activeTransport),
         )

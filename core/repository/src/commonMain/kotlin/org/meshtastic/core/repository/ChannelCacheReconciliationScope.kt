@@ -20,7 +20,12 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import org.meshtastic.proto.ChannelSettings
 
-/** Tracks whether an authoritative channel write requires one local-cache reconciliation. */
+/**
+ * Tracks whether an authoritative channel write requires one local-cache reconciliation.
+ *
+ * Not thread-safe. Callers must invoke [markChannelWriteIssued] and [reconcileChannelCache] from one coroutine;
+ * concurrent calls can issue more than one cache replacement.
+ */
 class ChannelCacheReconciliationScope
 internal constructor(
     private val repository: RadioConfigRepository,

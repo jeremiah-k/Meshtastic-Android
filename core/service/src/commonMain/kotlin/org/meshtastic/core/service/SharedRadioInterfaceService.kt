@@ -1031,7 +1031,7 @@ class SharedRadioInterfaceService(
         val admitted =
             admitTransportSend()
                 ?: run {
-                    Logger.w { "sendToRadio: no admitted radio transport, dropping ${bytes.size} bytes" }
+                    Logger.w { "trySendToRadio: no admitted radio transport, dropping ${bytes.size} bytes" }
                     return false
                 }
         return try {
@@ -1039,7 +1039,7 @@ class SharedRadioInterfaceService(
                 admitted.transport.handleSendToRadio(bytes)
                 _meshActivity.tryEmit(MeshActivity.Send)
             }
-                .onFailure { Logger.w(it) { "sendToRadio: active transport rejected ${bytes.size} bytes" } }
+                .onFailure { Logger.w(it) { "trySendToRadio: active transport rejected ${bytes.size} bytes" } }
                 .isSuccess
         } finally {
             releaseSessionOperation(admitted.session)

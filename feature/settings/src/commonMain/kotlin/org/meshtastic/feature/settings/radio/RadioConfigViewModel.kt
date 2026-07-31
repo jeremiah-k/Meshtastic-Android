@@ -20,6 +20,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import co.touchlab.kermit.Logger
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
@@ -52,6 +53,7 @@ import org.meshtastic.core.domain.usecase.settings.InstallProfileUseCase
 import org.meshtastic.core.domain.usecase.settings.ProcessRadioResponseUseCase
 import org.meshtastic.core.domain.usecase.settings.RadioConfigUseCase
 import org.meshtastic.core.domain.usecase.settings.RadioResponseResult
+import org.meshtastic.core.domain.usecase.settings.updatedWithModuleConfig
 import org.meshtastic.core.model.ConnectionState
 import org.meshtastic.core.model.MqttConnectionState
 import org.meshtastic.core.model.MqttProbeStatus
@@ -197,6 +199,7 @@ open class RadioConfigViewModel(
     }
 
     private val _profileInstallState = MutableStateFlow<ProfileInstallState>(ProfileInstallState.Idle)
+    private var profileInstallJob: Job? = null
     val profileInstallState: StateFlow<ProfileInstallState> = _profileInstallState.asStateFlow()
 
     val analyticsAllowedFlow = analyticsPrefs.analyticsAllowed
@@ -559,7 +562,9 @@ open class RadioConfigViewModel(
     fun setModuleConfig(config: ModuleConfig) {
         val destNum = destNum ?: destNode.value?.num ?: return
         safeLaunch(tag = "setModuleConfig") {
-            _radioConfigState.update { state -> state.copy(moduleConfig = state.moduleConfig.updatedWith(config)) }
+            _radioConfigState.update { state ->
+                state.copy(moduleConfig = state.moduleConfig.updatedWithModuleConfig(config))
+            }
             expectRestartIfLocal(config.saveRebootBehavior())
             radioConfigUseCase.setModuleConfig(destNum, config, onRequestId = ::registerRequestId)
         }
@@ -727,29 +732,43 @@ open class RadioConfigViewModel(
             onResult(Result.failure(IllegalStateException("A device profile installation is already in progress")))
             return
         }
-        viewModelScope.launch {
-            try {
-                val result = safeCatching {
-                    installProfileUseCase(
-                        destNum = destNum,
-                        profile = protobuf,
-                        currentUser = currentUser,
-                        isLocal = isLocal,
-                    ) { progress ->
-                        _profileInstallState.value =
-                            ProfileInstallState.Installing(progress.currentStage, progress.totalStages)
+        lateinit var installJob: Job
+        installJob =
+            viewModelScope.launch(start = CoroutineStart.LAZY) {
+                try {
+                    val result = safeCatching {
+                        installProfileUseCase(
+                            destNum = destNum,
+                            profile = protobuf,
+                            currentUser = currentUser,
+                            isLocal = isLocal,
+                        ) { progress ->
+                            _profileInstallState.value =
+                                ProfileInstallState.Installing(progress.currentStage, progress.totalStages)
+                        }
+                        Unit
                     }
-                    Unit
+                    // Keep device/profile identifiers and exception messages out of logs while retaining the
+                    // failure type.
+                    result.onFailure { error ->
+                        Logger.w { "[installProfile] Failed to install profile; cause=${error.safeLogType()}" }
+                    }
+                    onResult(result)
+                } finally {
+                    if (profileInstallJob === installJob) profileInstallJob = null
+                    _profileInstallState.value = ProfileInstallState.Idle
                 }
-                // Keep device/profile identifiers and exception messages out of logs while retaining the failure type.
-                result.onFailure { error ->
-                    Logger.w { "[installProfile] Failed to install profile; cause=${error.safeLogType()}" }
-                }
-                onResult(result)
-            } finally {
-                _profileInstallState.value = ProfileInstallState.Idle
             }
+        profileInstallJob = installJob
+        if (!installJob.start()) {
+            if (profileInstallJob === installJob) profileInstallJob = null
+            _profileInstallState.value = ProfileInstallState.Idle
+            onResult(Result.failure(IllegalStateException("Profile installation could not start")))
         }
+    }
+
+    fun cancelProfileInstall() {
+        profileInstallJob?.cancel()
     }
 
     fun clearPacketResponse() {
@@ -1125,7 +1144,7 @@ open class RadioConfigViewModel(
 
             is RadioResponseResult.ModuleConfigResponse -> {
                 _radioConfigState.update { state ->
-                    state.copy(moduleConfig = state.moduleConfig.updatedWith(result.config))
+                    state.copy(moduleConfig = state.moduleConfig.updatedWithModuleConfig(result.config))
                 }
                 incrementCompleted()
             }
@@ -1256,28 +1275,6 @@ internal fun Config.saveRebootBehavior(): RebootBehavior = when {
 /** Firmware `AdminModule::handleSetModuleConfig` reboots for every module section except status message. */
 internal fun ModuleConfig.saveRebootBehavior(): RebootBehavior =
     if (statusmessage != null) RebootBehavior.NEVER else RebootBehavior.ALWAYS
-
-/** Applies the single populated ModuleConfig one-of arm to the locally cached aggregate. */
-@Suppress("CyclomaticComplexMethod")
-private fun LocalModuleConfig.updatedWith(config: ModuleConfig): LocalModuleConfig = copy(
-    mqtt = config.mqtt ?: mqtt,
-    serial = config.serial ?: serial,
-    external_notification = config.external_notification ?: external_notification,
-    store_forward = config.store_forward ?: store_forward,
-    range_test = config.range_test ?: range_test,
-    telemetry = config.telemetry ?: telemetry,
-    canned_message = config.canned_message ?: canned_message,
-    audio = config.audio ?: audio,
-    remote_hardware = config.remote_hardware ?: remote_hardware,
-    neighbor_info = config.neighbor_info ?: neighbor_info,
-    ambient_lighting = config.ambient_lighting ?: ambient_lighting,
-    detection_sensor = config.detection_sensor ?: detection_sensor,
-    paxcounter = config.paxcounter ?: paxcounter,
-    statusmessage = config.statusmessage ?: statusmessage,
-    traffic_management = config.traffic_management ?: traffic_management,
-    tak = config.tak ?: tak,
-    mesh_beacon = config.mesh_beacon ?: mesh_beacon,
-)
 
 /** Returns diagnostic type information without logging a potentially sensitive exception message. */
 private fun Throwable.safeLogType(): String = this::class.simpleName ?: "Throwable"
