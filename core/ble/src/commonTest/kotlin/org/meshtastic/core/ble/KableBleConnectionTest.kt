@@ -23,6 +23,7 @@ import com.juul.kable.State
 import dev.mokkery.MockMode
 import dev.mokkery.answering.calls
 import dev.mokkery.answering.returns
+import dev.mokkery.answering.sequentiallyReturns
 import dev.mokkery.answering.throws
 import dev.mokkery.every
 import dev.mokkery.everySuspend
@@ -33,6 +34,7 @@ import dev.mokkery.verifySuspend
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancelAndJoin
@@ -44,6 +46,7 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
@@ -152,6 +155,33 @@ class KableBleConnectionTest {
     }
 
     @Test
+    fun `disconnect publishes local terminal state to the connection and tracked device`() = runTest {
+        val state = MutableStateFlow<State>(State.Connected(backgroundScope))
+        val peripheral: Peripheral = mock(MockMode.autofill)
+        every { peripheral.state } returns state
+        everySuspend { peripheral.disconnect() } returns Unit
+        every { peripheral.close() } returns Unit
+        val connection =
+            KableBleConnection(
+                scope = backgroundScope,
+                loggingConfig = BleLoggingConfig.Release,
+                peripheralFactory = KablePeripheralFactory { _, _ -> peripheral },
+            )
+        val device = MeshtasticBleDevice("AA:BB:CC:DD:EE:01")
+        val localDisconnect = BleConnectionState.Disconnected(DisconnectReason.LocalDisconnect)
+        assertEquals(BleConnectionState.Connected, connection.connectAndAwait(device, 1.seconds))
+
+        connection.disconnect()
+
+        assertEquals(localDisconnect, connection.connectionState.value)
+        assertEquals(localDisconnect, device.state.value)
+        assertNull(connection.device)
+        assertNull(ActiveBleConnection.active)
+        verifySuspend(exactly(1)) { peripheral.disconnect() }
+        verify(exactly(1)) { peripheral.close() }
+    }
+
+    @Test
     fun `disconnect invalidates an attempt before peripheral ownership is installed`() = runTest {
         val fixture = deferredPeripheralFixture(backgroundScope)
         val device = MeshtasticBleDevice("AA:BB:CC:DD:EE:01")
@@ -162,7 +192,7 @@ class KableBleConnectionTest {
         fixture.releaseFactory.complete(Unit)
         val failure = attempt.await().exceptionOrNull()
 
-        assertTrue(failure != null && failure !is CancellationException)
+        assertIs<KableBleConnection.SupersededConnectionAttemptException>(failure)
         assertEquals(
             BleConnectionState.Disconnected(DisconnectReason.LocalDisconnect),
             fixture.connection.connectionState.value,
@@ -183,10 +213,7 @@ class KableBleConnectionTest {
         fixture.connection.disconnect()
         fixture.releaseFactory.complete(Unit)
 
-        assertEquals(
-            BleConnectionState.Disconnected(DisconnectReason.ConnectionFailed),
-            attempt.await(),
-        )
+        assertEquals(BleConnectionState.Disconnected(DisconnectReason.ConnectionFailed), attempt.await())
         assertEquals(
             BleConnectionState.Disconnected(DisconnectReason.LocalDisconnect),
             fixture.connection.connectionState.value,
@@ -254,19 +281,24 @@ class KableBleConnectionTest {
             BleConnectionState.Disconnected(DisconnectReason.ConnectionFailed),
             connection.connectionState.value,
         )
+        assertEquals(BleConnectionState.Disconnected(DisconnectReason.ConnectionFailed), device.state.value)
         assertNull(ActiveBleConnection.active)
         verifySuspend(exactly(1)) { peripheral.disconnect() }
         verify(exactly(1)) { peripheral.close() }
     }
 
     @Test
-    fun `factory failure before ownership leaves the active connection intact`() = runTest {
+    fun `factory failure before ownership leaves the active connection intact`() = runTest(UnconfinedTestDispatcher()) {
         val activeState = MutableStateFlow<State>(State.Connected(backgroundScope))
         val activePeripheral: Peripheral = mock(MockMode.autofill)
         every { activePeripheral.state } returns activeState
         everySuspend { activePeripheral.disconnect() } returns Unit
         every { activePeripheral.close() } returns Unit
-        val factoryFailure = IllegalStateException("factory failed")
+        // A non-copyable subtype keeps referential identity stable across coroutine stack-trace recovery.
+        val factoryFailure =
+            object : IllegalStateException("factory failed") {
+                override val cause: Throwable? = null
+            }
         var factoryCalls = 0
         val connection =
             KableBleConnection(
@@ -288,8 +320,44 @@ class KableBleConnectionTest {
         assertSame(activePeripheral, ActiveBleConnection.active?.peripheral)
         assertSame(activeDevice, connection.device)
         assertEquals(BleConnectionState.Connected, connection.connectionState.value)
+
+        activeState.value = State.Disconnected(status = null)
+        runCurrent()
+
+        assertIs<BleConnectionState.Disconnected>(connection.connectionState.value)
         verifySuspend(exactly(0)) { activePeripheral.disconnect() }
         verify(exactly(0)) { activePeripheral.close() }
+    }
+
+    @Test
+    fun `bounded connect publishes failure when Kable returns without connecting`() = runTest {
+        val state = MutableStateFlow<State>(State.Disconnected(status = null))
+        val firstScope = CoroutineScope(backgroundScope.coroutineContext + Job())
+        val secondScope = CoroutineScope(backgroundScope.coroutineContext + Job())
+        val peripheral: Peripheral = mock(MockMode.autofill)
+        every { peripheral.state } returns state
+        everySuspend { peripheral.connect() } sequentiallyReturns listOf(firstScope, secondScope)
+        everySuspend { peripheral.disconnect() } returns Unit
+        every { peripheral.close() } returns Unit
+        val connection =
+            KableBleConnection(
+                scope = backgroundScope,
+                loggingConfig = BleLoggingConfig.Release,
+                peripheralFactory = KablePeripheralFactory { _, _ -> peripheral },
+            )
+        val device = MeshtasticBleDevice("AA:BB:CC:DD:EE:01", advertisement = mock(MockMode.autofill))
+
+        val failure = assertFailsWith<NotConnectedException> { connection.connect(device) }
+
+        assertTrue(failure.message.orEmpty().contains("bounded attempts"))
+        assertEquals(
+            BleConnectionState.Disconnected(DisconnectReason.ConnectionFailed),
+            connection.connectionState.value,
+        )
+        assertNull(connection.device)
+        assertNull(ActiveBleConnection.active)
+        verifySuspend(exactly(1)) { peripheral.disconnect() }
+        verify(exactly(1)) { peripheral.close() }
     }
 
     @Test

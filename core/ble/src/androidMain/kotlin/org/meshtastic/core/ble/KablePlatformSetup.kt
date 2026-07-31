@@ -73,7 +73,7 @@ internal actual fun PeripheralBuilder.platformConfig(device: BleDevice, autoConn
         } catch (e: CancellationException) {
             throw e
         } catch (@Suppress("TooGenericExceptionCaught") e: Exception) {
-            Logger.w(e) { "[${device.address.anonymize()}] Failed to request MTU" }
+            Logger.w { "[${device.address.anonymize()}] Failed to request MTU (${e::class.simpleName ?: "Exception"})" }
         }
     }
 }
@@ -92,13 +92,17 @@ internal actual fun Peripheral.negotiatedMaxWriteLength(): Int? {
 internal actual fun Peripheral.requestHighConnectionPriority(): Boolean {
     val androidPeripheral = this as? AndroidPeripheral ?: return false
     return runCatching { androidPeripheral.requestConnectionPriority(AndroidPeripheral.Priority.High) }
-        .onFailure { Logger.w(it) { "requestConnectionPriority(High) threw" } }
+        .onFailure { failure ->
+            Logger.w { "requestConnectionPriority(High) threw (${failure::class.simpleName ?: "Exception"})" }
+        }
         .getOrDefault(false)
 }
 
 internal actual fun Peripheral.requestBalancedConnectionPriority(): Boolean {
     val androidPeripheral = this as? AndroidPeripheral ?: return false
     return runCatching { androidPeripheral.requestConnectionPriority(AndroidPeripheral.Priority.Balanced) }
-        .onFailure { Logger.w(it) { "requestConnectionPriority(Balanced) threw" } }
+        .onFailure { failure ->
+            Logger.w { "requestConnectionPriority(Balanced) threw (${failure::class.simpleName ?: "Exception"})" }
+        }
         .getOrDefault(false)
 }

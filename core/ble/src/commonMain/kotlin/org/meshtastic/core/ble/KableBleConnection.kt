@@ -24,6 +24,7 @@ import com.juul.kable.State
 import com.juul.kable.WriteType
 import com.juul.kable.characteristicOf
 import com.juul.kable.writeWithoutResponse
+import kotlinx.atomicfu.atomic
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -135,8 +136,11 @@ internal constructor(
 
     private val lifecycleMutex = Mutex()
 
-    /** Invalidates connect attempts that have not installed ownership yet. Guarded by [lifecycleMutex]. */
-    private var lifecycleGeneration = 0L
+    /** Invalidates connect attempts before or after ownership installation. Guarded by [lifecycleMutex]. */
+    private var connectAttemptGeneration = 0L
+
+    /** Identifies the currently installed peripheral without invalidating it for a pending replacement. */
+    private var ownershipGeneration = 0L
 
     companion object {
         /** Settle delay between a direct connect failure and the autoConnect fallback attempt. */
@@ -172,8 +176,8 @@ internal constructor(
     @Suppress("CyclomaticComplexMethod", "LongMethod", "ThrowsCount")
     private suspend fun connectInternal(device: BleDevice, onPeripheralCreated: (Peripheral) -> Unit) {
         val meshtasticDevice = device as? MeshtasticBleDevice ?: error("Unsupported BleDevice type: ${device::class}")
-        val attemptGeneration = lifecycleMutex.withLock { ++lifecycleGeneration }
-        var autoConnect = meshtasticDevice.advertisement == null
+        val attemptGeneration = lifecycleMutex.withLock { ++connectAttemptGeneration }
+        val autoConnect = atomic(meshtasticDevice.advertisement == null)
 
         /** Applies logging, observation exception handling, and platform config shared by both peripheral types. */
         fun PeripheralBuilder.commonConfig() {
@@ -184,7 +188,7 @@ internal constructor(
                         "(${cause::class.simpleName ?: "Exception"})"
                 }
             }
-            platformConfig(device) { autoConnect }
+            platformConfig(device) { autoConnect.value }
         }
 
         val p = peripheralFactory.create(meshtasticDevice) { commonConfig() }
@@ -196,8 +200,8 @@ internal constructor(
         val ownership =
             withContext(NonCancellable) {
                 lifecycleMutex.withLock {
-                    if (attemptGeneration != lifecycleGeneration) {
-                        OwnershipInstallResult(installed = false, previous = null)
+                    if (attemptGeneration != connectAttemptGeneration) {
+                        OwnershipInstallResult(installed = false, previous = null, generation = null)
                     } else {
                         val old = peripheral
                         stateJob?.cancel()
@@ -207,14 +211,20 @@ internal constructor(
                         peripheral = p
                         _deviceFlow.value = device
                         ActiveBleConnection.active = ActiveConnection(p, device.address)
-                        OwnershipInstallResult(installed = true, previous = old.takeUnless { it === p })
+                        ownershipGeneration += 1
+                        OwnershipInstallResult(
+                            installed = true,
+                            previous = old.takeUnless { it === p },
+                            generation = ownershipGeneration,
+                        )
                     }
                 }
             }
         if (!ownership.installed) throw SupersededConnectionAttemptException()
+        val installedGeneration = checkNotNull(ownership.generation)
         closePeripheralBounded(ownership.previous, "replace")
 
-        if (lifecycleMutex.withLock { peripheral !== p || attemptGeneration != lifecycleGeneration }) {
+        if (!isCurrentOwnedAttempt(p, attemptGeneration, installedGeneration)) {
             throw SupersededConnectionAttemptException()
         }
 
@@ -227,11 +237,11 @@ internal constructor(
                         hasStartedConnecting = true
                     }
 
-                    publishStateIfOwned(p, attemptGeneration, meshtasticDevice, mappedState)
+                    publishStateIfOwned(p, installedGeneration, meshtasticDevice, mappedState)
                 }
                 .launchIn(scope)
         lifecycleMutex.withLock {
-            if (peripheral === p && attemptGeneration == lifecycleGeneration) {
+            if (peripheral === p && installedGeneration == ownershipGeneration) {
                 stateJob = newStateJob
             } else {
                 newStateJob.cancel()
@@ -242,20 +252,24 @@ internal constructor(
         // advertisement was available. Advertisement-less devices start on the autoConnect path.
         // The outer reconnect loop (BleRadioTransport) owns the macro retry budget — see class kdoc.
         repeat(2) {
-            if (!isOwned(p, attemptGeneration)) {
+            if (!isCurrentOwnedAttempt(p, attemptGeneration, installedGeneration)) {
                 throw SupersededConnectionAttemptException()
             }
             if (p.state.value is State.Connected) {
-                if (!publishStateIfOwned(p, attemptGeneration, meshtasticDevice, BleConnectionState.Connected)) {
+                if (!publishStateIfOwned(p, installedGeneration, meshtasticDevice, BleConnectionState.Connected)) {
                     throw SupersededConnectionAttemptException()
                 }
                 return
             }
-            autoConnect =
+            autoConnect.value =
                 try {
                     val oldScope =
                         lifecycleMutex.withLock {
-                            if (peripheral !== p || attemptGeneration != lifecycleGeneration) {
+                            if (
+                                peripheral !== p ||
+                                attemptGeneration != connectAttemptGeneration ||
+                                installedGeneration != ownershipGeneration
+                            ) {
                                 throw SupersededConnectionAttemptException()
                             }
                             connectionScope.also { connectionScope = null }
@@ -269,7 +283,11 @@ internal constructor(
                     val connectedScope = p.connect()
                     val installed =
                         lifecycleMutex.withLock {
-                            if (peripheral === p && attemptGeneration == lifecycleGeneration) {
+                            if (
+                                peripheral === p &&
+                                attemptGeneration == connectAttemptGeneration &&
+                                installedGeneration == ownershipGeneration
+                            ) {
                                 connectionScope = connectedScope
                                 true
                             } else {
@@ -286,18 +304,18 @@ internal constructor(
                 } catch (e: CancellationException) {
                     throw e
                 } catch (@Suppress("TooGenericExceptionCaught", "SwallowedException") e: Exception) {
-                    if (!isOwned(p, attemptGeneration)) {
+                    if (!isCurrentOwnedAttempt(p, attemptGeneration, installedGeneration)) {
                         throw SupersededConnectionAttemptException()
                     }
-                    if (autoConnect) {
-                        // Already on the autoConnect path and still failing: surface a clear Disconnected
-                        // and let the outer reconnect loop (BleRadioTransport) own the macro retry budget.
+                    if (autoConnect.value) {
+                        // The autoConnect fallback also failed. Publish Disconnected and let the outer reconnect loop
+                        // own the macro retry budget.
                         Logger.w {
                             "[${device.address.anonymize()}] autoConnect also failed; deferring to outer reconnect loop"
                         }
                         publishStateIfOwned(
                             p,
-                            attemptGeneration,
+                            installedGeneration,
                             meshtasticDevice,
                             BleConnectionState.Disconnected(DisconnectReason.ConnectionFailed),
                         )
@@ -313,12 +331,12 @@ internal constructor(
         // would have kept iterating; the bounded loop defers to the outer reconnect policy.
         // Guard against false-positive Connected by verifying state here.
         if (p.state.value !is State.Connected) {
-            if (!isOwned(p, attemptGeneration)) {
+            if (!isCurrentOwnedAttempt(p, attemptGeneration, installedGeneration)) {
                 throw SupersededConnectionAttemptException()
             }
             publishStateIfOwned(
                 p,
-                attemptGeneration,
+                installedGeneration,
                 meshtasticDevice,
                 BleConnectionState.Disconnected(DisconnectReason.ConnectionFailed),
             )
@@ -326,7 +344,7 @@ internal constructor(
                 "Failed to establish connection after bounded attempts (state=${p.state.value})",
             )
         }
-        if (!publishStateIfOwned(p, attemptGeneration, meshtasticDevice, BleConnectionState.Connected)) {
+        if (!publishStateIfOwned(p, installedGeneration, meshtasticDevice, BleConnectionState.Connected)) {
             throw SupersededConnectionAttemptException()
         }
     }
@@ -362,18 +380,20 @@ internal constructor(
     }
 
     override suspend fun disconnect() {
+        val localDisconnect = BleConnectionState.Disconnected(DisconnectReason.LocalDisconnect)
         val owned =
             lifecycleMutex.withLock {
-                lifecycleGeneration += 1
-                peripheral
+                connectAttemptGeneration += 1
+                val current = peripheral
+                if (current == null) {
+                    (_deviceFlow.value as? MeshtasticBleDevice)?.updateState(localDisconnect)
+                    _connectionState.value = localDisconnect
+                    _deviceFlow.value = null
+                }
+                current
             }
-        if (owned == null) {
-            lifecycleMutex.withLock {
-                _connectionState.value = BleConnectionState.Disconnected(DisconnectReason.LocalDisconnect)
-                _deviceFlow.value = null
-            }
-        } else {
-            closeConnection(owned, BleConnectionState.Disconnected(DisconnectReason.LocalDisconnect))
+        if (owned != null) {
+            closeConnection(owned, localDisconnect)
         }
     }
 
@@ -383,26 +403,37 @@ internal constructor(
         device: MeshtasticBleDevice,
         state: BleConnectionState,
     ): Boolean = lifecycleMutex.withLock {
-        if (peripheral !== owned || generation != lifecycleGeneration) return@withLock false
+        if (peripheral !== owned || generation != ownershipGeneration) return@withLock false
         device.updateState(state)
         _connectionState.value = state
         true
     }
 
-    private suspend fun isOwned(owned: Peripheral, generation: Long): Boolean =
-        lifecycleMutex.withLock { peripheral === owned && generation == lifecycleGeneration }
+    private suspend fun isCurrentOwnedAttempt(
+        owned: Peripheral,
+        attemptGeneration: Long,
+        installedGeneration: Long,
+    ): Boolean = lifecycleMutex.withLock {
+        peripheral === owned &&
+            attemptGeneration == connectAttemptGeneration &&
+            installedGeneration == ownershipGeneration
+    }
 
     private suspend fun closeAfterCancellation(owned: Peripheral?, cancellation: CancellationException): Nothing {
-        runCatching { closeConnection(owned, BleConnectionState.Disconnected(DisconnectReason.Cancelled)) }
-            .exceptionOrNull()
-            ?.let(cancellation::addSuppressed)
+        if (owned != null) {
+            runCatching { closeConnection(owned, BleConnectionState.Disconnected(DisconnectReason.Cancelled)) }
+                .exceptionOrNull()
+                ?.let(cancellation::addSuppressed)
+        }
         throw cancellation
     }
 
     private suspend fun closeAfterConnectFailure(owned: Peripheral?, failure: Exception): Nothing {
-        runCatching { closeConnection(owned, BleConnectionState.Disconnected(DisconnectReason.ConnectionFailed)) }
-            .exceptionOrNull()
-            ?.let(failure::addSuppressed)
+        if (owned != null) {
+            runCatching { closeConnection(owned, BleConnectionState.Disconnected(DisconnectReason.ConnectionFailed)) }
+                .exceptionOrNull()
+                ?.let(failure::addSuppressed)
+        }
         throw failure
     }
 
@@ -410,8 +441,10 @@ internal constructor(
         withContext(NonCancellable) {
             lifecycleMutex.withLock {
                 if (owned != null && peripheral === owned) {
+                    ownershipGeneration += 1
                     // Publish before cancelling the collector so downstream consumers cannot miss the terminal
                     // state when the peripheral's own Disconnected emission races teardown.
+                    (_deviceFlow.value as? MeshtasticBleDevice)?.updateState(disconnectedState)
                     _connectionState.value = disconnectedState
                     stateJob?.cancel()
                     connectionScope?.coroutineContext?.job?.cancel()
@@ -428,9 +461,9 @@ internal constructor(
             closePeripheralBounded(owned, "disconnect")
         }
 
-    private class SupersededConnectionAttemptException : Exception()
+    internal class SupersededConnectionAttemptException : Exception("BLE connection attempt was superseded")
 
-    private data class OwnershipInstallResult(val installed: Boolean, val previous: Peripheral?)
+    private data class OwnershipInstallResult(val installed: Boolean, val previous: Peripheral?, val generation: Long?)
 
     @Suppress("ThrowsCount")
     override suspend fun <T> profile(
