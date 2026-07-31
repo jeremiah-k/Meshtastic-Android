@@ -38,6 +38,7 @@ import org.meshtastic.core.model.DataPacket
 import org.meshtastic.core.model.MessageStatus
 import org.meshtastic.core.model.Node
 import org.meshtastic.core.model.NodeAddress
+import org.meshtastic.core.model.Position
 import org.meshtastic.core.repository.AwaitedSendResult
 import org.meshtastic.core.repository.AwaitedSendStatus
 import org.meshtastic.core.repository.NeighborInfoHandler
@@ -182,6 +183,16 @@ class CommandSenderImplTest {
     }
 
     @Test
+    fun sendData_marksPacketErrorWhenQueueRejectsIt() = runTest {
+        val packet = DataPacket(to = "^all", bytes = "hello".encodeUtf8(), dataType = PortNum.TEXT_MESSAGE_APP.value)
+        everySuspend { packetHandler.sendToRadio(any<MeshPacket>()) } returns false
+
+        commandSender.sendData(packet)
+
+        assertEquals(MessageStatus.ERROR, packet.status)
+    }
+
+    @Test
     fun sendData_rejectsOversizedPayload() = runTest {
         val oversizedBytes = ByteString.of(*ByteArray(300) { 0x42 })
         val packet = DataPacket(to = "^all", bytes = oversizedBytes, dataType = PortNum.TEXT_MESSAGE_APP.value)
@@ -222,6 +233,16 @@ class CommandSenderImplTest {
         }
 
         assertNotEquals(0, packets.single().id)
+    }
+
+    @Test
+    fun sendAdminSurfacesQueueRejection() = runTest {
+        everySuspend { packetHandler.sendToRadio(any<MeshPacket>()) } returns false
+
+        val failure =
+            assertFailsWith<PacketQueueRejectedException> { commandSender.sendAdmin(DEST_NODE) { AdminMessage() } }
+
+        assertEquals("Admin command was rejected by the outbound packet queue", failure.message)
     }
 
     @Test
@@ -280,7 +301,9 @@ class CommandSenderImplTest {
     fun requestTraceroute_doesNotStartTimerWhenQueueRejectsPacket() = runTest {
         everySuspend { packetHandler.sendToRadio(any<MeshPacket>()) } returns false
 
-        commandSender.requestTraceroute(requestId = 42, destNum = DEST_NODE)
+        assertFailsWith<PacketQueueRejectedException> {
+            commandSender.requestTraceroute(requestId = 42, destNum = DEST_NODE)
+        }
 
         verify(exactly(0)) { tracerouteHandler.recordStartTime(any()) }
     }
@@ -329,6 +352,29 @@ class CommandSenderImplTest {
         verifySuspend { packetHandler.sendToRadio(any<MeshPacket>()) }
     }
 
+    @Test
+    fun requestNeighborInfo_localNode_doesNotStartTimerWhenQueueRejectsPacket() = runTest {
+        every { neighborInfoHandler.lastNeighborInfo } returns null
+        everySuspend { packetHandler.sendToRadio(any<MeshPacket>()) } returns false
+
+        assertFailsWith<PacketQueueRejectedException> {
+            commandSender.requestNeighborInfo(requestId = 1, destNum = MY_NODE_NUM)
+        }
+
+        verify(exactly(0)) { neighborInfoHandler.recordStartTime(any()) }
+    }
+
+    @Test
+    fun requestNeighborInfo_remoteNode_doesNotStartTimerWhenQueueRejectsPacket() = runTest {
+        everySuspend { packetHandler.sendToRadio(any<MeshPacket>()) } returns false
+
+        assertFailsWith<PacketQueueRejectedException> {
+            commandSender.requestNeighborInfo(requestId = 1, destNum = DEST_NODE)
+        }
+
+        verify(exactly(0)) { neighborInfoHandler.recordStartTime(any()) }
+    }
+
     // --- sendPosition ---
 
     @Test
@@ -339,6 +385,27 @@ class CommandSenderImplTest {
         commandSender.sendPosition(pos)
 
         verify { nodeManager.handleReceivedPosition(MY_NODE_NUM, MY_NODE_NUM, any(), any()) }
+    }
+
+    @Test
+    fun sendPosition_doesNotUpdateLocalPositionWhenQueueRejectsPacket() = runTest {
+        everySuspend { packetHandler.sendToRadio(any<MeshPacket>()) } returns false
+        val pos = org.meshtastic.proto.Position(latitude_i = 10000000, longitude_i = 20000000)
+
+        assertFailsWith<PacketQueueRejectedException> { commandSender.sendPosition(pos) }
+
+        verify(exactly(0)) { nodeManager.handleReceivedPosition(any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun setFixedPosition_doesNotUpdateLocalPositionWhenQueueRejectsPacket() = runTest {
+        everySuspend { packetHandler.sendToRadio(any<MeshPacket>()) } returns false
+
+        assertFailsWith<PacketQueueRejectedException> {
+            commandSender.setFixedPosition(DEST_NODE, Position(latitude = 1.0, longitude = 2.0, altitude = 3))
+        }
+
+        verify(exactly(0)) { nodeManager.handleReceivedPosition(any(), any(), any(), any()) }
     }
 
     @Test

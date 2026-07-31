@@ -82,6 +82,8 @@ interface RadioTransportWriter {
     /**
      * Attempts to dispatch [bytes] to the active transport.
      *
+     * Implementations must return promptly: enqueue transport work internally instead of blocking for I/O or delivery.
+     *
      * @return `true` when an active transport accepted the bytes for asynchronous delivery, or `false` when no send
      *   could be scheduled or confirmed.
      */

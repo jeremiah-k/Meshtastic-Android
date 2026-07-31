@@ -31,6 +31,7 @@ import dev.mokkery.verifySuspend
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -187,9 +188,6 @@ class RadioControllerImplTest {
             }
         return CommitBoundaryFixture(controller, serviceRepository)
     }
-
-    private fun commitFailureMessage(status: AwaitedSendStatus, dispatched: Boolean): String =
-        "Device rejected or timed out while sending edit-settings commit (status=$status, dispatched=$dispatched)"
 
     @Test
     fun staleAddressIdentityCannotAssociateSelectedTransport() = runTest {
@@ -848,7 +846,7 @@ class RadioControllerImplTest {
         val controller = createController(scope = backgroundScope, myNodeNum = 1234)
         everySuspend { commandSender.sendAdminAwait(any(), any(), any(), any()) } returns true
         everySuspend { commandSender.sendAdminAwaitResult(any(), any(), any(), any()) } returns
-            AwaitedSendResult(AwaitedSendStatus.REJECTED, dispatched = true)
+            AwaitedSendResult(AwaitedSendStatus.RADIO_REJECTED, dispatched = true)
 
         val failure =
             assertFailsWith<IllegalStateException> {
@@ -860,7 +858,7 @@ class RadioControllerImplTest {
             }
 
         assertEquals(
-            "Device rejected or timed out while sending edit-settings commit (status=REJECTED, dispatched=true)",
+            editSettingsCommitFailureMessage(AwaitedSendStatus.RADIO_REJECTED, dispatched = true),
             failure.message,
         )
         verifySuspend(exactly(1)) { commandSender.sendAdminAwait(any(), any(), any(), any()) }
@@ -895,17 +893,14 @@ class RadioControllerImplTest {
         val controller = createController(scope = backgroundScope, myNodeNum = 1234)
         everySuspend { commandSender.sendAdminAwait(any(), any(), any(), any()) } returns true
         everySuspend { commandSender.sendAdminAwaitResult(any(), any(), any(), any()) } returns
-            AwaitedSendResult(AwaitedSendStatus.REJECTED, dispatched = true)
+            AwaitedSendResult(AwaitedSendStatus.RADIO_REJECTED, dispatched = true)
         val blockFailure = IllegalArgumentException("settings write failed")
 
         val failure = assertFailsWith<IllegalArgumentException> { controller.editLocalSettings { throw blockFailure } }
 
         assertSame(blockFailure, failure)
         assertEquals(
-            listOf(
-                "Device rejected or timed out while sending edit-settings commit " +
-                    "(status=REJECTED, dispatched=true)",
-            ),
+            listOf(editSettingsCommitFailureMessage(AwaitedSendStatus.RADIO_REJECTED, dispatched = true)),
             failure.suppressedExceptions.map(Throwable::message),
         )
         verifySuspend(exactly(1)) { commandSender.sendAdminAwait(any(), any(), any(), any()) }
@@ -927,14 +922,17 @@ class RadioControllerImplTest {
 
     @Test
     fun editSettingsWaitsForCanonicalDepartureAfterTransportStops() = runTest {
+        var stateAtCommitReturn: ConnectionState? = null
         val (controller, serviceRepository) =
             createCommitBoundaryFixture(backgroundScope) { serviceRepository ->
                 backgroundScope.launch { serviceRepository.setConnectionState(ConnectionState.Disconnected) }
+                stateAtCommitReturn = serviceRepository.connectionState.value
                 AwaitedSendResult(AwaitedSendStatus.TRANSPORT_STOPPED, dispatched = true)
             }
 
         controller.editLocalSettings {}
 
+        assertEquals(ConnectionState.Connected, stateAtCommitReturn)
         verifySuspend(exactly(1)) { commandSender.sendAdminAwaitResult(any(), any(), any(), any()) }
         assertEquals(ConnectionState.Disconnected, serviceRepository.connectionState.value)
     }
@@ -965,7 +963,10 @@ class RadioControllerImplTest {
 
         val failure = assertFailsWith<IllegalStateException> { controller.editLocalSettings {} }
 
-        assertEquals(commitFailureMessage(AwaitedSendStatus.TRANSPORT_STOPPED, dispatched = false), failure.message)
+        assertEquals(
+            editSettingsCommitFailureMessage(AwaitedSendStatus.TRANSPORT_STOPPED, dispatched = false),
+            failure.message,
+        )
     }
 
     @Test
@@ -977,7 +978,10 @@ class RadioControllerImplTest {
 
         val failure = assertFailsWith<IllegalStateException> { controller.editLocalSettings {} }
 
-        assertEquals(commitFailureMessage(AwaitedSendStatus.TRANSPORT_STOPPED, dispatched = true), failure.message)
+        assertEquals(
+            editSettingsCommitFailureMessage(AwaitedSendStatus.TRANSPORT_STOPPED, dispatched = true),
+            failure.message,
+        )
     }
 
     @Test
@@ -990,20 +994,56 @@ class RadioControllerImplTest {
 
         val failure = assertFailsWith<IllegalStateException> { controller.editLocalSettings {} }
 
-        assertEquals(commitFailureMessage(AwaitedSendStatus.TIMED_OUT, dispatched = true), failure.message)
+        assertEquals(editSettingsCommitFailureMessage(AwaitedSendStatus.TIMED_OUT, dispatched = true), failure.message)
     }
 
     @Test
-    fun editSettingsRejectsDeviceSleepAsCommitAcceptance() = runTest {
+    fun editSettingsAcceptsDeviceSleepAsPostDispatchDeparture() = runTest {
+        var departuresAtCommit = 0L
+        var departuresAfterSleep = 0L
         val (controller, _) =
             createCommitBoundaryFixture(backgroundScope) { serviceRepository ->
+                departuresAtCommit = serviceRepository.connectionLifecycle.value.epochs.departures
                 serviceRepository.setConnectionState(ConnectionState.DeviceSleep)
+                departuresAfterSleep = serviceRepository.connectionLifecycle.value.epochs.departures
                 AwaitedSendResult(AwaitedSendStatus.TRANSPORT_STOPPED, dispatched = true)
             }
 
-        val failure = assertFailsWith<IllegalStateException> { controller.editLocalSettings {} }
+        controller.editLocalSettings {}
 
-        assertEquals(commitFailureMessage(AwaitedSendStatus.TRANSPORT_STOPPED, dispatched = true), failure.message)
+        assertTrue(
+            departuresAfterSleep > departuresAtCommit,
+            "DeviceSleep must publish a departure before the commit result is evaluated",
+        )
+    }
+
+    @Test
+    fun editSettingsAcceptsConnectingAsPostDispatchDeparture() = runTest {
+        val (controller, serviceRepository) =
+            createCommitBoundaryFixture(backgroundScope) { repository ->
+                repository.setConnectionState(ConnectionState.Connecting)
+                AwaitedSendResult(AwaitedSendStatus.TRANSPORT_STOPPED, dispatched = true)
+            }
+
+        controller.editLocalSettings {}
+
+        assertEquals(ConnectionState.Connecting, serviceRepository.connectionState.value)
+    }
+
+    @Test
+    fun editSettingsAcceptsDepartureThatArrivesAfterTwoSeconds() = runTest {
+        val (controller, serviceRepository) =
+            createCommitBoundaryFixture(backgroundScope) { repository ->
+                backgroundScope.launch {
+                    delay(3_000)
+                    repository.setConnectionState(ConnectionState.Disconnected)
+                }
+                AwaitedSendResult(AwaitedSendStatus.TRANSPORT_STOPPED, dispatched = true)
+            }
+
+        controller.editLocalSettings {}
+
+        assertEquals(ConnectionState.Disconnected, serviceRepository.connectionState.value)
     }
 
     @Test
@@ -1016,7 +1056,10 @@ class RadioControllerImplTest {
 
         val failure = assertFailsWith<IllegalStateException> { controller.editSettings(destNum = 5678) {} }
 
-        assertEquals(commitFailureMessage(AwaitedSendStatus.TRANSPORT_STOPPED, dispatched = true), failure.message)
+        assertEquals(
+            editSettingsCommitFailureMessage(AwaitedSendStatus.TRANSPORT_STOPPED, dispatched = true),
+            failure.message,
+        )
     }
 
     @Test
@@ -1029,7 +1072,10 @@ class RadioControllerImplTest {
 
         val failure = assertFailsWith<IllegalStateException> { controller.editSettings(destNum = 0) {} }
 
-        assertEquals(commitFailureMessage(AwaitedSendStatus.TRANSPORT_STOPPED, dispatched = true), failure.message)
+        assertEquals(
+            editSettingsCommitFailureMessage(AwaitedSendStatus.TRANSPORT_STOPPED, dispatched = true),
+            failure.message,
+        )
     }
 
     @Test
