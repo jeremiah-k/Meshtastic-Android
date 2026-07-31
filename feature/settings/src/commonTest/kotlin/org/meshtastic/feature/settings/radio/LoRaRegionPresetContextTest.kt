@@ -55,4 +55,20 @@ class LoRaRegionPresetContextTest {
         assertTrue(context.capabilities.supportsLoraRegionPresetMap)
         assertEquals(regionPresetMap, context.regionPresetMap)
     }
+
+    @Test
+    fun `missing metadata hides an available region preset map`() {
+        val context = RadioConfigState(loraRegionPresetMap = regionPresetMap).loRaRegionPresetContext()
+
+        assertFalse(context.capabilities.supportsLoraRegionPresetMap)
+        assertNull(context.regionPresetMap)
+    }
+
+    @Test
+    fun `2_8 firmware remains supported when the map is absent`() {
+        val context = RadioConfigState(metadata = DeviceMetadata(firmware_version = "2.8.0")).loRaRegionPresetContext()
+
+        assertTrue(context.capabilities.supportsLoraRegionPresetMap)
+        assertNull(context.regionPresetMap)
+    }
 }

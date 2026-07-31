@@ -20,10 +20,7 @@ import org.meshtastic.core.model.Capabilities
 import org.meshtastic.proto.LoRaRegionPresetMap
 
 /** Firmware capabilities and the region-preset map only when that firmware supports the map contract. */
-internal data class LoRaRegionPresetContext(
-    val capabilities: Capabilities,
-    val regionPresetMap: LoRaRegionPresetMap?,
-)
+internal data class LoRaRegionPresetContext(val capabilities: Capabilities, val regionPresetMap: LoRaRegionPresetMap?)
 
 internal fun RadioConfigState.loRaRegionPresetContext(): LoRaRegionPresetContext {
     val capabilities = Capabilities(metadata?.firmware_version)
