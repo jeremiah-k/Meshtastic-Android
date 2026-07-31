@@ -21,6 +21,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.launch
@@ -112,6 +113,55 @@ class InstallProfileUseCaseTest {
         useCase(1234, DeviceProfile(), User(), isLocal = true)
 
         assertNoDeviceWrites()
+        assertFalse(restartTracker.restartExpected.value)
+    }
+
+    @Test
+    fun `concurrent profile installations are serialized without interleaved writes`() = runTest(testDispatcher) {
+        val firstCommitReached = CompletableDeferred<Unit>()
+        val releaseFirstCommit = CompletableDeferred<Unit>()
+        var commitCount = 0
+        radioController.onEditSettingsCommitted = {
+            commitCount += 1
+            if (commitCount == 1) {
+                firstCommitReached.complete(Unit)
+                releaseFirstCommit.await()
+            }
+            emitRestartCycle()
+        }
+
+        val first = async { useCase(1234, DeviceProfile(long_name = "First"), User(), isLocal = true) }
+        firstCommitReached.await()
+        val second = async { useCase(1234, DeviceProfile(short_name = "Second"), User(), isLocal = true) }
+        testScheduler.runCurrent()
+
+        assertEquals(1, radioController.adminOperations.count { it == "begin" })
+        assertEquals(listOf("begin", "owner", "commit"), radioController.adminOperations)
+
+        releaseFirstCommit.complete(Unit)
+        first.await()
+        second.await()
+
+        assertEquals(2, radioController.adminOperations.count { it == "begin" })
+        assertEquals(
+            listOf("begin", "owner", "commit", "begin", "owner", "commit"),
+            radioController.adminOperations,
+        )
+    }
+
+    @Test
+    fun `cancellation while waiting for restart clears the expected-restart state`() = runTest(testDispatcher) {
+        val departureObserved = CompletableDeferred<Unit>()
+        radioController.onEditSettingsCommitted = {
+            emitDeparture()
+            departureObserved.complete(Unit)
+        }
+        val installation = launch { useCase(1234, DeviceProfile(long_name = "Cancelled"), User(), isLocal = true) }
+
+        departureObserved.await()
+        assertTrue(restartTracker.restartExpected.value)
+        installation.cancelAndJoin()
+
         assertFalse(restartTracker.restartExpected.value)
     }
 
@@ -258,7 +308,7 @@ class InstallProfileUseCaseTest {
 
         assertFalse(radioController.editSettingsCalled)
         assertEquals(listOf("module:update", "config:update"), radioController.adminOperations)
-        assertFalse(restartTracker.restartExpected.value)
+        assertTrue(restartTracker.restartExpected.value)
     }
 
     @Test
@@ -432,7 +482,7 @@ class InstallProfileUseCaseTest {
             radioController.adminOperations,
         )
         assertEquals(ConnectionState.Disconnected, radioController.connectionState.value)
-        assertFalse(restartTracker.restartExpected.value)
+        assertTrue(restartTracker.restartExpected.value)
     }
 
     @Test
@@ -462,7 +512,7 @@ class InstallProfileUseCaseTest {
             radioController.adminOperations,
         )
         assertEquals(ConnectionState.Disconnected, radioController.connectionState.value)
-        assertFalse(restartTracker.restartExpected.value)
+        assertTrue(restartTracker.restartExpected.value)
     }
 
     @Test
@@ -482,7 +532,7 @@ class InstallProfileUseCaseTest {
         assertEquals(listOf(null, network), radioController.adminConfigs.map { it.network })
         assertEquals(listOf("begin", "config:update", "config:update", "commit"), radioController.adminOperations)
         assertEquals(ConnectionState.Disconnected, radioController.connectionState.value)
-        assertFalse(restartTracker.restartExpected.value)
+        assertTrue(restartTracker.restartExpected.value)
     }
 
     @Test
@@ -658,7 +708,7 @@ class InstallProfileUseCaseTest {
 
             assertEquals(ConnectionState.Disconnected, radioController.connectionState.value)
             assertEquals(BluetoothConfig(enabled = false), radioController.adminConfigs.last().bluetooth)
-            assertFalse(restartTracker.restartExpected.value)
+            assertTrue(restartTracker.restartExpected.value)
         }
 
     @Test
@@ -685,6 +735,28 @@ class InstallProfileUseCaseTest {
         assertEquals(settings, radioConfigRepository.currentChannelSet.settings)
         assertFalse(restartTracker.restartExpected.value)
     }
+
+    @Test
+    fun `changed explicit profile LoRa is written exactly once when a channel URL is restored`() =
+        runTest(testDispatcher) {
+            val currentLora = LoRaConfig(region = LoRaConfig.RegionCode.EU_868, hop_limit = 3)
+            val profileLora = LoRaConfig(region = LoRaConfig.RegionCode.US, hop_limit = 5)
+            val channelLora = LoRaConfig(region = LoRaConfig.RegionCode.ANZ, hop_limit = 2)
+            val settings = listOf(ChannelSettings(name = "Imported", psk = byteArrayOf(1).toByteString()))
+            val channelUrl = ChannelSet(settings = settings, lora_config = channelLora).getChannelUrl().toString()
+            radioConfigRepository.setLocalConfigDirect(LocalConfig(lora = currentLora))
+            radioController.onEditSettingsCommitted = { emitRestartCycle() }
+
+            useCase(
+                1234,
+                DeviceProfile(config = LocalConfig(lora = profileLora), channel_url = channelUrl),
+                User(),
+                isLocal = true,
+            )
+
+            assertEquals(listOf(profileLora), radioController.adminConfigs.mapNotNull { it.lora })
+            assertEquals(settings, radioConfigRepository.currentChannelSet.settings)
+        }
 
     @Test
     fun `channel URL without profile LoRa restores its channel LoRa config`() = runTest(testDispatcher) {
@@ -751,13 +823,7 @@ class InstallProfileUseCaseTest {
     }
 
     private fun useCaseWith(repository: RadioConfigRepository) =
-        InstallProfileUseCase(
-            radioController,
-            radioInterfaceService,
-            repository,
-            nodeRepository,
-            restartTracker,
-        )
+        InstallProfileUseCase(radioController, radioInterfaceService, repository, nodeRepository, restartTracker)
 
     private fun gatedConfigRepository(started: CompletableDeferred<Unit>, release: CompletableDeferred<Unit>) =
         object : RadioConfigRepository by radioConfigRepository {
@@ -801,6 +867,7 @@ class InstallProfileUseCaseTest {
             radioController.adminOperations.mapIndexedNotNull { index, operation ->
                 index.takeIf { operation.startsWith("module:") }
             }
+        assertEquals(radioController.moduleConfigs.size, moduleOperationIndexes.size)
         val firstTransportSensitiveModuleIndex =
             radioController.moduleConfigs.indexOfFirst { it.mqtt != null || it.serial != null }
         assertTrue(firstTransportSensitiveModuleIndex > 0)

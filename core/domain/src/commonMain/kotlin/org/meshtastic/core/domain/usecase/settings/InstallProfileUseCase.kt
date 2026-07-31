@@ -68,7 +68,8 @@ constructor(
      * before the next write.
      *
      * The profile is applied in this order:
-     * 1. owner, channels, non-terminal config, fixed position, and non-disruptive modules in one edit transaction;
+     * 1. owner, channels, non-terminal config, fixed position, and non-transport-sensitive modules in one edit
+     *    transaction;
      * 2. MQTT as a standalone stage;
      * 3. configuration for transports other than the active one;
      * 4. the active transport's own configuration last, because it may prevent that transport from reconnecting.
@@ -228,7 +229,7 @@ constructor(
         // afterward would miss that real stage departure. The post-departure handshake ordering check below prevents an
         // older reconnect from satisfying this stage even when rapid lifecycle states are conflated.
         val baselineLifecycle = radioController.connectionLifecycle.value
-        nodeRestartTracker.expectRestart()
+        nodeRestartTracker.expectRestart(PROFILE_DEPARTURE_TIMEOUT + PROFILE_RECONNECT_TIMEOUT)
         var completed = false
         try {
             action()
@@ -254,7 +255,7 @@ constructor(
                     "Device did not reconnect after the ${stage.logName} profile stage"
                 }
             }
-            nodeRestartTracker.onConnected()
+            if (expectReconnect) nodeRestartTracker.onConnected()
             completed = true
             Logger.i { "Installed device profile stage=${stage.logName}" }
         } finally {

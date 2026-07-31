@@ -27,6 +27,9 @@ import org.meshtastic.core.model.ConnectionEpochs
 import org.meshtastic.core.model.ConnectionState
 import org.meshtastic.core.model.DataPacket
 import org.meshtastic.core.model.DeviceHardware
+import org.meshtastic.core.repository.AwaitedSendResult
+import org.meshtastic.core.repository.AwaitedSendStatus
+import org.meshtastic.proto.AdminMessage
 import org.meshtastic.proto.Channel
 import org.meshtastic.proto.ChannelSettings
 import org.meshtastic.proto.Config
@@ -202,6 +205,24 @@ class RepositoryFakesTest {
         assertEquals(0, sender.lastMaxSessionSeconds)
         assertFalse(sender.lastDisable)
         assertFalse(sender.lockNowCalled)
+    }
+
+    @Test
+    fun `FakeCommandSender preserves admin metadata and records only dispatched awaited sends`() = runTest {
+        val sender = FakeCommandSender()
+        val message = AdminMessage(commit_edit_settings = true)
+        sender.awaitedSendResult = AwaitedSendResult(AwaitedSendStatus.TRANSPORT_STOPPED, dispatched = false)
+
+        sender.sendAdminAwaitResult(destNum = 7, requestId = 8, wantResponse = true) { message }
+
+        assertEquals(listOf(AdminInvocation(7, 8, true, message)), sender.adminInvocations)
+        assertTrue(sender.sentAdminMessages.isEmpty())
+
+        sender.awaitedSendResult = AwaitedSendResult(AwaitedSendStatus.ACCEPTED, dispatched = true)
+        sender.sendAdminAwaitResult(destNum = 9, requestId = 10, wantResponse = false) { message }
+
+        assertEquals(AdminInvocation(9, 10, false, message), sender.adminInvocations.last())
+        assertEquals(listOf(message), sender.sentAdminMessages)
     }
 
     @Test

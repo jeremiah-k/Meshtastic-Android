@@ -27,7 +27,6 @@ import okio.ByteString
 import okio.ByteString.Companion.toByteString
 import org.meshtastic.core.common.util.handledLaunch
 import org.meshtastic.core.common.util.nowSeconds
-import org.meshtastic.core.model.ConnectionState
 import org.meshtastic.core.model.Position
 import org.meshtastic.core.repository.AdminController
 import org.meshtastic.core.repository.AdminEditScope
@@ -44,6 +43,9 @@ import org.meshtastic.proto.ModuleConfig
 import org.meshtastic.proto.OTAMode
 import org.meshtastic.proto.User
 import kotlin.time.Duration.Companion.seconds
+
+internal fun editSettingsCommitFailureMessage(status: AwaitedSendStatus, dispatched: Boolean): String =
+    "Device rejected or timed out while sending edit-settings commit (status=$status, dispatched=$dispatched)"
 
 /**
  * [AdminController] implementation: local/remote configuration, channels, owner, device lifecycle, and the
@@ -288,12 +290,13 @@ internal class AdminControllerImpl(
             } else {
                 null
             }
+        // A dispatched local commit is durable once any post-baseline departure is observed. Firmware may move the
+        // connection through Disconnected, Connecting, or DeviceSleep while rebooting.
         val committedBeforeLocalDeparture =
-            stoppedAfterDispatch && departedLifecycle?.epochs?.lastDepartureState is ConnectionState.Disconnected
+            stoppedAfterDispatch && departedLifecycle?.epochs?.lastDepartureState != null
 
         check(result.accepted || committedBeforeLocalDeparture) {
-            "Device rejected or timed out while sending edit-settings commit " +
-                "(status=${result.status}, dispatched=${result.dispatched})"
+            editSettingsCommitFailureMessage(result.status, result.dispatched)
         }
         if (committedBeforeLocalDeparture) {
             Logger.i { "Edit-settings commit dispatched before expected local transport departure" }
@@ -302,6 +305,6 @@ internal class AdminControllerImpl(
 
     private companion object {
         private const val DEFAULT_DELAY_SECONDS = 5
-        private val COMMIT_DEPARTURE_TIMEOUT = 2.seconds
+        private val COMMIT_DEPARTURE_TIMEOUT = 5.seconds
     }
 }

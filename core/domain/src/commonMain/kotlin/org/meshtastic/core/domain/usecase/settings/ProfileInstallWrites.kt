@@ -23,7 +23,6 @@ import org.meshtastic.proto.Config
 import org.meshtastic.proto.DeviceProfile
 import org.meshtastic.proto.LocalConfig
 import org.meshtastic.proto.LocalModuleConfig
-import org.meshtastic.proto.ModuleConfig
 import org.meshtastic.proto.User
 
 // is_licensed is deliberately excluded: enabling ham mode is a dedicated onboarding flow with additional side effects.
@@ -44,6 +43,7 @@ internal suspend fun AdminEditScope.installConfig(config: LocalConfig?) {
     config?.installableConfigs()?.forEach { setConfig(it) }
 }
 
+// Network and Bluetooth are emitted as restart-aware TransportSensitiveStage.ConfigWrite stages.
 internal fun LocalConfig.installableConfigs(): List<Config> = listOfNotNull(
     device?.let { Config(device = it) },
     position?.let { Config(position = it) },
@@ -66,26 +66,7 @@ internal suspend fun AdminEditScope.installFixedPosition(fixedPosition: org.mesh
     fixedPosition?.let { setFixedPosition(Position(it)) }
 }
 
-/** Writes module configurations safe for the ordinary transaction; MQTT and Serial are staged separately. */
+/** Writes ordinary module configuration; MQTT and Serial are restart-aware transport-sensitive stages. */
 internal suspend fun AdminEditScope.installModuleConfig(moduleConfig: LocalModuleConfig?) {
-    moduleConfig?.installableModuleConfigs()?.forEach { setModuleConfig(it) }
+    moduleConfig?.moduleConfigs()?.forEach { setModuleConfig(it) }
 }
-
-@Suppress("CyclomaticComplexMethod")
-internal fun LocalModuleConfig.installableModuleConfigs(): List<ModuleConfig> = listOfNotNull(
-    external_notification?.let { ModuleConfig(external_notification = it) },
-    store_forward?.let { ModuleConfig(store_forward = it) },
-    range_test?.let { ModuleConfig(range_test = it) },
-    telemetry?.let { ModuleConfig(telemetry = it) },
-    canned_message?.let { ModuleConfig(canned_message = it) },
-    audio?.let { ModuleConfig(audio = it) },
-    remote_hardware?.let { ModuleConfig(remote_hardware = it) },
-    neighbor_info?.let { ModuleConfig(neighbor_info = it) },
-    ambient_lighting?.let { ModuleConfig(ambient_lighting = it) },
-    detection_sensor?.let { ModuleConfig(detection_sensor = it) },
-    paxcounter?.let { ModuleConfig(paxcounter = it) },
-    statusmessage?.let { ModuleConfig(statusmessage = it) },
-    traffic_management?.let { ModuleConfig(traffic_management = it) },
-    tak?.let { ModuleConfig(tak = it) },
-    mesh_beacon?.let { ModuleConfig(mesh_beacon = it) },
-)

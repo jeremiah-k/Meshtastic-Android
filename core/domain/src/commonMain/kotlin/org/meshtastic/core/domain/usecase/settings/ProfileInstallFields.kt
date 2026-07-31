@@ -58,39 +58,16 @@ private fun LocalConfig?.withoutUnchangedFields(current: LocalConfig): LocalConf
         .takeIf { it.installableConfigs().isNotEmpty() || it.network != null || it.bluetooth != null }
 }
 
-/** Removes module sections already reported by the current handshake, including transport-disruptive modules. */
+/** Removes module sections already reported by the current handshake, including transport-sensitive modules. */
 private fun LocalModuleConfig?.withoutUnchangedFields(current: LocalModuleConfig): LocalModuleConfig? =
-    this?.let { incoming ->
-        incoming
-            .copy(
-                mqtt = incoming.mqtt?.takeUnless { it == current.mqtt },
-                serial = incoming.serial?.takeUnless { it == current.serial },
-                external_notification =
-                incoming.external_notification?.takeUnless { it == current.external_notification },
-                store_forward = incoming.store_forward?.takeUnless { it == current.store_forward },
-                range_test = incoming.range_test?.takeUnless { it == current.range_test },
-                telemetry = incoming.telemetry?.takeUnless { it == current.telemetry },
-                canned_message = incoming.canned_message?.takeUnless { it == current.canned_message },
-                audio = incoming.audio?.takeUnless { it == current.audio },
-                remote_hardware = incoming.remote_hardware?.takeUnless { it == current.remote_hardware },
-                neighbor_info = incoming.neighbor_info?.takeUnless { it == current.neighbor_info },
-                ambient_lighting = incoming.ambient_lighting?.takeUnless { it == current.ambient_lighting },
-                detection_sensor = incoming.detection_sensor?.takeUnless { it == current.detection_sensor },
-                paxcounter = incoming.paxcounter?.takeUnless { it == current.paxcounter },
-                statusmessage = incoming.statusmessage?.takeUnless { it == current.statusmessage },
-                traffic_management = incoming.traffic_management?.takeUnless { it == current.traffic_management },
-                tak = incoming.tak?.takeUnless { it == current.tak },
-                mesh_beacon = incoming.mesh_beacon?.takeUnless { it == current.mesh_beacon },
-            )
-            .takeIf { it.installableModuleConfigs().isNotEmpty() || it.mqtt != null || it.serial != null }
-    }
+    this?.withoutUnchangedModuleFields(current)
 
 internal fun LocalConfig?.withoutTransportSensitiveConfig(): LocalConfig? =
     this?.copy(bluetooth = null, network = null)?.takeIf { it.hasInstallableWrites() }
 
 internal fun LocalConfig.hasInstallableWrites(): Boolean = installableConfigs().isNotEmpty()
 
-internal fun LocalModuleConfig?.withoutTransportDisruptiveModules(): LocalModuleConfig? =
+internal fun LocalModuleConfig?.withoutTransportSensitiveModules(): LocalModuleConfig? =
     this?.copy(mqtt = null, serial = null)?.takeIf { it.hasInstallableWrites() }
 
-internal fun LocalModuleConfig.hasInstallableWrites(): Boolean = installableModuleConfigs().isNotEmpty()
+internal fun LocalModuleConfig.hasInstallableWrites(): Boolean = moduleConfigs().isNotEmpty()

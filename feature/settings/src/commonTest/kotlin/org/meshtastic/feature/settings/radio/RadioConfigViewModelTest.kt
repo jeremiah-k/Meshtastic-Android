@@ -33,6 +33,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -1115,6 +1116,29 @@ class RadioConfigViewModelTest {
         releaseInstall.complete(Unit)
         advanceUntilIdle()
         assertEquals(ProfileInstallState.Idle, viewModel.profileInstallState.value)
+    }
+
+    @Test
+    fun `cancelProfileInstall cancels the active restore and returns to idle`() = runTest {
+        val node = Node(num = 123, user = User(id = "!123"))
+        nodeRepository.setNodes(listOf(node))
+        viewModel = createViewModel()
+        val installStarted = CompletableDeferred<Unit>()
+        var resultCallbackInvoked = false
+        everySuspend { installProfileUseCase(any(), any(), any(), any(), any()) } calls
+            {
+                installStarted.complete(Unit)
+                awaitCancellation()
+            }
+
+        viewModel.installProfile(DeviceProfile()) { resultCallbackInvoked = true }
+        installStarted.await()
+        viewModel.cancelProfileInstall()
+        advanceUntilIdle()
+
+        assertEquals(ProfileInstallState.Idle, viewModel.profileInstallState.value)
+        assertFalse(resultCallbackInvoked, "cancellation is not an installation result")
+        verifySuspend(exactly(1)) { installProfileUseCase(any(), any(), any(), any(), any()) }
     }
 
     @Test

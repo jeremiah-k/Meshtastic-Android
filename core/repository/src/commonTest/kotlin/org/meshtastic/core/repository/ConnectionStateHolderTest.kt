@@ -39,6 +39,7 @@ class ConnectionStateHolderTest {
         holder.setConnectionState(ConnectionState.Connected)
 
         assertEquals(ConnectionState.Connected, holder.connectionState.value)
+        assertEquals(4L, holder.connectionLifecycle.value.version)
         assertEquals(
             ConnectionEpochs(
                 departures = 1,
@@ -95,6 +96,31 @@ class ConnectionStateHolderTest {
             ),
             holder.connectionEpochs.value,
         )
+    }
+
+    @Test
+    fun `concurrent mixed transitions leave compatibility views on one committed lifecycle`() = runTest {
+        repeat(25) {
+            val holder = ConnectionStateHolder()
+            val states =
+                List(25) {
+                    listOf(
+                        ConnectionState.Connected,
+                        ConnectionState.Connecting,
+                        ConnectionState.DeviceSleep,
+                        ConnectionState.Disconnected,
+                    )
+                }
+                    .flatten()
+
+            coroutineScope {
+                states.map { state -> async(Dispatchers.Default) { holder.setConnectionState(state) } }.awaitAll()
+            }
+
+            val lifecycle = holder.connectionLifecycle.value
+            assertEquals(lifecycle.state, holder.connectionState.value)
+            assertEquals(lifecycle.epochs, holder.connectionEpochs.value)
+        }
     }
 
     @Test

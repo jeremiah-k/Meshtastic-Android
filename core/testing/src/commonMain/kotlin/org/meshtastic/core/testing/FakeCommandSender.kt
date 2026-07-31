@@ -25,6 +25,8 @@ import org.meshtastic.proto.AdminMessage
 import org.meshtastic.proto.ChannelSet
 import org.meshtastic.proto.LocalConfig
 
+data class AdminInvocation(val destNum: Int, val requestId: Int, val wantResponse: Boolean, val message: AdminMessage)
+
 /** Shared [CommandSender] fake with packet capture and lockdown-command evidence. */
 @Suppress("TooManyFunctions")
 class FakeCommandSender :
@@ -32,6 +34,7 @@ class FakeCommandSender :
     CommandSender {
     val sentPackets = mutableListOf<DataPacket>()
     val sentAdminMessages = mutableListOf<AdminMessage>()
+    val adminInvocations = mutableListOf<AdminInvocation>()
 
     var packetIdSnapshot = 0L
     var localConfigSnapshot = LocalConfig()
@@ -50,6 +53,7 @@ class FakeCommandSender :
         registerResetAction {
             sentPackets.clear()
             sentAdminMessages.clear()
+            adminInvocations.clear()
             packetIdSnapshot = 0L
             localConfigSnapshot = LocalConfig()
             channelSetSnapshot = ChannelSet()
@@ -82,7 +86,9 @@ class FakeCommandSender :
     }
 
     override suspend fun sendAdmin(destNum: Int, requestId: Int, wantResponse: Boolean, initFn: () -> AdminMessage) {
-        sentAdminMessages.add(initFn())
+        val message = initFn()
+        adminInvocations.add(AdminInvocation(destNum, requestId, wantResponse, message))
+        sentAdminMessages.add(message)
     }
 
     override fun sendAdminImmediate(destNum: Int, initFn: () -> AdminMessage) {
@@ -95,8 +101,11 @@ class FakeCommandSender :
         wantResponse: Boolean,
         initFn: () -> AdminMessage,
     ): AwaitedSendResult {
-        sentAdminMessages.add(initFn())
-        return awaitedSendResult
+        val result = awaitedSendResult
+        val message = initFn()
+        adminInvocations.add(AdminInvocation(destNum, requestId, wantResponse, message))
+        if (result.dispatched) sentAdminMessages.add(message)
+        return result
     }
 
     override suspend fun sendPosition(pos: org.meshtastic.proto.Position, destNum: Int?, wantResponse: Boolean) = Unit
