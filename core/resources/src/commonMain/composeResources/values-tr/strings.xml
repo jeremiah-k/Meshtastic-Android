@@ -348,7 +348,6 @@
     <string name="mqtt_enabled">MQTT etkin</string>
     <string name="mqtt_status_connected">Bağlandı</string>
     <string name="mqtt_status_disconnected">Bağlantı kesildi</string>
-    <string name="must_set_region">Bölge seçmelisin!</string>
     <string name="must_update">Uygulamayı Google Play store (ya da GitHub)'dan güncelleyin. Bu cihaz ile haberleşmek için uygulama çok eski. İlgili <a href="https://meshtastic.org/docs/software/android/installation"> Dokümantasyon</a>.</string>
     <!-- MUTE -->
     <string name="mute_1_week">1 hafta</string>

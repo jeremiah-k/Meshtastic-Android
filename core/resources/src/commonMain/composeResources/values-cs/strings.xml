@@ -815,7 +815,6 @@
     <string name="mqtt_status_connected">Připojeno</string>
     <string name="mqtt_status_disconnected">Odpojeno</string>
     <string name="mqtt_test_connection">Test připojení</string>
-    <string name="must_set_region">Musíte nastavit region!</string>
     <string name="must_update">Musíte aktualizovat aplikaci v obchodu Google Play (nebo z Githubu). Je příliš stará pro komunikaci s touto verzí firmware vysílače. Přečtěte si prosím naše <a href="https://meshtastic.org/docs/software/android/installation">dokumenty</a> na toto téma.</string>
     <!-- MUTE -->
     <string name="mute_1_week">1 týden</string>

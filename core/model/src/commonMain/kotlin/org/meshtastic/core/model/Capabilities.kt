@@ -83,6 +83,9 @@ data class Capabilities(val firmwareVersion: String?, internal val forceEnableAl
      */
     val supportsLoraRegionPresetMap = atLeast(V2_8_0)
 
+    /** Whether the connected firmware uses the 2.8 LoRa defaults, independent of debug feature overrides. */
+    val usesV28LoraDefaults = version != null && version >= V2_8_0
+
     /**
      * Support for runtime lockdown mode (per-connection passphrase auth). Supported since firmware v2.8.0. Note:
      * lockdown is also hardware-gated (nRF52 only) — the device advertises real support by sending a `LockdownStatus`,

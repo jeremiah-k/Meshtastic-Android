@@ -41,6 +41,7 @@ import org.meshtastic.core.model.FirmwareUpdateNoticePolicy
 import org.meshtastic.core.model.FirmwareUpdateTransport
 import org.meshtastic.core.model.MyNodeInfo
 import org.meshtastic.core.model.Node
+import org.meshtastic.core.model.service.LockdownState
 import org.meshtastic.core.model.util.TimeConstants
 import org.meshtastic.core.repository.DeviceHardwareRepository
 import org.meshtastic.core.repository.FirmwareReleaseRepository
@@ -61,9 +62,8 @@ import org.meshtastic.proto.Config
 import org.meshtastic.proto.LocalConfig
 
 /**
- * Derived, UI-friendly summary of the device connection state. Combines [ServiceRepository.connectionState] with
- * "region unset" and the [ServiceRepository.RECONNECTING_PROGRESS_TEXT] handshake-recovery signal to surface cases
- * (MUST_SET_REGION, RECONNECTING) that otherwise need separate boolean flags in the UI layer.
+ * Derived, UI-friendly summary of the device connection lifecycle. Region configuration is exposed separately through
+ * [ConnectionsViewModel.regionRequired] so the connected card and required-action warning can remain visible together.
  */
 enum class ConnectionStatus {
     /** No device has been selected or we are otherwise disconnected. */
@@ -90,9 +90,6 @@ enum class ConnectionStatus {
 
     /** Connected but the device is in deep sleep. */
     CONNECTED_SLEEPING,
-
-    /** Connected and active, but LoRa region is UNSET — user action required. */
-    MUST_SET_REGION,
 }
 
 @KoinViewModel
@@ -117,6 +114,14 @@ class ConnectionsViewModel(
     val lockdownState = serviceRepository.lockdownState
     val sessionAuthorized = serviceRepository.sessionAuthorized
 
+    /** True when this session may change radio configuration. Legacy/non-lockdown radios report no lockdown state. */
+    val regionConfigurationAllowed: StateFlow<Boolean> =
+        combine(lockdownState, sessionAuthorized) { state, authorized ->
+            authorized || state is LockdownState.None || state is LockdownState.Disabled
+        }
+            .distinctUntilChanged()
+            .stateInWhileSubscribed(initialValue = false)
+
     val myNodeInfo: StateFlow<MyNodeInfo?> = nodeRepository.myNodeInfo
 
     val ourNodeInfo: StateFlow<Node?> = nodeRepository.ourNodeInfo
@@ -136,17 +141,24 @@ class ConnectionsViewModel(
             }
             .stateInWhileSubscribed(initialValue = nodeRepository.ourNodeInfo.value)
 
-    /** Whether the LoRa region is UNSET and needs to be configured. */
-    val regionUnset: StateFlow<Boolean> =
-        radioConfigRepository.localConfigFlow
-            .map { it.lora?.region == Config.LoRaConfig.RegionCode.UNSET }
+    /** True while a connected node still requires a LoRa region after any expected restart completes. */
+    val regionRequired: StateFlow<Boolean> =
+        combine(connectionState, radioConfigRepository.localConfigFlow, nodeRestartTracker.restartExpected) {
+                state,
+                localConfig,
+                restartExpected,
+            ->
+            state is ConnectionState.Connected &&
+                !restartExpected &&
+                localConfig.lora?.region == Config.LoRaConfig.RegionCode.UNSET
+        }
             .distinctUntilChanged()
             .stateInWhileSubscribed(initialValue = false)
 
     /**
-     * Single source of truth for the UI's "connection status" pill/banner. Derived from [connectionState],
-     * [ServiceRepository.connectionProgress], and [regionUnset]; kept here rather than in the composable so the mapping
-     * is observable and testable.
+     * Single source of truth for the UI's connection status. Derived from [connectionState],
+     * [ServiceRepository.connectionProgress], and expected-restart state. The mapping remains here so it is observable
+     * and testable.
      *
      * The [ConnectionStatus.RECONNECTING] case is signalled by the WiFi/TCP handshake watchdog writing
      * [ServiceRepository.RECONNECTING_PROGRESS_TEXT] to [ServiceRepository.connectionProgress] immediately before its
@@ -154,15 +166,14 @@ class ConnectionsViewModel(
      * [ServiceRepository.RECONNECTING_PROGRESS_TEXT] for the cross-track contract.
      */
     val connectionStatus: StateFlow<ConnectionStatus> =
-        combine(
-            connectionState,
-            regionUnset,
-            serviceRepository.connectionProgress,
-            nodeRestartTracker.restartExpected,
-        ) { state, unset, progress, restartExpected ->
+        combine(connectionState, serviceRepository.connectionProgress, nodeRestartTracker.restartExpected) {
+                state,
+                progress,
+                restartExpected,
+            ->
             when (state) {
                 is ConnectionState.Connected ->
-                    if (unset) ConnectionStatus.MUST_SET_REGION else ConnectionStatus.CONNECTED
+                    if (restartExpected) ConnectionStatus.RESTARTING else ConnectionStatus.CONNECTED
 
                 // While an expected node restart is in flight, the drop and the reconnect attempts are the restart
                 // —

@@ -22,16 +22,22 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -53,11 +59,19 @@ import org.meshtastic.core.resources.app_functions_settings
 import org.meshtastic.core.resources.app_functions_settings_summary
 import org.meshtastic.core.resources.app_settings
 import org.meshtastic.core.resources.bottom_nav_settings
+import org.meshtastic.core.resources.cancel
 import org.meshtastic.core.resources.device_links
 import org.meshtastic.core.resources.export_configuration
 import org.meshtastic.core.resources.filter_settings
 import org.meshtastic.core.resources.help_and_documentation
 import org.meshtastic.core.resources.import_configuration
+import org.meshtastic.core.resources.import_configuration_failed
+import org.meshtastic.core.resources.install_configuration_bluetooth_repair_hint
+import org.meshtastic.core.resources.install_configuration_failed
+import org.meshtastic.core.resources.install_configuration_in_progress_title
+import org.meshtastic.core.resources.install_configuration_in_progress_warning
+import org.meshtastic.core.resources.install_configuration_preparing
+import org.meshtastic.core.resources.install_configuration_stage
 import org.meshtastic.core.resources.node_layout_section_title
 import org.meshtastic.core.resources.preferences_language
 import org.meshtastic.core.resources.remotely_administrating
@@ -72,6 +86,7 @@ import org.meshtastic.core.ui.icon.List
 import org.meshtastic.core.ui.icon.MeshtasticIcons
 import org.meshtastic.core.ui.icon.SettingsRemote
 import org.meshtastic.core.ui.icon.Wifi
+import org.meshtastic.core.ui.util.SnackbarManager
 import org.meshtastic.feature.settings.component.AppInfoSection
 import org.meshtastic.feature.settings.component.AppearanceSettingsContent
 import org.meshtastic.feature.settings.component.ExpressiveSection
@@ -80,9 +95,11 @@ import org.meshtastic.feature.settings.component.PrivacySettingsContent
 import org.meshtastic.feature.settings.component.ThemePickerDialog
 import org.meshtastic.feature.settings.navigation.ConfigRoute
 import org.meshtastic.feature.settings.navigation.ModuleRoute
+import org.meshtastic.feature.settings.radio.ProfileInstallState
 import org.meshtastic.feature.settings.radio.RadioConfigItemList
 import org.meshtastic.feature.settings.radio.RadioConfigViewModel
 import org.meshtastic.feature.settings.radio.component.EditDeviceProfileDialog
+import org.meshtastic.feature.settings.radio.shouldSuggestBluetoothRepair
 import org.meshtastic.feature.settings.util.LanguageUtils
 import org.meshtastic.feature.settings.util.LanguageUtils.languageMap
 import org.meshtastic.proto.DeviceProfile
@@ -98,6 +115,10 @@ fun SettingsScreen(
     onBack: (() -> Unit)? = null,
 ) {
     val appFunctionsAvailable: Boolean = koinInject(qualifier = named(GOOGLE_SERVICES_AVAILABLE))
+    val snackbarManager: SnackbarManager = koinInject()
+    val importFailureMessage = stringResource(Res.string.import_configuration_failed)
+    val installFailureMessage = stringResource(Res.string.install_configuration_failed)
+    val bluetoothRepairHint = stringResource(Res.string.install_configuration_bluetooth_repair_hint)
     val hiddenFeaturesUnlocked by settingsViewModel.hiddenFeaturesUnlocked.collectAsStateWithLifecycle()
     val localConfig by settingsViewModel.localConfig.collectAsStateWithLifecycle()
     val ourNode by settingsViewModel.ourNodeInfo.collectAsStateWithLifecycle()
@@ -105,16 +126,58 @@ fun SettingsScreen(
     val isOtaCapable by settingsViewModel.isOtaCapable.collectAsStateWithLifecycle()
     val destNode by viewModel.destNode.collectAsStateWithLifecycle()
     val state by viewModel.radioConfigState.collectAsStateWithLifecycle()
+    val profileInstallState by viewModel.profileInstallState.collectAsStateWithLifecycle()
+
+    if (profileInstallState !is ProfileInstallState.Idle) {
+        MeshtasticDialog(
+            titleRes = Res.string.install_configuration_in_progress_title,
+            dismissTextRes = Res.string.cancel,
+            onDismiss = viewModel::cancelProfileInstall,
+            dismissable = false,
+            text = {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    CircularProgressIndicator()
+                    val status =
+                        when (val installState = profileInstallState) {
+                            is ProfileInstallState.Installing ->
+                                stringResource(
+                                    Res.string.install_configuration_stage,
+                                    installState.currentStage,
+                                    installState.totalStages,
+                                )
+
+                            else -> stringResource(Res.string.install_configuration_preparing)
+                        }
+                    Text(text = status)
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(text = stringResource(Res.string.install_configuration_in_progress_warning))
+                }
+            },
+        )
+    }
 
     var deviceProfile by remember { mutableStateOf<DeviceProfile?>(null) }
     var showEditDeviceProfileDialog by remember { mutableStateOf(false) }
 
     val importConfigLauncher =
-        rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-            if (it.resultCode == Activity.RESULT_OK) {
-                showEditDeviceProfileDialog = true
-                it.data?.data?.let { uri ->
-                    viewModel.importProfile(uri.toKmpUri()) { profile -> deviceProfile = profile }
+        rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            if (result.resultCode == Activity.RESULT_OK) {
+                val uri = result.data?.data
+                if (uri == null) {
+                    snackbarManager.showSnackbar(importFailureMessage)
+                } else {
+                    viewModel.importProfile(uri.toKmpUri()) { importResult ->
+                        importResult
+                            .onSuccess { profile ->
+                                deviceProfile = profile
+                                showEditDeviceProfileDialog = true
+                            }
+                            .onFailure { snackbarManager.showSnackbar(importFailureMessage) }
+                    }
                 }
             }
         }
@@ -127,6 +190,9 @@ fun SettingsScreen(
         }
 
     if (showEditDeviceProfileDialog) {
+        // Snapshot exports for the lifetime of this dialog so unrelated device-profile refreshes do not reset the
+        // user's switches. Imported profiles remain keyed by their explicit value and intentionally reset selection.
+        val dialogProfile = remember(deviceProfile) { deviceProfile ?: viewModel.currentDeviceProfile }
         EditDeviceProfileDialog(
             title =
             if (deviceProfile != null) {
@@ -134,11 +200,21 @@ fun SettingsScreen(
             } else {
                 stringResource(Res.string.export_configuration)
             },
-            deviceProfile = deviceProfile ?: viewModel.currentDeviceProfile,
+            deviceProfile = dialogProfile,
             onConfirm = {
                 showEditDeviceProfileDialog = false
                 if (deviceProfile != null) {
-                    viewModel.installProfile(it)
+                    val selectedProfile = it
+                    val installIsLocal = state.isLocal
+                    viewModel.installProfile(selectedProfile) { result ->
+                        result
+                            .onSuccess {
+                                if (selectedProfile.shouldSuggestBluetoothRepair(isLocal = installIsLocal)) {
+                                    snackbarManager.showSnackbar(bluetoothRepairHint)
+                                }
+                            }
+                            .onFailure { snackbarManager.showSnackbar(installFailureMessage) }
+                    }
                 } else {
                     deviceProfile = it
                     val nodeName = (it.short_name ?: "").ifBlank { "node" }

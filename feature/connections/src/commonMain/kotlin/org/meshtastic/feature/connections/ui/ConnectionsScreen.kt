@@ -146,8 +146,8 @@ fun ConnectionsScreen(
     val connectionState by connectionsViewModel.connectionState.collectAsStateWithLifecycle()
     val ourNode by connectionsViewModel.ourNodeForDisplay.collectAsStateWithLifecycle()
     val firmwareUpdateNotice by connectionsViewModel.firmwareUpdateNotice.collectAsStateWithLifecycle()
-    val regionUnset by connectionsViewModel.regionUnset.collectAsStateWithLifecycle()
-    val sessionAuthorized by connectionsViewModel.sessionAuthorized.collectAsStateWithLifecycle()
+    val regionRequired by connectionsViewModel.regionRequired.collectAsStateWithLifecycle()
+    val regionConfigurationAllowed by connectionsViewModel.regionConfigurationAllowed.collectAsStateWithLifecycle()
 
     val selectedDevice by scanModel.selectedNotNullFlow.collectAsStateWithLifecycle()
     val persistedDeviceName by scanModel.persistedDeviceName.collectAsStateWithLifecycle()
@@ -398,17 +398,15 @@ fun ConnectionsScreen(
                         val isPhysicalDevice =
                             selectedDevice != InterfaceId.MOCK.id.toString() &&
                                 selectedDevice != InterfaceId.REPLAY.id.toString()
-                        if (
-                            uiState == ConnectionUiState.CONNECTED_WITH_NODE &&
-                            regionUnset &&
-                            sessionAuthorized &&
-                            isPhysicalDevice
-                        ) {
+                        val showRegionWarning =
+                            connectionState is ConnectionState.Connected && regionRequired && isPhysicalDevice
+                        if (showRegionWarning) {
                             Spacer(modifier = Modifier.height(8.dp))
                             Card(modifier = Modifier.fillMaxWidth()) {
                                 ListItem(
                                     leadingIcon = MeshtasticIcons.Language,
                                     text = stringResource(Res.string.set_your_region),
+                                    enabled = regionConfigurationAllowed,
                                     onClick = {
                                         isWaiting = true
                                         radioConfigViewModel.setResponseStateLoading(ConfigRoute.LORA)

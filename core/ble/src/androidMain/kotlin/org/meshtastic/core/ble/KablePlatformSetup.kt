@@ -22,7 +22,10 @@ import com.juul.kable.Peripheral
 import com.juul.kable.PeripheralBuilder
 import com.juul.kable.PooledThreadingStrategy
 import com.juul.kable.toIdentifier
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.withTimeoutOrNull
 import org.meshtastic.core.model.util.anonymize
+import kotlin.time.Duration.Companion.seconds
 
 /**
  * Shared thread pool for Kable BLE connections.
@@ -34,6 +37,9 @@ import org.meshtastic.core.model.util.anonymize
  * A single app-wide instance is used because Kable recommends exactly one pool per application.
  */
 private val sharedThreadingStrategy = PooledThreadingStrategy()
+
+/** Keeps a lost Android MTU callback from blocking the complete GATT connection lifecycle. */
+private val MTU_NEGOTIATION_TIMEOUT = 5.seconds
 
 internal actual fun PeripheralBuilder.platformConfig(device: BleDevice, autoConnect: () -> Boolean) {
     // Bonded devices without a fresh advertisement must use autoConnect = true. Otherwise,
@@ -55,10 +61,19 @@ internal actual fun PeripheralBuilder.platformConfig(device: BleDevice, autoConn
             // Android defaults to 23 bytes MTU. Meshtastic packets can be 512 bytes.
             // Requesting the max MTU is critical for preventing dropped packets and stalls.
             @Suppress("MagicNumber")
-            val negotiatedMtu = requestMtu(512)
-            Logger.i { "[${device.address.anonymize()}] Negotiated MTU: $negotiatedMtu" }
+            val negotiatedMtu = withTimeoutOrNull(MTU_NEGOTIATION_TIMEOUT) { requestMtu(512) }
+            if (negotiatedMtu == null) {
+                Logger.w {
+                    "[${device.address.anonymize()}] MTU callback timed out after $MTU_NEGOTIATION_TIMEOUT; " +
+                        "continuing with the current ATT MTU"
+                }
+            } else {
+                Logger.i { "[${device.address.anonymize()}] Negotiated MTU: $negotiatedMtu" }
+            }
+        } catch (e: CancellationException) {
+            throw e
         } catch (@Suppress("TooGenericExceptionCaught") e: Exception) {
-            Logger.w(e) { "[${device.address.anonymize()}] Failed to request MTU" }
+            Logger.w { "[${device.address.anonymize()}] Failed to request MTU (${e::class.simpleName ?: "Exception"})" }
         }
     }
 }
@@ -77,13 +92,17 @@ internal actual fun Peripheral.negotiatedMaxWriteLength(): Int? {
 internal actual fun Peripheral.requestHighConnectionPriority(): Boolean {
     val androidPeripheral = this as? AndroidPeripheral ?: return false
     return runCatching { androidPeripheral.requestConnectionPriority(AndroidPeripheral.Priority.High) }
-        .onFailure { Logger.w(it) { "requestConnectionPriority(High) threw" } }
+        .onFailure { failure ->
+            Logger.w { "requestConnectionPriority(High) threw (${failure::class.simpleName ?: "Exception"})" }
+        }
         .getOrDefault(false)
 }
 
 internal actual fun Peripheral.requestBalancedConnectionPriority(): Boolean {
     val androidPeripheral = this as? AndroidPeripheral ?: return false
     return runCatching { androidPeripheral.requestConnectionPriority(AndroidPeripheral.Priority.Balanced) }
-        .onFailure { Logger.w(it) { "requestConnectionPriority(Balanced) threw" } }
+        .onFailure { failure ->
+            Logger.w { "requestConnectionPriority(Balanced) threw (${failure::class.simpleName ?: "Exception"})" }
+        }
         .getOrDefault(false)
 }

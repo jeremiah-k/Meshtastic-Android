@@ -140,8 +140,42 @@ class LoRaRegionPresetsTest {
     }
 
     @Test
-    fun `region default preset is LongTurbo for US and absent for other regions`() {
-        assertEquals(ModemPreset.LONG_TURBO, defaultPresetFor(RegionCode.US))
-        assertNull(defaultPresetFor(RegionCode.EU_868))
+    fun `fresh region falls back to the first legal preset when advertised default is malformed`() {
+        val malformedMap =
+            LoRaRegionPresetMap(
+                groups =
+                listOf(
+                    LoRaPresetGroup(
+                        presets = listOf(ModemPreset.MEDIUM_FAST, ModemPreset.MEDIUM_SLOW),
+                        default_preset = ModemPreset.LONG_FAST,
+                    ),
+                ),
+                region_groups = listOf(LoRaRegionPresets(region = RegionCode.US, group_index = 0)),
+            )
+
+        assertEquals(
+            ModemPreset.MEDIUM_FAST,
+            malformedMap.presetForFreshRegion(RegionCode.US, Capabilities("2.8.0", forceEnableAll = false)),
+        )
+    }
+
+    @Test
+    fun `region default preset changes with the target firmware generation`() {
+        val firmware27 = Capabilities("2.7.19", forceEnableAll = false)
+        val firmware28 = Capabilities("2.8.0", forceEnableAll = false)
+
+        assertNull(defaultPresetFor(RegionCode.US, firmware27))
+        assertEquals(ModemPreset.LONG_TURBO, defaultPresetFor(RegionCode.US, firmware28))
+        assertNull(defaultPresetFor(RegionCode.EU_868, firmware28))
+    }
+
+    @Test
+    fun `fresh US region keeps LongFast on 2_7 and recommends LongTurbo on 2_8`() {
+        val firmware27 = Capabilities("2.7.19", forceEnableAll = false)
+        val firmware28 = Capabilities("2.8.0", forceEnableAll = false)
+        val unconstrained: LoRaRegionPresetMap? = null
+
+        assertEquals(ModemPreset.LONG_FAST, unconstrained.presetForFreshRegion(RegionCode.US, firmware27))
+        assertEquals(ModemPreset.LONG_TURBO, unconstrained.presetForFreshRegion(RegionCode.US, firmware28))
     }
 }

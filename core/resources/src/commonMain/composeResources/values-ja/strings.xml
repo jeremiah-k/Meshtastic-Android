@@ -1041,7 +1041,6 @@
     <string name="mqtt_status_reconnecting">再接続しています…</string>
     <string name="mqtt_status_reconnecting_with_attempt">再接続しています（試行 %1$d）：%2$s</string>
     <string name="mqtt_test_connection">接続をテスト</string>
-    <string name="must_set_region">リージョンを指定する必要があります。</string>
     <string name="must_update">アプリが古く、デバイスと通信ができません。アプリストアまたはGithubでアプリを更新してください。詳細は<a href="https://meshtastic.org/docs/software/android/installation">こちら</a> に記載されています。</string>
     <!-- MUTE -->
     <string name="mute_1_week">1週間</string>

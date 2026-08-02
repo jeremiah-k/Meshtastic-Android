@@ -29,12 +29,20 @@ import kotlin.test.assertTrue
  * attempt anonymised the hand-written log statements in `core/ble` and missed the Kable `identifier`, which stamps the
  * address onto *every* line the BLE library emits, plus further sites in the DFU transports and WiFi provisioning.
  *
- * Scoped to the BLE-adjacent modules so matching on the `address` suffix stays low-noise.
+ * Scoped to BLE-adjacent modules and the two address-bearing transport/history sources so matching on the `address`
+ * suffix stays low-noise.
  */
 class BleAddressLoggingTest {
 
     private val scannedPathFragments =
-        listOf("/core/ble/", "/feature/firmware/", "/feature/wifi-provision/", "/feature/connections/")
+        listOf(
+            "/core/ble/",
+            "/core/data/src/commonMain/kotlin/org/meshtastic/core/data/manager/HistoryManagerImpl.kt",
+            "/core/network/src/commonMain/kotlin/org/meshtastic/core/network/radio/BleRadioTransport.kt",
+            "/feature/firmware/",
+            "/feature/wifi-provision/",
+            "/feature/connections/",
+        )
 
     /**
      * Files where an address is used as an identity rather than as diagnostic text — building the connection string or
@@ -42,8 +50,11 @@ class BleAddressLoggingTest {
      */
     private val identityUseAllowlist = listOf("DeviceListEntry.kt")
 
-    /** Interpolation of anything ending in `address`, e.g. `${device.address}` or `$address`. */
-    private val interpolatedAddress = Regex("""\$\{?[A-Za-z0-9_.]*[aA]ddress}?""")
+    /** Kotlin identifiers inside a braced interpolation. */
+    private val interpolationIdentifier = Regex("""\b[A-Za-z_][A-Za-z0-9_]*\b""")
+
+    /** Identifiers whose values are already anonymized before interpolation. */
+    private val safeAddressIdentifiers = setOf("logAddress", "anonymizedAddress")
 
     /**
      * Files this rule covers.
@@ -68,27 +79,205 @@ class BleAddressLoggingTest {
             paths.any { it.endsWith("KableBleConnection.kt") },
             "expected core/ble sources in scope; got ${paths.size} files, e.g. ${paths.take(3)}",
         )
+        assertTrue(paths.any { it.endsWith("BleRadioTransport.kt") }, "BLE transport logging escaped the scan")
+        assertTrue(paths.any { it.endsWith("HistoryManagerImpl.kt") }, "history logging escaped the scan")
     }
 
     @Test
     fun `a BLE address is never interpolated into log or exception text without anonymize`() {
         val offenders =
             scannedFiles().flatMap { file ->
-                file.text.lines().withIndex().mapNotNull { (index, line) ->
-                    val isDiagnostic = "Logger." in line || "throw " in line || "check(" in line || "require(" in line
-                    val interpolates = interpolatedAddress.containsMatchIn(line)
-                    val anonymised = "anonymize" in line
-                    if (isDiagnostic && interpolates && !anonymised) {
-                        "${file.path.substringAfterLast("/kotlin/")}:${index + 1}: ${line.trim()}"
-                    } else {
-                        null
-                    }
-                }
+                rawAddressDiagnosticOffenders(file.path.substringAfterLast("/kotlin/"), file.text)
             }
 
         assertTrue(
             offenders.isEmpty(),
             "BLE addresses must be anonymised in diagnostic text. Offending lines:\n" + offenders.joinToString("\n"),
+        )
+    }
+
+    @Test
+    fun `an anonymized prefix cannot hide a raw address on the same diagnostic line`() {
+        val sources =
+            listOf(
+                """Logger.w { "${'$'}logAddress failed for ${'$'}address" }""",
+                """Logger.w { "${'$'}{address.anonymize()} failed for ${'$'}address" }""",
+            )
+
+        sources.forEach { source ->
+            val offenders = rawAddressDiagnosticOffenders("MixedAddressFixture.kt", source)
+
+            assertTrue(
+                offenders.isNotEmpty(),
+                "the privacy guard must reject mixed anonymized and raw address tokens: $source",
+            )
+        }
+    }
+
+    @Test
+    fun `a raw address on a diagnostic continuation line is rejected`() {
+        val source =
+            """
+            Logger.w {
+                "connection failed for " +
+                    "${'$'}address"
+            }
+            """
+                .trimIndent()
+
+        val offenders = rawAddressDiagnosticOffenders("ContinuationFixture.kt", source)
+
+        assertTrue(offenders.isNotEmpty(), "the privacy guard must scan the complete multi-line diagnostic")
+    }
+
+    @Test
+    fun `explicitly anonymized address expressions remain valid diagnostics`() {
+        val sources =
+            listOf(
+                """Logger.i { "Targets: ${'$'}{targetAddresses.map { it.anonymize() }}" }""",
+                """Logger.i { "Bonding ${'$'}{entry.device.address.anonymize}" }""",
+                """Logger.i { "${'$'}logAddress connected" }""",
+            )
+
+        sources.forEach { source ->
+            assertTrue(
+                rawAddressDiagnosticOffenders("AnonymizedAddressFixture.kt", source).isEmpty(),
+                "the privacy guard rejected an explicitly anonymized expression: $source",
+            )
+        }
+    }
+
+    private val diagnosticMarkers = listOf("Logger.", "logger.", "historyLog(", "addr=", "throw ", "check(", "require(")
+
+    private fun rawAddressDiagnosticOffenders(path: String, source: String): List<String> {
+        val lines = source.lines()
+        val offenders = mutableListOf<String>()
+        var index = 0
+        while (index < lines.size) {
+            val line = lines[index]
+            if (diagnosticMarkers.any { it in line }) {
+                val block = collectDiagnosticBlock(lines, index)
+                if (containsRawAddressInterpolation(block.joinToString("\n"))) {
+                    offenders += "$path:${index + 1}: ${line.trim()}"
+                }
+                index += block.size
+            } else {
+                index += 1
+            }
+        }
+        return offenders
+    }
+
+    /** Collects one multi-line diagnostic expression, including Logger lambdas and parenthesized calls. */
+    private fun collectDiagnosticBlock(lines: List<String>, start: Int): List<String> {
+        val block = mutableListOf<String>()
+        var delimiterDepth = 0
+        var cursor = start
+        do {
+            val line = lines[cursor]
+            block += line
+            delimiterDepth += delimiterDelta(line)
+            cursor += 1
+        } while (cursor < lines.size && (delimiterDepth > 0 || block.last().trimEnd().endsWith("+")))
+        return block
+    }
+
+    private fun delimiterDelta(line: String): Int =
+        line.count { it == '(' || it == '[' || it == '{' } - line.count { it == ')' || it == ']' || it == '}' }
+
+    /**
+     * Returns true when a string-template interpolation contains more address references than explicit anonymization
+     * operations. Braced expressions are scanned with balanced braces so collection expressions with lambdas remain
+     * intact, while a mixed expression such as `${address.anonymize()} / $address` still exposes the second reference.
+     */
+    private fun containsRawAddressInterpolation(line: String): Boolean {
+        var cursor = 0
+        var rawAddressFound = false
+        while (cursor < line.length && !rawAddressFound) {
+            val dollar = line.indexOf('$', startIndex = cursor)
+            if (dollar < 0 || dollar + 1 >= line.length) {
+                cursor = line.length
+            } else if (line[dollar + 1] == '{') {
+                val end = findInterpolationEnd(line, expressionStart = dollar + 2)
+                if (end < 0) {
+                    rawAddressFound = true
+                } else {
+                    val expression = line.substring(dollar + 2, end)
+                    val residual =
+                        safeAddressIdentifiers.fold(expression) { current, identifier ->
+                            current.replace(Regex("""\b$identifier\b"""), "")
+                        }
+                    val addressReferences =
+                        interpolationIdentifier.findAll(residual).count { match ->
+                            match.value.endsWith("address", ignoreCase = true) ||
+                                match.value.endsWith("addresses", ignoreCase = true)
+                        }
+                    val anonymizations = Regex("""\banonymize\b""").findAll(residual).count()
+                    rawAddressFound = addressReferences > anonymizations
+                    cursor = end + 1
+                }
+            } else {
+                val identifier = line.substring(dollar + 1).takeWhile { it == '_' || it.isLetterOrDigit() }
+                val safe = identifier in safeAddressIdentifiers
+                val addressLike =
+                    identifier.endsWith("address", ignoreCase = true) ||
+                        identifier.endsWith("addresses", ignoreCase = true)
+                rawAddressFound = identifier.isNotEmpty() && addressLike && !safe
+                cursor = dollar + 1 + identifier.length
+            }
+        }
+        return rawAddressFound
+    }
+
+    private fun findInterpolationEnd(line: String, expressionStart: Int): Int {
+        var depth = 1
+        for (index in expressionStart until line.length) {
+            when (line[index]) {
+                '{' -> depth += 1
+
+                '}' -> {
+                    depth -= 1
+                    if (depth == 0) return index
+                }
+            }
+        }
+        return -1
+    }
+
+    @Test
+    fun `privacy-sensitive BLE diagnostics never forward arbitrary throwable text`() {
+        val throwableLoggerCall = Regex("""(?:Logger|logger)\.[vdiwe]\s*\(""")
+        val protectedFiles = setOf("BleRadioTransport.kt", "HistoryManagerImpl.kt")
+        val offenders =
+            scannedFiles()
+                .filter { file -> protectedFiles.any { file.path.endsWith(it) } }
+                .flatMap { file ->
+                    file.text.lines().withIndex().mapNotNull { (index, line) ->
+                        line.takeIf(throwableLoggerCall::containsMatchIn)?.let {
+                            "${file.path.substringAfterLast("/kotlin/")}:${index + 1}: ${line.trim()}"
+                        }
+                    }
+                }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "BLE diagnostics must log curated failure types, not throwable messages. Offending lines:\n" +
+                offenders.joinToString("\n"),
+        )
+    }
+
+    @Test
+    fun `BLE transport diagnostic identifiers are derived from the anonymized address`() {
+        val source =
+            scannedFiles().single { it.path.endsWith("BleRadioTransport.kt") }.text.replace(Regex("""\s+"""), " ")
+
+        assertTrue(
+            Regex("""val\s+anonymizedAddress\s*=\s*address\.anonymize\(\)""").containsMatchIn(source),
+            "BLE transport must derive its diagnostic identifier through anonymize()",
+        )
+        assertTrue(
+            Regex("""val\s+logAddress\s*=\s*"\[\$\{?anonymizedAddress}?]"""").containsMatchIn(source),
+            "BLE transport log prefix must use only the anonymized identifier",
         )
     }
 
