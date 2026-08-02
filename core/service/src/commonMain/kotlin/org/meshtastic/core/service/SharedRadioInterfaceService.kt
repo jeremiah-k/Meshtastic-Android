@@ -77,6 +77,7 @@ import org.meshtastic.core.repository.ReceivedRadioFrame
 import org.meshtastic.core.repository.TransportDisconnectReason
 import org.meshtastic.proto.ToRadio
 import kotlin.concurrent.Volatile
+import kotlin.time.TimeSource
 
 private const val USB_PERMISSION_DENIED_ERROR = "USB permission denied. Reconnect the device to try again."
 
@@ -387,17 +388,19 @@ class SharedRadioInterfaceService(
 
     @Volatile private var lastDataReceivedMillis = 0L
 
+    private val monotonicStart = TimeSource.Monotonic.markNow()
+
     /**
-     * Internal test seam for deterministic clock injection. Production uses [nowMillis]; tests override this to a
-     * controllable clock so [onConnect], [handleFromRadio], [checkLiveness], and [keepAlive] all share one coherent
-     * time source. Not a constructor parameter to avoid breaking Koin @Single annotation generation (which would try to
-     * resolve `() -> Long` from the DI graph).
+     * Internal test seam for deterministic clock injection. Production uses monotonic elapsed time; tests override this
+     * to a controllable clock so [onConnect], [handleFromRadio], [checkLiveness], and [keepAlive] all share one
+     * coherent time source. Not a constructor parameter to avoid breaking Koin @Single annotation generation (which
+     * would try to resolve `() -> Long` from the DI graph).
      */
     @Volatile
     @Suppress("MemberVisibilityCanBePrivate")
-    internal var clockMillis: () -> Long = { nowMillis }
+    internal var clockMillis: () -> Long = { monotonicStart.elapsedNow().inWholeMilliseconds }
 
-    /** The current time from the injected clock. */
+    /** The current elapsed time from the injected clock. */
     private fun now(): Long = clockMillis()
 
     companion object {
@@ -885,13 +888,25 @@ class SharedRadioInterfaceService(
 
     private fun startHeartbeat() {
         heartbeatJob?.cancel()
-        lastDataReceivedMillis = now()
+        val startedAt = now()
+        lastDataReceivedMillis = startedAt
+        lastHeartbeatMillis = startedAt
         heartbeatJob =
             serviceScope.launch {
+                var previousHeartbeatMillis = startedAt
                 while (true) {
                     delay(HEARTBEAT_INTERVAL_MILLIS)
-                    keepAlive()
-                    checkLiveness()
+                    val tickNow = now()
+                    val heartbeatCadenceGapMs = tickNow - previousHeartbeatMillis
+                    keepAlive(tickNow)
+                    previousHeartbeatMillis = tickNow
+                    if (heartbeatCadenceGapMs <= LIVENESS_TIMEOUT_MILLIS) {
+                        checkLiveness()
+                    } else {
+                        // A full heartbeat-loop gap cannot prove peer silence; local scheduling may be the cause.
+                        // Give the fresh probe one normal interval to answer before recovery.
+                        Logger.d { "Deferring liveness check after ${heartbeatCadenceGapMs}ms heartbeat gap" }
+                    }
                 }
             }
     }
@@ -972,7 +987,7 @@ class SharedRadioInterfaceService(
     }
 
     fun keepAlive(now: Long = now()) {
-        if (now - lastHeartbeatMillis > HEARTBEAT_INTERVAL_MILLIS) {
+        if (now - lastHeartbeatMillis >= HEARTBEAT_INTERVAL_MILLIS) {
             radioTransport?.keepAlive()
             lastHeartbeatMillis = now
         }
