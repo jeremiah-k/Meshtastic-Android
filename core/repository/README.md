@@ -78,12 +78,16 @@ Raw hardware I/O contract for all physical transports (BLE, USB, TCP, Mock).
 
 ```kotlin
 interface RadioTransport {
-    fun handleSendToRadio(p: ByteArray)
+    fun handleSendToRadio(p: ByteArray): Boolean
     fun start()
     fun keepAlive()
     suspend fun close()
 }
 ```
+
+`handleSendToRadio` reports synchronous admission only: `true` means the transport accepted the bytes for asynchronous
+handoff, not that the device received them. `false` means the transport is unavailable, closed, or unable to schedule
+the handoff; delivery confirmation is a separate protocol concern.
 
 ### `ServiceRepository`
 
@@ -92,7 +96,9 @@ Decomposed into focused sub-interfaces via Interface Segregation Principle:
 
 ```kotlin
 interface ConnectionStateProvider {
+    val connectionLifecycle: StateFlow<ConnectionLifecycle>
     val connectionState: StateFlow<ConnectionState>
+    val connectionEpochs: StateFlow<ConnectionEpochs>
 }
 
 interface TracerouteResponseProvider {

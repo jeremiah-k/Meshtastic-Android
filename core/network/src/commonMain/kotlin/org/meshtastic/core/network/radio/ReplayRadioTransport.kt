@@ -114,28 +114,32 @@ class ReplayRadioTransport(
         callback.onConnect()
     }
 
-    override fun handleSendToRadio(p: ByteArray) {
+    override fun handleSendToRadio(p: ByteArray): Boolean {
         // Undecodable ToRadio is ignored rather than thrown: the replay must tolerate any bytes the app — or a fuzz
         // harness — hands it, exactly as it tolerates a malformed asset.
         val wantConfigId = runCatching { ToRadio.ADAPTER.decode(p).want_config_id }.getOrNull()
-        when (wantConfigId) {
-            HandshakeConstants.CONFIG_NONCE ->
-                scope.handledLaunch {
-                    emit(configFrames)
-                    complete(HandshakeConstants.CONFIG_NONCE)
-                }
-
-            HandshakeConstants.NODE_INFO_NONCE ->
-                scope.handledLaunch {
-                    emit(nodeFrames)
-                    complete(HandshakeConstants.NODE_INFO_NONCE)
-                    if (!packetsStarted) {
-                        packetsStarted = true
-                        streamPackets()
+        val sendJob =
+            when (wantConfigId) {
+                HandshakeConstants.CONFIG_NONCE ->
+                    scope.handledLaunch {
+                        emit(configFrames)
+                        complete(HandshakeConstants.CONFIG_NONCE)
                     }
-                }
-            // All other ToRadio traffic (heartbeats, outbound packets) is ignored — this is a read-only replay.
-        }
+
+                HandshakeConstants.NODE_INFO_NONCE ->
+                    scope.handledLaunch {
+                        emit(nodeFrames)
+                        complete(HandshakeConstants.NODE_INFO_NONCE)
+                        if (!packetsStarted) {
+                            packetsStarted = true
+                            streamPackets()
+                        }
+                    }
+
+                // All other ToRadio traffic (heartbeats, outbound packets) is ignored — this is a read-only replay.
+                else -> null
+            }
+        return sendJob?.isCancelled == false
     }
 
     private fun emit(frames: List<ByteArray>) = frames.forEach { callback.handleFromRadio(it) }

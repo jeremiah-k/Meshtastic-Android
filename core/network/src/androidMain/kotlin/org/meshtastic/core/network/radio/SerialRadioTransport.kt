@@ -17,12 +17,13 @@
 package org.meshtastic.core.network.radio
 
 import co.touchlab.kermit.Logger
+import com.hoho.android.usbserial.driver.UsbSerialDriver
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.StateFlow
 import org.meshtastic.core.common.util.handledLaunch
 import org.meshtastic.core.common.util.nowMillis
 import org.meshtastic.core.network.repository.SerialConnection
 import org.meshtastic.core.network.repository.SerialConnectionListener
-import org.meshtastic.core.network.repository.UsbRepository
 import org.meshtastic.core.network.transport.HeartbeatSender
 import org.meshtastic.core.repository.RadioTransportCallback
 import org.meshtastic.core.repository.TransportDisconnectReason
@@ -33,12 +34,14 @@ import java.util.concurrent.atomic.AtomicReference
 class SerialRadioTransport(
     callback: RadioTransportCallback,
     scope: CoroutineScope,
-    private val usbRepository: UsbRepository,
+    private val serialDevices: StateFlow<Map<String, UsbSerialDriver>>,
+    private val createSerialConnection: (UsbSerialDriver, SerialConnectionListener) -> SerialConnection,
     private val address: String,
 ) : StreamTransport(callback, scope) {
     private var connRef = AtomicReference<SerialConnection?>()
+    private val connectionAdmissionLock = Any()
 
-    private val heartbeatSender = HeartbeatSender(sendToRadio = ::handleSendToRadio, logTag = "Serial[$address]")
+    private val heartbeatSender = HeartbeatSender(sendToRadio = { handleSendToRadio(it) }, logTag = "Serial[$address]")
 
     /**
      * Set while an explicit [close] is tearing down the connection so the reader thread's
@@ -77,13 +80,14 @@ class SerialRadioTransport(
     }
 
     private fun closeConnection(waitForStopped: Boolean): Boolean {
-        val connection = connRef.getAndSet(null) ?: return false
+        val connection = synchronized(connectionAdmissionLock) { connRef.getAndSet(null) } ?: return false
         connection.close(waitForStopped)
         return true
     }
 
+    @Suppress("TooGenericExceptionCaught")
     override fun connect() {
-        val deviceMap = usbRepository.serialDevices.value
+        val deviceMap = serialDevices.value
         val device = deviceMap[address] ?: deviceMap.values.firstOrNull()
         if (device == null) {
             Logger.e { "[$address] Serial device not found at address" }
@@ -102,76 +106,96 @@ class SerialRadioTransport(
                 super.connect()
             }
 
-            usbRepository
-                .createSerialConnection(
-                    device,
-                    object : SerialConnectionListener {
-                        override fun onMissingPermission() {
-                            Logger.e {
-                                "[$address] Serial connection failed - missing USB permissions for device: $device"
-                            }
-                            // Permission denial is terminal for this connection attempt: stop the reconnect loop
-                            // and let the service/UI layer choose the user-facing copy for the structured reason.
-                            onDeviceDisconnect(
-                                waitForStopped = false,
-                                isPermanent = true,
-                                errorMessage = null,
-                                reason = TransportDisconnectReason.UsbPermissionDenied,
-                            )
+            createSerialConnection(
+                device,
+                object : SerialConnectionListener {
+                    override fun onMissingPermission() {
+                        Logger.e {
+                            "[$address] Serial connection failed - missing USB permissions for device: $device"
+                        }
+                        // Permission denial is terminal for this connection attempt: stop the reconnect loop
+                        // and let the service/UI layer choose the user-facing copy for the structured reason.
+                        onDeviceDisconnect(
+                            waitForStopped = false,
+                            isPermanent = true,
+                            errorMessage = null,
+                            reason = TransportDisconnectReason.UsbPermissionDenied,
+                        )
+                    }
+
+                    override fun onConnected() {
+                        onConnect.invoke()
+                    }
+
+                    override fun onDataReceived(bytes: ByteArray) {
+                        packetsReceived++
+                        bytesReceived += bytes.size
+                        Logger.d {
+                            "[$address] Serial received packet #$packetsReceived - " +
+                                "${bytes.size} byte(s) (Total RX: $bytesReceived bytes)"
+                        }
+                        bytes.forEach(::readChar)
+                    }
+
+                    override fun onDisconnected(thrown: Exception?) {
+                        // Skip the disconnect callback when the reader-thread termination is the
+                        // direct result of an explicit close() — the caller owns the post-close
+                        // notification, and the expected close must not emit warning-log noise.
+                        // USB unplug / cable error is the only path that should log + forward a
+                        // transient disconnect here.
+                        if (explicitCloseInProgress.get()) {
+                            return
                         }
 
-                        override fun onConnected() {
-                            onConnect.invoke()
+                        val uptime =
+                            if (connectionStartTime > 0) {
+                                nowMillis - connectionStartTime
+                            } else {
+                                0
+                            }
+                        thrown?.let { e ->
+                            // USB errors are common when unplugging; log as warning to avoid Crashlytics noise
+                            Logger.w(e) { "[$address] Serial error after ${uptime}ms: ${e.message}" }
                         }
-
-                        override fun onDataReceived(bytes: ByteArray) {
-                            packetsReceived++
-                            bytesReceived += bytes.size
-                            Logger.d {
-                                "[$address] Serial received packet #$packetsReceived - " +
-                                    "${bytes.size} byte(s) (Total RX: $bytesReceived bytes)"
-                            }
-                            bytes.forEach(::readChar)
+                        Logger.w {
+                            "[$address] Serial device disconnected - " +
+                                "Device: $device, " +
+                                "Uptime: ${uptime}ms, " +
+                                "Packets RX: $packetsReceived ($bytesReceived bytes)"
                         }
-
-                        override fun onDisconnected(thrown: Exception?) {
-                            // Skip the disconnect callback when the reader-thread termination is the
-                            // direct result of an explicit close() — the caller owns the post-close
-                            // notification, and the expected close must not emit warning-log noise.
-                            // USB unplug / cable error is the only path that should log + forward a
-                            // transient disconnect here.
-                            if (explicitCloseInProgress.get()) {
-                                return
-                            }
-
-                            val uptime =
-                                if (connectionStartTime > 0) {
-                                    nowMillis - connectionStartTime
-                                } else {
-                                    0
-                                }
-                            thrown?.let { e ->
-                                // USB errors are common when unplugging; log as warning to avoid Crashlytics noise
-                                Logger.w(e) { "[$address] Serial error after ${uptime}ms: ${e.message}" }
-                            }
-                            Logger.w {
-                                "[$address] Serial device disconnected - " +
-                                    "Device: $device, " +
-                                    "Uptime: ${uptime}ms, " +
-                                    "Packets RX: $packetsReceived ($bytesReceived bytes)"
-                            }
-                            // USB unplug / cable error is transient — the transport will reconnect when
-                            // the device is replugged or the OS re-enumerates the port. Only close()
-                            // (user disconnects) and missing-permission (see onMissingPermission) signal
-                            // a permanent disconnect; cable unplug / I/O errors are transient.
-                            onDeviceDisconnect(waitForStopped = false, isPermanent = false)
-                        }
-                    },
-                )
+                        // USB unplug / cable error is transient — the transport will reconnect when
+                        // the device is replugged or the OS re-enumerates the port. Only close()
+                        // (user disconnects) and missing-permission (see onMissingPermission) signal
+                        // a permanent disconnect; cable unplug / I/O errors are transient.
+                        onDeviceDisconnect(waitForStopped = false, isPermanent = false)
+                    }
+                },
+            )
                 .also { conn ->
-                    connRef.set(conn)
-                    conn.connect()
+                    synchronized(connectionAdmissionLock) {
+                        connRef.set(conn)
+                        try {
+                            conn.connect()
+                        } catch (e: Exception) {
+                            // A synchronous listener callback can already have cleared and closed this connection.
+                            if (connRef.compareAndSet(conn, null)) {
+                                conn.close(waitForStopped = false)
+                            }
+                            throw e
+                        }
+                    }
                 }
+        }
+    }
+
+    // The result reports synchronous admission against the current connection, not eventual delivery: framing and
+    // sendBytes run later on the transport scope, where teardown may legitimately make the connection unavailable.
+    override fun handleSendToRadio(p: ByteArray): Boolean = synchronized(connectionAdmissionLock) {
+        if (connRef.get() == null) {
+            Logger.w { "[$address] Serial connection not available, cannot send ${p.size} bytes" }
+            false
+        } else {
+            super.handleSendToRadio(p)
         }
     }
 
