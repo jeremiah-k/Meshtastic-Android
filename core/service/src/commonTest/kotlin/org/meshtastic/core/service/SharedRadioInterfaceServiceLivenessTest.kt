@@ -489,7 +489,87 @@ class SharedRadioInterfaceServiceLivenessTest {
             assertTrue(createdTransports.single().closeCalled, "cancellation must not strand the revoked transport")
         }
 
+    @Test
+    fun `heartbeat sends at the exact interval boundary`() = runTest(testDispatcher) {
+        clock = 0L
+        val service = createConnectedService("xAA:BB:CC:DD:EE:FF")
+        val transport = createdTransports.single()
+        try {
+            clock = 30_000L
+            advanceTimeBy(30_000L)
+            testDispatcher.scheduler.runCurrent()
+
+            assertTrue(transport.keepAliveCalled, "The 30-second boundary must send the scheduled heartbeat")
+            assertFalse(transport.closeCalled)
+        } finally {
+            service.disconnect()
+            advanceTimeBy(1_000L)
+        }
+    }
+
+    @Test
+    fun `delayed heartbeat wakeup gets a response window before liveness recovery`() = runTest(testDispatcher) {
+        clock = 0L
+        val service = createConnectedService("xAA:BB:CC:DD:EE:FF")
+        val transport = createdTransports.single()
+        try {
+            // A first tick just beyond the liveness window has no earlier heartbeat proving peer silence.
+            // It must send a fresh probe and defer recovery long enough for that probe to answer.
+            clock = 61_000L
+            advanceTimeBy(30_000L)
+            testDispatcher.scheduler.runCurrent()
+
+            assertTrue(transport.keepAliveCalled, "A delayed heartbeat wakeup must still probe the transport")
+            assertFalse(transport.closeCalled, "The fresh probe must get one heartbeat interval to answer")
+            assertEquals(1, createdTransports.size)
+
+            // If the fresh probe receives no response, the next normal heartbeat tick may recover the zombie
+            // session.
+            clock = 91_000L
+            advanceTimeBy(30_000L)
+            testDispatcher.scheduler.runCurrent()
+            advanceTimeBy(1_000L)
+
+            assertTrue(
+                transport.closeCalled,
+                "A silent peer must still be recovered after the probe grace interval",
+            )
+            assertEquals(2, createdTransports.size)
+        } finally {
+            service.disconnect()
+            advanceTimeBy(1_000L)
+        }
+    }
+
     // ─── BLE: Liveness timeout triggers recovery ───────────────────────────────────────────────
+
+    @Test
+    fun `response to delayed heartbeat prevents liveness recovery`() = runTest(testDispatcher) {
+        clock = 0L
+        val service = createConnectedService("xAA:BB:CC:DD:EE:FF")
+        val transport = createdTransports.single()
+        try {
+            clock = 120_000L
+            advanceTimeBy(30_000L)
+            testDispatcher.scheduler.runCurrent()
+
+            assertTrue(transport.keepAliveCalled, "A delayed wakeup must send a fresh heartbeat probe")
+            service.handleFromRadio(byteArrayOf(1))
+
+            clock = 150_000L
+            advanceTimeBy(30_000L)
+            testDispatcher.scheduler.runCurrent()
+
+            assertFalse(
+                transport.closeCalled,
+                "A response during the probe grace interval must preserve the session",
+            )
+            assertEquals(1, createdTransports.size)
+        } finally {
+            service.disconnect()
+            advanceTimeBy(1_000L)
+        }
+    }
 
     @Test
     fun `BLE liveness timeout closes old transport and creates fresh one`() = runTest(testDispatcher) {
