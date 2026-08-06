@@ -20,6 +20,7 @@ import co.touchlab.kermit.Logger
 import okio.ByteString.Companion.toByteString
 import org.koin.core.annotation.Single
 import org.meshtastic.core.common.util.safeCatching
+import org.meshtastic.core.model.util.anonymize
 import org.meshtastic.core.repository.HistoryManager
 import org.meshtastic.core.repository.MeshPrefs
 import org.meshtastic.core.repository.PacketHandler
@@ -61,9 +62,7 @@ class HistoryManagerImpl(private val meshPrefs: MeshPrefs, private val packetHan
 
     private val logger = Logger.withTag(HISTORY_TAG)
 
-    private fun historyLog(message: String, throwable: Throwable? = null) {
-        logger.i(throwable) { message }
-    }
+    private fun historyLog(message: String) = logger.i { message }
 
     private fun activeDeviceAddress(): String? =
         meshPrefs.deviceAddress.value?.takeIf { !it.equals(NO_DEVICE_SELECTED, ignoreCase = true) && it.isNotBlank() }
@@ -91,7 +90,7 @@ class HistoryManagerImpl(private val meshPrefs: MeshPrefs, private val packetHan
         val request = buildStoreForwardHistoryRequest(lastRequest, window, max)
 
         historyLog(
-            "requestHistory trigger=$trigger transport=$transport addr=$address " +
+            "requestHistory trigger=$trigger transport=$transport addr=${address.anonymize()} " +
                 "lastRequest=$lastRequest window=$window max=$max",
         )
 
@@ -106,7 +105,9 @@ class HistoryManagerImpl(private val meshPrefs: MeshPrefs, private val packetHan
                 ),
             )
         }
-            .onFailure { ex -> logger.w(ex) { "requestHistory failed" } }
+            .onFailure { failure ->
+                logger.w { "requestHistory failed cause=${failure::class.simpleName ?: "Exception"}" }
+            }
     }
 
     override fun updateStoreForwardLastRequest(source: String, lastRequest: Int, transport: String) {
@@ -117,7 +118,7 @@ class HistoryManagerImpl(private val meshPrefs: MeshPrefs, private val packetHan
             meshPrefs.setStoreForwardLastRequest(address, lastRequest)
             historyLog(
                 "historyMarker updated source=$source transport=$transport " +
-                    "addr=$address from=$current to=$lastRequest",
+                    "addr=${address.anonymize()} from=$current to=$lastRequest",
             )
         }
     }
