@@ -46,6 +46,16 @@ class NodeRestartTrackerTest {
     }
 
     @Test
+    fun `cancelExpectedRestart closes an aborted restart window`() = runTest {
+        val tracker = NodeRestartTracker(backgroundScope)
+        tracker.expectRestart()
+
+        tracker.cancelExpectedRestart()
+
+        assertFalse(tracker.restartExpected.value)
+    }
+
+    @Test
     fun `window expires if the node never comes back`() = runTest {
         val tracker = NodeRestartTracker(backgroundScope)
         tracker.expectRestart(window = 10.seconds)

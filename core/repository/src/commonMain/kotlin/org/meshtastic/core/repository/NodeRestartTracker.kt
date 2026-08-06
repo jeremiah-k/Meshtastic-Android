@@ -56,7 +56,12 @@ class NodeRestartTracker(private val scope: CoroutineScope) {
     }
 
     /** Closes the window; call when the node is fully back online (config handshake complete). */
-    fun onConnected() {
+    fun onConnected() = clearExpectation()
+
+    /** Closes the window when a restart-triggering operation aborts before recovery completes. */
+    fun cancelExpectedRestart() = clearExpectation()
+
+    private fun clearExpectation() {
         expiryJob?.cancel()
         expiryJob = null
         _restartExpected.value = false

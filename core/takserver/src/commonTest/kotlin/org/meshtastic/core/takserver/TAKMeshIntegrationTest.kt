@@ -16,34 +16,26 @@
  */
 package org.meshtastic.core.takserver
 
-import co.touchlab.kermit.Severity
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import okio.ByteString.Companion.toByteString
-import org.meshtastic.core.di.CoroutineDispatchers
-import org.meshtastic.core.model.ConnectionState
-import org.meshtastic.core.model.DataPacket
 import org.meshtastic.core.model.MyNodeInfo
 import org.meshtastic.core.model.Node
 import org.meshtastic.core.model.NodeSortOption
-import org.meshtastic.core.model.Position
-import org.meshtastic.core.model.service.LockdownState
-import org.meshtastic.core.model.service.LockdownTokenInfo
-import org.meshtastic.core.model.service.TracerouteResponse
-import org.meshtastic.core.repository.CommandSender
 import org.meshtastic.core.repository.MeshConfigHandler
 import org.meshtastic.core.repository.NodeRepository
 import org.meshtastic.core.repository.RadioSessionContext
-import org.meshtastic.core.repository.ServiceRepository
-import org.meshtastic.core.testing.FakeTakPrefs
-import org.meshtastic.proto.AdminMessage
+import org.meshtastic.core.testing.FakeCommandSender
+import org.meshtastic.core.testing.FakeServiceRepository
 import org.meshtastic.proto.Channel
-import org.meshtastic.proto.ChannelSet
-import org.meshtastic.proto.ClientNotification
 import org.meshtastic.proto.Config
 import org.meshtastic.proto.Data
 import org.meshtastic.proto.DeviceMetadata
@@ -73,117 +65,41 @@ import kotlin.time.Duration.Companion.minutes
 class TAKMeshIntegrationTest {
 
     // ── Fakes ────────────────────────────────────────────────────────────────
-    // FakeTAKServerManager lives in its own file in this source set, shared with MeshToCotBroadcasterTest.
 
-    private class FakeCommandSender : CommandSender {
-        val sentPackets = mutableListOf<DataPacket>()
+    private class FakeTAKServerManager : TAKServerManager {
+        private val _isRunning = MutableStateFlow(false)
+        override val isRunning: StateFlow<Boolean> = _isRunning.asStateFlow()
+        override val connectionCount: StateFlow<Int> = MutableStateFlow(0)
 
-        override suspend fun sendData(p: DataPacket) {
-            sentPackets.add(p)
+        private val _inboundMessages = MutableSharedFlow<InboundCoTMessage>(extraBufferCapacity = 64)
+        override val inboundMessages: SharedFlow<InboundCoTMessage> = _inboundMessages.asSharedFlow()
+
+        val broadcasts = mutableListOf<CoTMessage>()
+        val rawBroadcasts = mutableListOf<String>()
+        var startCount = 0
+        var stopped = false
+
+        override fun start(scope: CoroutineScope) {
+            startCount++
+            _isRunning.value = true
         }
 
-        override fun getCurrentPacketId(): Long = 0L
-
-        override fun getCachedLocalConfig(): LocalConfig = LocalConfig()
-
-        override fun getCachedChannelSet(): ChannelSet = ChannelSet()
-
-        override fun generatePacketId(): Int = 1
-
-        override suspend fun sendAdmin(
-            destNum: Int,
-            requestId: Int,
-            wantResponse: Boolean,
-            initFn: () -> AdminMessage,
-        ) {}
-
-        override fun sendAdminImmediate(destNum: Int, initFn: () -> AdminMessage) {}
-
-        override suspend fun sendAdminAwait(
-            destNum: Int,
-            requestId: Int,
-            wantResponse: Boolean,
-            initFn: () -> AdminMessage,
-        ): Boolean = true
-
-        override suspend fun sendPosition(pos: org.meshtastic.proto.Position, destNum: Int?, wantResponse: Boolean) {}
-
-        override suspend fun requestPosition(destNum: Int, currentPosition: Position) {}
-
-        override suspend fun setFixedPosition(destNum: Int, pos: Position) {}
-
-        override suspend fun requestUserInfo(destNum: Int) {}
-
-        override suspend fun requestTraceroute(requestId: Int, destNum: Int) {}
-
-        override suspend fun requestTelemetry(requestId: Int, destNum: Int, typeValue: Int) {}
-
-        override suspend fun requestNeighborInfo(requestId: Int, destNum: Int) {}
-
-        override fun sendLockdownPassphrase(
-            passphrase: String,
-            boots: Int,
-            hours: Int,
-            maxSessionSeconds: Int,
-            disable: Boolean,
-        ) {}
-
-        override fun sendLockNow() {}
-    }
-
-    private class FakeServiceRepository : ServiceRepository {
-        private val _meshPacketFlow = MutableSharedFlow<MeshPacket>(replay = 1, extraBufferCapacity = 64)
-        override val meshPacketFlow: Flow<MeshPacket> = _meshPacketFlow
-
-        override val connectionState: StateFlow<ConnectionState> = MutableStateFlow(ConnectionState.Disconnected)
-
-        override fun setConnectionState(connectionState: ConnectionState) {}
-
-        override val clientNotification: StateFlow<ClientNotification?> = MutableStateFlow(null)
-
-        override fun setClientNotification(notification: ClientNotification?) {}
-
-        override fun clearClientNotification() {}
-
-        override val errorMessage: StateFlow<String?> = MutableStateFlow(null)
-
-        override fun setErrorMessage(text: String, severity: Severity) {}
-
-        override fun clearErrorMessage() {}
-
-        override val connectionProgress: StateFlow<String?> = MutableStateFlow(null)
-
-        override fun setConnectionProgress(text: String) {}
-
-        override suspend fun emitMeshPacket(packet: MeshPacket) {
-            _meshPacketFlow.emit(packet)
+        override fun stop() {
+            stopped = true
+            _isRunning.value = false
         }
 
-        override val tracerouteResponse: StateFlow<TracerouteResponse?> = MutableStateFlow(null)
+        override fun broadcast(cotMessage: CoTMessage) {
+            broadcasts.add(cotMessage)
+        }
 
-        override fun setTracerouteResponse(value: TracerouteResponse?) {}
+        override fun broadcastRawXml(xml: String) {
+            rawBroadcasts.add(xml)
+        }
 
-        override fun clearTracerouteResponse() {}
-
-        override val neighborInfoResponse: StateFlow<String?> = MutableStateFlow(null)
-
-        override fun setNeighborInfoResponse(value: String?) {}
-
-        override fun clearNeighborInfoResponse() {}
-
-        override val lockdownState: StateFlow<LockdownState> = MutableStateFlow(LockdownState.None)
-
-        override fun setLockdownState(state: LockdownState) {}
-
-        override fun clearLockdownState() {}
-
-        override val lockdownTokenInfo: StateFlow<LockdownTokenInfo?> = MutableStateFlow(null)
-
-        override fun setLockdownTokenInfo(info: LockdownTokenInfo?) {}
-
-        override val sessionAuthorized: StateFlow<Boolean> = MutableStateFlow(false)
-
-        override fun setSessionAuthorized(authorized: Boolean) {}
+        suspend fun emitInbound(cotMessage: CoTMessage, clientInfo: TAKClientInfo? = null) {
+            _inboundMessages.emit(InboundCoTMessage(cotMessage, clientInfo))
+        }
     }
 
     private class FakeMeshConfigHandler : MeshConfigHandler {
@@ -306,13 +222,7 @@ class TAKMeshIntegrationTest {
         val serviceRepository: FakeServiceRepository = FakeServiceRepository(),
         val meshConfigHandler: FakeMeshConfigHandler = FakeMeshConfigHandler(),
         val nodeRepository: FakeNodeRepository = FakeNodeRepository(),
-        val takPrefs: FakeTakPrefs = FakeTakPrefs(),
-        val dispatchers: CoroutineDispatchers =
-            UnconfinedTestDispatcher().let { CoroutineDispatchers(io = it, main = it, default = it) },
     ) {
-        // Mesh-to-CoT is opt-in and FakeTakPrefs defaults it off, so it stays inert here.
-        val broadcaster = MeshToCotBroadcaster(serverManager, nodeRepository, takPrefs, dispatchers)
-
         val integration =
             TAKMeshIntegration(
                 takServerManager = serverManager,
@@ -320,7 +230,6 @@ class TAKMeshIntegrationTest {
                 serviceRepository = serviceRepository,
                 meshConfigHandler = meshConfigHandler,
                 nodeRepository = nodeRepository,
-                meshToCotBroadcaster = broadcaster,
             )
     }
 
