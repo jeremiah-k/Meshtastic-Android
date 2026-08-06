@@ -142,7 +142,6 @@
     <!-- MQTT -->
     <string name="mqtt">MQTT</string>
     <string name="mqtt_status_disconnected">انقطع الاتصال</string>
-    <string name="must_set_region">واجب إدخال المنطقة!</string>
     <!-- MUTE -->
     <string name="mute_1_week">أسبوع 1</string>
     <string name="mute_8_hours">8 ساعات</string>

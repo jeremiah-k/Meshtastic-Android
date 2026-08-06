@@ -263,7 +263,6 @@
     <string name="mqtt_enabled">MQTT ingeschakeld</string>
     <string name="mqtt_status_connected">Verbonden</string>
     <string name="mqtt_status_disconnected">Niet verbonden</string>
-    <string name="must_set_region">Je moet een regio instellen!</string>
     <string name="must_update">Applicatie update noodzakelijk in Google Play store (of Github). Deze versie is te oud om te praten met deze radio.</string>
     <!-- MUTE -->
     <string name="mute_1_week">1 week</string>

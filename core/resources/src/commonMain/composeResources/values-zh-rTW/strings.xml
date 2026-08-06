@@ -805,7 +805,6 @@
     <string name="mqtt_status_reconnecting">重新連接中…</string>
     <string name="mqtt_status_reconnecting_with_attempt">重新連接中（第 %1$d 次嘗試） — %2$s</string>
     <string name="mqtt_test_connection">測試連線</string>
-    <string name="must_set_region">您必須設定一個區域！</string>
     <string name="must_update">您必須在應用商店(或 Github)更新此應用程式。它太舊無法與此無線電韌體通訊。請閱讀我們關於此主題的<a href="https://meshtastic.org/docs/software/android/installation">文件</a>。</string>
     <!-- MUTE -->
     <string name="mute_1_week">1週</string>

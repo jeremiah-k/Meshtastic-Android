@@ -161,7 +161,6 @@
     <string name="mqtt">MQTT</string>
     <string name="mqtt_status_connected">Злучаны</string>
     <string name="mqtt_status_disconnected">Адлучана</string>
-    <string name="must_set_region">Трэба наладзіць рэгіён!</string>
     <!-- MUTE -->
     <string name="mute_1_week">1 тыдзень</string>
     <string name="mute_8_hours">8 гадзін</string>

@@ -1104,7 +1104,6 @@
     <string name="mqtt_status_reconnecting">Taas ühendan…</string>
     <string name="mqtt_status_reconnecting_with_attempt">Ühendan uuesti (katse %1$d) — %2$s</string>
     <string name="mqtt_test_connection">Test ühendus</string>
-    <string name="must_set_region">Pead valima regiooni!</string>
     <string name="must_update">Pead seda rakendust rakenduste poes (või Github) värskendama. See on liiga vana selle raadio püsivara jaoks. Loe selle kohta lisateavet meie <a href="https://meshtastic.org/docs/software/android/installation"> dokumentatsioonist </a>.</string>
     <!-- MUTE -->
     <string name="mute_1_week">1 nädal</string>

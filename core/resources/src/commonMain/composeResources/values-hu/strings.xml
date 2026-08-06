@@ -517,7 +517,6 @@
     <string name="mqtt_enabled">MQTT engedélyezve</string>
     <string name="mqtt_status_connected">Csatlakoztatva</string>
     <string name="mqtt_status_disconnected">Szétkapcsolva</string>
-    <string name="must_set_region">Be kell állítania egy régiót</string>
     <string name="must_update">Frissítenie kell ezt az alkalmazást a Google Play áruházban (vagy a GitHub-ról), mert túl régi, hogy kommunikálni tudjob ezzel a rádió firmware-rel. Kérem olvassa el a tudnivalókat ebből a <a href="https://meshtastic.org/docs/software/android/installation">docs</a>-ből.</string>
     <!-- MUTE -->
     <string name="mute_1_week">1 hét</string>

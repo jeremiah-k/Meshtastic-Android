@@ -402,7 +402,6 @@
     <string name="mqtt_enabled">MQTT habilitado</string>
     <string name="mqtt_status_connected">Conectado</string>
     <string name="mqtt_status_disconnected">Desconectado</string>
-    <string name="must_set_region">Você deve informar uma região!</string>
     <string name="must_update">Será necessário atualizar este aplicativo no Google Play (ou Github). Versão muito antiga para comunicar com o firmware do rádio.  Favor consultar <a href="https://meshtastic.org/docs/software/android/installation">docs</a>.</string>
     <!-- MUTE -->
     <string name="mute_1_week">1 semana</string>

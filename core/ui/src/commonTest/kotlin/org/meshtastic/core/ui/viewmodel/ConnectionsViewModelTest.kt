@@ -35,6 +35,7 @@ import org.meshtastic.core.database.entity.FirmwareRelease
 import org.meshtastic.core.model.ConnectionState
 import org.meshtastic.core.model.DeviceHardware
 import org.meshtastic.core.model.FirmwareUpdateDestination
+import org.meshtastic.core.model.service.LockdownState
 import org.meshtastic.core.repository.NodeRestartTracker
 import org.meshtastic.core.repository.Notification
 import org.meshtastic.core.repository.NotificationManager
@@ -47,6 +48,7 @@ import org.meshtastic.core.testing.FakeRadioPrefs
 import org.meshtastic.core.testing.FakeServiceRepository
 import org.meshtastic.core.testing.FakeUiPrefs
 import org.meshtastic.core.testing.TestDataFactory
+import org.meshtastic.proto.Config
 import org.meshtastic.proto.HardwareModel
 import org.meshtastic.proto.LocalConfig
 import org.meshtastic.proto.User
@@ -62,6 +64,7 @@ class ConnectionsViewModelTest {
     private val testDispatcher = StandardTestDispatcher()
     private lateinit var viewModel: ConnectionsViewModel
     private val radioConfigRepository: RadioConfigRepository = mock(MockMode.autofill)
+    private val localConfigFlow = MutableStateFlow(LocalConfig())
     private val serviceRepository = FakeServiceRepository()
     private val nodeRestartTracker = NodeRestartTracker(CoroutineScope(SupervisorJob()))
     private val nodeRepository = FakeNodeRepository()
@@ -89,7 +92,9 @@ class ConnectionsViewModelTest {
         dispatchedNotifications.clear()
         notificationsCanBeScheduled = true
 
-        every { radioConfigRepository.localConfigFlow } returns MutableStateFlow(LocalConfig())
+        localConfigFlow.value = LocalConfig()
+        nodeRestartTracker.onConnected()
+        every { radioConfigRepository.localConfigFlow } returns localConfigFlow
         uiPrefs.hasShownNotPairedWarning.value = false
         uiPrefs.firmwareUpdateNotificationKeys.value = emptySet()
 
@@ -123,6 +128,71 @@ class ConnectionsViewModelTest {
 
         assertEquals(true, viewModel.hasShownNotPairedWarning.value)
         assertEquals(true, uiPrefs.hasShownNotPairedWarning.value)
+    }
+
+    @Test
+    fun `region configuration is available when firmware reports no lockdown state`() = runTest {
+        viewModel.regionConfigurationAllowed.test {
+            assertEquals(false, awaitItem())
+            assertEquals(true, awaitItem())
+
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `locked session keeps region configuration disabled until authorized`() = runTest {
+        serviceRepository.setLockdownState(LockdownState.Locked())
+
+        viewModel.regionConfigurationAllowed.test {
+            assertEquals(false, awaitItem())
+
+            serviceRepository.setSessionAuthorized(true)
+            assertEquals(true, awaitItem())
+
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `region configuration becomes available when lockdown is disabled`() = runTest {
+        viewModel.regionConfigurationAllowed.test {
+            assertEquals(false, awaitItem())
+
+            serviceRepository.setLockdownState(LockdownState.Disabled)
+            assertEquals(true, awaitItem())
+
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `expected restart suppresses region warning without replacing connected status`() = runTest {
+        localConfigFlow.value = LocalConfig(lora = Config.LoRaConfig(region = Config.LoRaConfig.RegionCode.UNSET))
+        nodeRestartTracker.expectRestart()
+
+        viewModel.connectionStatus.test {
+            val connectionStatusItems = this
+            viewModel.regionRequired.test {
+                assertEquals(ConnectionStatus.NOT_CONNECTED, connectionStatusItems.awaitItem())
+                assertEquals(false, awaitItem())
+
+                serviceRepository.setConnectionState(ConnectionState.Connected)
+                assertEquals(ConnectionStatus.RESTARTING, connectionStatusItems.awaitItem())
+                expectNoEvents()
+
+                nodeRestartTracker.onConnected()
+                assertEquals(ConnectionStatus.CONNECTED, connectionStatusItems.awaitItem())
+                assertEquals(true, awaitItem())
+
+                localConfigFlow.value = LocalConfig(lora = Config.LoRaConfig(region = Config.LoRaConfig.RegionCode.US))
+                assertEquals(false, awaitItem())
+                expectNoEvents()
+
+                cancelAndIgnoreRemainingEvents()
+            }
+            cancelAndIgnoreRemainingEvents()
+        }
     }
 
     @Test

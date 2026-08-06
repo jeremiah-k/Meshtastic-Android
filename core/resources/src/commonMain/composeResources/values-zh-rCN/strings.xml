@@ -1110,7 +1110,6 @@
     <string name="mqtt_status_reconnecting">正在重新连接…</string>
     <string name="mqtt_status_reconnecting_with_attempt">正在重新连接 (尝试 %1$d) — %2$s</string>
     <string name="mqtt_test_connection">连接测试</string>
-    <string name="must_set_region">您必须先选择一个地区</string>
     <string name="must_update">您必须在应用商店或 Github上更新此应用程序。程序太旧了以至于无法与此装置进行通讯。 请阅读有关此主题的 <a href="https://meshtastic.org/docs/software/android/installation">文档</a>。</string>
     <!-- MUTE -->
     <string name="mute_1_week">1周</string>
