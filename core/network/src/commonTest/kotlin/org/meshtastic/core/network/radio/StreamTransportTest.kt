@@ -78,6 +78,7 @@ class StreamTransportTest {
         stoppedScope.cancel()
 
         assertFalse(transport.handleSendToRadio(byteArrayOf(1, 2, 3)))
+        assertTrue(transport.sentBytes.isEmpty())
     }
 
     @Test

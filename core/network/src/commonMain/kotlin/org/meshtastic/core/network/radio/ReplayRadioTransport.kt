@@ -17,6 +17,7 @@
 package org.meshtastic.core.network.radio
 
 import co.touchlab.kermit.Logger
+import kotlinx.atomicfu.atomic
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import okio.Buffer
@@ -104,7 +105,7 @@ class ReplayRadioTransport(
         packetFrames = buffer.readSection(counted = false, label = "packet")
     }
 
-    private var packetsStarted = false
+    private val packetsStarted = atomic(false)
 
     override fun start() {
         Logger.i {
@@ -130,10 +131,7 @@ class ReplayRadioTransport(
                     scope.handledLaunch {
                         emit(nodeFrames)
                         complete(HandshakeConstants.NODE_INFO_NONCE)
-                        if (!packetsStarted) {
-                            packetsStarted = true
-                            streamPackets()
-                        }
+                        if (packetsStarted.compareAndSet(expect = false, update = true)) streamPackets()
                     }
 
                 // All other ToRadio traffic (heartbeats, outbound packets) is ignored — this is a read-only replay.

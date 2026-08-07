@@ -1074,7 +1074,7 @@ class SharedRadioInterfaceService(
 
     private fun keepAliveThroughAdmittedTransport(admission: TransportSendAdmission.Admitted): Boolean = try {
         safeCatching { admission.transport.keepAlive() }
-            .onFailure { Logger.w { "keepAlive: active transport rejected heartbeat" } }
+            .onFailure { Logger.w(it) { "keepAlive: active transport rejected heartbeat" } }
             .isSuccess
     } finally {
         releaseSessionOperation(admission.session)

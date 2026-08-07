@@ -30,13 +30,15 @@ class TcpRadioTransportTest {
     private val callback: RadioTransportCallback = mock(MockMode.autofill)
 
     @Test
-    fun `send is rejected after close starts`() = runTest {
+    fun `send is rejected while disconnected and after close starts`() = runTest {
         val dispatcher = StandardTestDispatcher(testScheduler)
         val dispatchers = CoroutineDispatchers(io = dispatcher, main = dispatcher, default = dispatcher)
         val transport = TcpRadioTransport(callback, this, dispatchers, address = "127.0.0.1")
 
+        assertFalse(transport.handleSendToRadio(byteArrayOf(1, 2, 3)))
+
         transport.close()
 
-        assertFalse(transport.handleSendToRadio(byteArrayOf(1, 2, 3)))
+        assertFalse(transport.handleSendToRadio(byteArrayOf(4, 5, 6)))
     }
 }

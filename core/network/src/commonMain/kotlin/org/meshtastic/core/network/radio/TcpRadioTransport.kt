@@ -91,7 +91,7 @@ open class TcpRadioTransport(
     }
 
     override fun handleSendToRadio(p: ByteArray): Boolean {
-        if (closing) return false
+        if (closing || !transport.isConnected) return false
         return !scope.handledLaunch { transport.sendPacket(p) }.isCancelled
     }
 }

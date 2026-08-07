@@ -89,6 +89,16 @@ interface RadioTransport {
 handoff, not that the device received them. `false` means the transport is unavailable, closed, or unable to schedule
 the handoff; delivery confirmation is a separate protocol concern.
 
+`RadioTransportWriter` is the service-facing half of the same admission contract. `trySendToRadio` must likewise return
+promptly and reports only whether the active transport accepted the bytes for asynchronous delivery.
+
+```kotlin
+interface RadioTransportWriter {
+    fun sendToRadio(bytes: ByteArray)
+    fun trySendToRadio(bytes: ByteArray): Boolean
+}
+```
+
 ### `ServiceRepository`
 
 The primary reactive bridge between the long-running mesh service and all feature/UI layers.

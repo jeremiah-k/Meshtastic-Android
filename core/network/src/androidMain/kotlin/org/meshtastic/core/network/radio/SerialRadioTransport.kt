@@ -40,6 +40,8 @@ class SerialRadioTransport(
 ) : StreamTransport(callback, scope) {
     private var connRef = AtomicReference<SerialConnection?>()
     private val connectionAdmissionLock = Any()
+    private var activeConnectionToken: Any? = null
+    private val connectionReady = AtomicBoolean(false)
 
     private val heartbeatSender = HeartbeatSender(sendToRadio = { handleSendToRadio(it) }, logTag = "Serial[$address]")
 
@@ -80,7 +82,12 @@ class SerialRadioTransport(
     }
 
     private fun closeConnection(waitForStopped: Boolean): Boolean {
-        val connection = synchronized(connectionAdmissionLock) { connRef.getAndSet(null) } ?: return false
+        val connection =
+            synchronized(connectionAdmissionLock) {
+                connectionReady.set(false)
+                activeConnectionToken = null
+                connRef.getAndSet(null)
+            } ?: return false
         connection.close(waitForStopped)
         return true
     }
@@ -99,6 +106,7 @@ class SerialRadioTransport(
             var bytesReceived = 0L
             var connectionStartTime = 0L
 
+            val connectionToken = Any()
             val onConnect: () -> Unit = {
                 connectionStartTime = nowMillis
                 val connectionTime = connectionStartTime - connectStart
@@ -124,7 +132,11 @@ class SerialRadioTransport(
                     }
 
                     override fun onConnected() {
-                        onConnect.invoke()
+                        synchronized(connectionAdmissionLock) {
+                            if (activeConnectionToken !== connectionToken || connRef.get() == null) return
+                            connectionReady.set(true)
+                            onConnect.invoke()
+                        }
                     }
 
                     override fun onDataReceived(bytes: ByteArray) {
@@ -174,15 +186,25 @@ class SerialRadioTransport(
                 .also { conn ->
                     synchronized(connectionAdmissionLock) {
                         connRef.set(conn)
-                        try {
-                            conn.connect()
-                        } catch (e: Exception) {
-                            // A synchronous listener callback can already have cleared and closed this connection.
-                            if (connRef.compareAndSet(conn, null)) {
-                                conn.close(waitForStopped = false)
+                        activeConnectionToken = connectionToken
+                        connectionReady.set(false)
+                    }
+                    try {
+                        conn.connect()
+                    } catch (e: Exception) {
+                        // A synchronous listener callback can already have cleared and closed this connection.
+                        val shouldClose =
+                            synchronized(connectionAdmissionLock) {
+                                if (activeConnectionToken !== connectionToken || !connRef.compareAndSet(conn, null)) {
+                                    false
+                                } else {
+                                    connectionReady.set(false)
+                                    activeConnectionToken = null
+                                    true
+                                }
                             }
-                            throw e
-                        }
+                        if (shouldClose) conn.close(waitForStopped = false)
+                        throw e
                     }
                 }
         }
@@ -190,13 +212,12 @@ class SerialRadioTransport(
 
     // The result reports synchronous admission against the current connection, not eventual delivery: framing and
     // sendBytes run later on the transport scope, where teardown may legitimately make the connection unavailable.
-    override fun handleSendToRadio(p: ByteArray): Boolean = synchronized(connectionAdmissionLock) {
-        if (connRef.get() == null) {
+    override fun handleSendToRadio(p: ByteArray): Boolean {
+        if (!connectionReady.get() || connRef.get() == null) {
             Logger.w { "[$address] Serial connection not available, cannot send ${p.size} bytes" }
-            false
-        } else {
-            super.handleSendToRadio(p)
+            return false
         }
+        return super.handleSendToRadio(p)
     }
 
     override fun keepAlive() {
