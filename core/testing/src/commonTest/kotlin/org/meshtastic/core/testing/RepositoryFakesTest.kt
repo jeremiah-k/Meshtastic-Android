@@ -35,6 +35,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
@@ -314,6 +315,7 @@ class RepositoryFakesTest {
         // stack frames. Production's editSettingsSuppressesCommitFailureOnBlockFailure uses message comparison for
         // the same reason.
         assertEquals(listOf(commitFailure.message), failure.suppressedExceptions.map(Throwable::message))
+        assertIs<IllegalArgumentException>(failure.suppressedExceptions.single())
         assertEquals(listOf("begin", "commit"), controller.adminOperations)
     }
 
