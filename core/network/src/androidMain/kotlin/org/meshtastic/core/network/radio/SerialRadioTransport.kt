@@ -81,14 +81,30 @@ class SerialRadioTransport(
         }
     }
 
+    private fun claimConnection(connectionToken: Any? = null): SerialConnection? =
+        synchronized(connectionAdmissionLock) {
+            if (connectionToken != null && activeConnectionToken !== connectionToken) return@synchronized null
+            connectionReady.set(false)
+            activeConnectionToken = null
+            connRef.getAndSet(null)
+        }
+
     private fun closeConnection(waitForStopped: Boolean): Boolean {
-        val connection =
-            synchronized(connectionAdmissionLock) {
-                connectionReady.set(false)
-                activeConnectionToken = null
-                connRef.getAndSet(null)
-            } ?: return false
+        val connection = claimConnection() ?: return false
         connection.close(waitForStopped)
+        return true
+    }
+
+    private fun disconnectOwnedConnection(
+        connectionToken: Any,
+        waitForStopped: Boolean,
+        isPermanent: Boolean,
+        errorMessage: String? = null,
+        reason: TransportDisconnectReason? = null,
+    ): Boolean {
+        val connection = claimConnection(connectionToken) ?: return false
+        connection.close(waitForStopped)
+        super.onDeviceDisconnect(waitForStopped, isPermanent, errorMessage, reason)
         return true
     }
 
@@ -118,17 +134,19 @@ class SerialRadioTransport(
                 device,
                 object : SerialConnectionListener {
                     override fun onMissingPermission() {
+                        if (
+                            !disconnectOwnedConnection(
+                                connectionToken = connectionToken,
+                                waitForStopped = false,
+                                isPermanent = true,
+                                reason = TransportDisconnectReason.UsbPermissionDenied,
+                            )
+                        ) {
+                            return
+                        }
                         Logger.e {
                             "[$address] Serial connection failed - missing USB permissions for device: $device"
                         }
-                        // Permission denial is terminal for this connection attempt: stop the reconnect loop
-                        // and let the service/UI layer choose the user-facing copy for the structured reason.
-                        onDeviceDisconnect(
-                            waitForStopped = false,
-                            isPermanent = true,
-                            errorMessage = null,
-                            reason = TransportDisconnectReason.UsbPermissionDenied,
-                        )
                     }
 
                     override fun onConnected() {
@@ -158,6 +176,15 @@ class SerialRadioTransport(
                         if (explicitCloseInProgress.get()) {
                             return
                         }
+                        if (
+                            !disconnectOwnedConnection(
+                                connectionToken = connectionToken,
+                                waitForStopped = false,
+                                isPermanent = false,
+                            )
+                        ) {
+                            return
+                        }
 
                         val uptime =
                             if (connectionStartTime > 0) {
@@ -175,11 +202,6 @@ class SerialRadioTransport(
                                 "Uptime: ${uptime}ms, " +
                                 "Packets RX: $packetsReceived ($bytesReceived bytes)"
                         }
-                        // USB unplug / cable error is transient — the transport will reconnect when
-                        // the device is replugged or the OS re-enumerates the port. Only close()
-                        // (user disconnects) and missing-permission (see onMissingPermission) signal
-                        // a permanent disconnect; cable unplug / I/O errors are transient.
-                        onDeviceDisconnect(waitForStopped = false, isPermanent = false)
                     }
                 },
             )

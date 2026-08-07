@@ -23,6 +23,7 @@ import dev.mokkery.answering.throws
 import dev.mokkery.every
 import dev.mokkery.mock
 import dev.mokkery.verify
+import dev.mokkery.verify.VerifyMode.Companion.exactly
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
@@ -97,6 +98,46 @@ class SerialRadioTransportTest {
             releaseConnect.countDown()
             executor.shutdownNow()
         }
+    }
+
+    @Test
+    fun `stale terminal callbacks do not tear down a replacement connection`() = runTest {
+        val address = "serial-device"
+        val firstConnection = mock<SerialConnection>(MockMode.autofill)
+        val secondConnection = mock<SerialConnection>(MockMode.autofill)
+        val listeners = mutableListOf<SerialConnectionListener>()
+        var nextConnection = 0
+        val transport =
+            SerialRadioTransport(
+                callback = callback,
+                scope = this,
+                serialDevices = MutableStateFlow(mapOf(address to serialDriver)),
+                createSerialConnection = { driver, listener ->
+                    assertSame(serialDriver, driver)
+                    listeners += listener
+                    if (nextConnection++ == 0) firstConnection else secondConnection
+                },
+                address = address,
+            )
+        every { firstConnection.connect() } calls { listeners[0].onConnected() }
+        every { secondConnection.connect() } calls { listeners[1].onConnected() }
+
+        transport.start()
+        assertTrue(transport.handleSendToRadio(byteArrayOf(1)))
+        listeners[0].onDisconnected(null)
+        assertFalse(transport.handleSendToRadio(byteArrayOf(2)))
+
+        transport.start()
+        assertTrue(transport.handleSendToRadio(byteArrayOf(3)))
+        listeners[0].onDisconnected(IllegalStateException("late disconnect"))
+        assertTrue(transport.handleSendToRadio(byteArrayOf(4)))
+        listeners[0].onMissingPermission()
+        assertTrue(transport.handleSendToRadio(byteArrayOf(5)))
+
+        verify(exactly(1)) { callback.onDisconnect(isPermanent = false, errorMessage = null, reason = null) }
+        verify { firstConnection.close(waitForStopped = false) }
+        transport.close()
+        verify { secondConnection.close(waitForStopped = true) }
     }
 
     @Test
