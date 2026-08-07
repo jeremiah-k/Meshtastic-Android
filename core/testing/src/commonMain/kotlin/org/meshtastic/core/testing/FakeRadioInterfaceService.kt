@@ -127,7 +127,7 @@ class FakeRadioInterfaceService(override val serviceScope: CoroutineScope = Main
 
     /** Thread-safe snapshot of writes accepted by the currently admitted fake transport session. */
     val sentToRadio: List<ByteArray>
-        get() = synchronized(sessionAdmissionLock) { _sentToRadio.toList() }
+        get() = synchronized(sessionAdmissionLock) { _sentToRadio.map { it.copyOf() } }
 
     var connectCalled = false
     var restartTransportCalled: Boolean = false
@@ -142,7 +142,7 @@ class FakeRadioInterfaceService(override val serviceScope: CoroutineScope = Main
     override fun trySendToRadio(bytes: ByteArray): Boolean {
         val admittedSession = admitSessionOperation() ?: return false
         return try {
-            synchronized(sessionAdmissionLock) { _sentToRadio.add(bytes) }
+            synchronized(sessionAdmissionLock) { _sentToRadio.add(bytes.copyOf()) }
             true
         } finally {
             releaseSessionOperation(admittedSession)

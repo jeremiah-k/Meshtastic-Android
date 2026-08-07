@@ -93,6 +93,7 @@ class ConnectionStateHolder(
             try {
                 do {
                     val snapshot = mutableConnectionLifecycle.value
+                    // Epochs first: state collectors that then read connectionEpochs must not observe lagging counters.
                     mutableConnectionEpochs.value = snapshot.epochs
                     mutableConnectionState.value = snapshot.state
                     publishedVersion.value = snapshot.version

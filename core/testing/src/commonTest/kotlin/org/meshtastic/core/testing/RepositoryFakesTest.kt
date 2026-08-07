@@ -313,10 +313,7 @@ class RepositoryFakesTest {
         // the runtime rebuilds the exception (same class, same message, new instance) to attach the coroutine's
         // stack frames. Production's editSettingsSuppressesCommitFailureOnBlockFailure uses message comparison for
         // the same reason.
-        assertEquals(
-            listOf(commitFailure.message),
-            failure.suppressedExceptions.map(Throwable::message),
-        )
+        assertEquals(listOf(commitFailure.message), failure.suppressedExceptions.map(Throwable::message))
         assertEquals(listOf("begin", "commit"), controller.adminOperations)
     }
 

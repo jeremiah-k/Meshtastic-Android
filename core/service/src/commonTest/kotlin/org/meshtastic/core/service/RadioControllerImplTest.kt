@@ -653,14 +653,14 @@ class RadioControllerImplTest {
         val node = Node(num = 1234, user = user)
         every { nodeManager.nodeDBbyNodeNum } returns mapOf(1234 to node)
         every { nodeManager.getMyId() } returns "!abcd1234"
-        // Production CommandSenderImpl.sendData stamps QUEUED on successful queue admission. DataPacket.status
-        // defaults to UNKNOWN (not null), so the controller's `dataPacket.status ?: QUEUED` fallback never fires
-        // in practice — the happy-path reaction inherits QUEUED from the stamp. Mirror the stamp here so the
-        // persistence assertion exercises the realistic contract; the explicit ERROR-stamping path is covered by
-        // sendReactionPersistsStatusStampedByCommandSender.
-        everySuspend { commandSender.sendData(any()) } calls {
-            (it.args[0] as DataPacket).status = MessageStatus.QUEUED
-        }
+        // Production CommandSenderImpl.sendData stamps QUEUED on successful queue admission. DataPacket.status is
+        // nullable but defaults to UNKNOWN, so the default value does not exercise the controller's null fallback.
+        // Mirror the production stamp here so this assertion exercises the realistic happy-path contract; the explicit
+        // ERROR-stamping path is covered by sendReactionPersistsStatusStampedByCommandSender.
+        everySuspend { commandSender.sendData(any()) } calls
+            {
+                (it.args[0] as DataPacket).status = MessageStatus.QUEUED
+            }
 
         val reactions = mutableListOf<Reaction>()
         everySuspend { packetRepository.insertReaction(capture(reactions), any()) } returns Unit

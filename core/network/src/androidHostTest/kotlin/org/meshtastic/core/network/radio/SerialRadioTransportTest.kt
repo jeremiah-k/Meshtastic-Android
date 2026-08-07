@@ -74,11 +74,12 @@ class SerialRadioTransportTest {
         val address = "serial-device"
         val connectEntered = CountDownLatch(1)
         val releaseConnect = CountDownLatch(1)
-        every { serialConnection.connect() } calls {
-            connectEntered.countDown()
-            check(releaseConnect.await(5, TimeUnit.SECONDS))
-            serialConnectionListener.onConnected()
-        }
+        every { serialConnection.connect() } calls
+            {
+                connectEntered.countDown()
+                check(releaseConnect.await(5, TimeUnit.SECONDS))
+                serialConnectionListener.onConnected()
+            }
         val transport = createTransport(address, this)
         val executor = Executors.newFixedThreadPool(2)
 
