@@ -91,16 +91,7 @@ class FakeRadioInterfaceService(override val serviceScope: CoroutineScope = Main
         session: RadioSessionContext,
         block: suspend (RadioSessionLease) -> Unit,
     ): Boolean {
-        val admittedSession =
-            synchronized(sessionAdmissionLock) {
-                val active = _activeSession.value
-                if (!sessionAdmissionOpen || active != session) {
-                    null
-                } else {
-                    admittedSessionOperations++
-                    active
-                }
-            } ?: return false
+        val admittedSession = admitSessionOperation(session) ?: return false
 
         val lease =
             object : RadioSessionLease {
@@ -114,20 +105,7 @@ class FakeRadioInterfaceService(override val serviceScope: CoroutineScope = Main
             block(lease)
             return true
         } finally {
-            val waiter =
-                synchronized(sessionAdmissionLock) {
-                    check(_activeSession.value == admittedSession) {
-                        "Fake session changed before an admitted operation released its lease"
-                    }
-                    check(admittedSessionOperations > 0) { "Session operation count underflow" }
-                    admittedSessionOperations--
-                    if (admittedSessionOperations == 0) {
-                        sessionDrainWaiter.also { sessionDrainWaiter = null }
-                    } else {
-                        null
-                    }
-                }
-            waiter?.complete(Unit)
+            releaseSessionOperation(admittedSession)
         }
     }
 
@@ -145,15 +123,30 @@ class FakeRadioInterfaceService(override val serviceScope: CoroutineScope = Main
     private val _connectionError = MutableSharedFlow<String>()
     override val connectionError: Flow<String> = _connectionError.asFlow()
 
-    val sentToRadio = mutableListOf<ByteArray>()
+    private val _sentToRadio = mutableListOf<ByteArray>()
+
+    /** Thread-safe snapshot of writes accepted by the currently admitted fake transport session. */
+    val sentToRadio: List<ByteArray>
+        get() = synchronized(sessionAdmissionLock) { _sentToRadio.map { it.copyOf() } }
+
     var connectCalled = false
     var restartTransportCalled: Boolean = false
         private set
 
     override fun isMockTransport(): Boolean = true
 
-    override fun sendToRadio(bytes: ByteArray) {
-        sentToRadio.add(bytes)
+    /**
+     * Records [bytes] only while a transport session is admitted. Tests must select a non-null device address and call
+     * [connect] before sending; attempts outside that lifecycle return false and leave [sentToRadio] unchanged.
+     */
+    override fun trySendToRadio(bytes: ByteArray): Boolean {
+        val admittedSession = admitSessionOperation() ?: return false
+        return try {
+            synchronized(sessionAdmissionLock) { _sentToRadio.add(bytes.copyOf()) }
+            true
+        } finally {
+            releaseSessionOperation(admittedSession)
+        }
     }
 
     override fun connect() {
@@ -179,6 +172,35 @@ class FakeRadioInterfaceService(override val serviceScope: CoroutineScope = Main
     override fun setDeviceAddress(deviceAddr: String?): Boolean {
         _currentDeviceAddressFlow.value = deviceAddr
         return true
+    }
+
+    private fun admitSessionOperation(expectedSession: RadioSessionContext? = null): RadioSessionContext? =
+        synchronized(sessionAdmissionLock) {
+            val active = _activeSession.value
+            val matchesExpectedSession = expectedSession == null || active == expectedSession
+            if (!sessionAdmissionOpen || active == null || !matchesExpectedSession) {
+                null
+            } else {
+                admittedSessionOperations++
+                active
+            }
+        }
+
+    private fun releaseSessionOperation(admittedSession: RadioSessionContext) {
+        val waiter =
+            synchronized(sessionAdmissionLock) {
+                check(_activeSession.value == admittedSession) {
+                    "Fake session changed before an admitted operation released its lease"
+                }
+                check(admittedSessionOperations > 0) { "Session operation count underflow" }
+                admittedSessionOperations--
+                if (admittedSessionOperations == 0) {
+                    sessionDrainWaiter.also { sessionDrainWaiter = null }
+                } else {
+                    null
+                }
+            }
+        waiter?.complete(Unit)
     }
 
     private fun admitSelectedSession() {
