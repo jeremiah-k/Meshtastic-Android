@@ -17,6 +17,8 @@
 package org.meshtastic.core.service
 
 import co.touchlab.kermit.Logger
+import kotlinx.atomicfu.locks.SynchronizedObject
+import kotlinx.atomicfu.locks.synchronized
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.first
@@ -26,6 +28,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import okio.ByteString
 import okio.ByteString.Companion.toByteString
 import org.meshtastic.core.common.util.handledLaunch
+import org.meshtastic.core.common.util.nowMillis
 import org.meshtastic.core.common.util.nowSeconds
 import org.meshtastic.core.model.Position
 import org.meshtastic.core.repository.AdminController
@@ -33,8 +36,12 @@ import org.meshtastic.core.repository.AdminEditScope
 import org.meshtastic.core.repository.AwaitedSendStatus
 import org.meshtastic.core.repository.CommandSender
 import org.meshtastic.core.repository.ConnectionStateProvider
+import org.meshtastic.core.repository.EditSettingsTransactionException
+import org.meshtastic.core.repository.LocalNodeUnavailableException
 import org.meshtastic.core.repository.NodeManager
 import org.meshtastic.core.repository.RadioConfigRepository
+import org.meshtastic.core.repository.toFixedPositionAdminMessage
+import org.meshtastic.core.repository.toFixedPositionProto
 import org.meshtastic.proto.AdminMessage
 import org.meshtastic.proto.Channel
 import org.meshtastic.proto.Config
@@ -62,9 +69,9 @@ internal fun editSettingsCommitFailureMessage(status: AwaitedSendStatus, dispatc
  * [editSettings] transaction.
  *
  * Focused collaborator of [RadioControllerImpl]. Builds [AdminMessage] protos directly and delegates to [CommandSender]
- * for transport, mirroring the SDK's `AdminApiImpl` pattern. Config/channel writes use fire-and-forget optimistic local
- * persistence ([handledLaunch]): the device is the source of truth and re-sends its full config on every connection, so
- * persistence is a cache optimization, not a correctness requirement.
+ * for transport, mirroring the SDK's `AdminApiImpl` pattern. Standalone writes may update local caches optimistically;
+ * transactional writes stage their local projections until commit acceptance so failed edits cannot publish settings
+ * the device did not commit. The device remains the source of truth and re-sends its full config on every connection.
  */
 @Suppress("TooManyFunctions")
 internal class AdminControllerImpl(
@@ -243,8 +250,10 @@ internal class AdminControllerImpl(
         requireEditBoundaryAccepted(destNum, "begin") { AdminMessage(begin_edit_settings = true) }
 
         // Firmware has no abort boundary. Preserve any block failure, including cancellation, only long enough to
-        // attempt the commit that closes the accepted session; the original failure is restored below.
-        val blockResult = runCatching { EditSettingsSession(destNum).block() }
+        // attempt the commit that closes the accepted session; the original failure is restored below. Local cache
+        // projections are staged by the session and become visible only after both the block and commit succeed.
+        val session = EditSettingsSession(destNum)
+        val blockResult = runCatching { session.block() }
         val commitResult = runCatching { withContext(NonCancellable) { requireCommitBoundaryAccepted(destNum) } }
 
         blockResult.exceptionOrNull()?.let { blockFailure ->
@@ -252,18 +261,38 @@ internal class AdminControllerImpl(
             throw blockFailure
         }
         commitResult.getOrThrow()
+        session.applyStagedProjections()
     }
 
     override suspend fun editLocalSettings(block: suspend AdminEditScope.() -> Unit) = editSettings(myNodeNum, block)
 
-    /** Binds the [AdminEditScope] operations to a fixed destination, delegating to this controller's set* methods. */
+    /** Binds [AdminEditScope] writes to one destination and stages optimistic projections until commit acceptance. */
     private inner class EditSettingsSession(private val destNum: Int) : AdminEditScope {
-        override suspend fun setOwner(user: User) = setOwner(destNum, user, commandSender.generatePacketId())
+        private val projectionLock = SynchronizedObject()
+        private val stagedProjections = mutableListOf<suspend () -> Unit>()
+        private val isLocalDestination = destNum == nodeManager.myNodeNum.value
 
-        override suspend fun setConfig(config: Config) = setConfig(destNum, config, commandSender.generatePacketId())
+        override suspend fun setOwner(user: User) {
+            commandSender.sendAdmin(destNum, commandSender.generatePacketId()) { AdminMessage(set_owner = user) }
+            stageProjection { nodeManager.handleReceivedUser(destNum, user) }
+        }
 
-        override suspend fun setModuleConfig(config: ModuleConfig) =
-            setModuleConfig(destNum, config, commandSender.generatePacketId())
+        override suspend fun setConfig(config: Config) {
+            commandSender.sendAdmin(destNum, commandSender.generatePacketId()) { AdminMessage(set_config = config) }
+            if (isLocalDestination) stageProjection { radioConfigRepository.setLocalConfig(config) }
+        }
+
+        override suspend fun setModuleConfig(config: ModuleConfig) {
+            commandSender.sendAdmin(destNum, commandSender.generatePacketId()) {
+                AdminMessage(set_module_config = config)
+            }
+            if (isLocalDestination) {
+                stageProjection {
+                    config.statusmessage?.let { status -> nodeManager.updateNodeStatus(destNum, status.node_status) }
+                    radioConfigRepository.setLocalModuleConfig(config)
+                }
+            }
+        }
 
         // Unlike one-shot writes, a transaction can replace several slots. This scope cannot infer the complete target
         // set, so the operation adding channel writes must reconcile that set after the transaction; mirroring slots
@@ -271,13 +300,46 @@ internal class AdminControllerImpl(
         override suspend fun setChannel(channel: Channel) =
             commandSender.sendAdmin(destNum) { AdminMessage(set_channel = channel) }
 
-        override suspend fun setFixedPosition(position: Position) =
-            this@AdminControllerImpl.setFixedPosition(destNum, position)
+        override suspend fun setFixedPosition(position: Position) {
+            val removesFixedPosition = position.isFixedPositionRemoval()
+            val myNodeNum =
+                if (removesFixedPosition) {
+                    null
+                } else {
+                    nodeManager.myNodeNum.value ?: throw LocalNodeUnavailableException("Fixed position")
+                }
+            commandSender.sendAdmin(destNum) { position.toFixedPositionAdminMessage() }
+            if (myNodeNum != null) {
+                val protoPosition = position.toFixedPositionProto()
+                stageProjection { nodeManager.handleReceivedPosition(destNum, myNodeNum, protoPosition, nowMillis) }
+            }
+        }
+
+        private fun stageProjection(block: suspend () -> Unit) {
+            synchronized(projectionLock) { stagedProjections += block }
+        }
+
+        suspend fun applyStagedProjections() = withContext(NonCancellable) {
+            val projections =
+                synchronized(projectionLock) { stagedProjections.toList().also { stagedProjections.clear() } }
+            projections.forEach { projection -> applyProjection(projection) }
+        }
+
+        @Suppress("TooGenericExceptionCaught")
+        private suspend fun applyProjection(projection: suspend () -> Unit) {
+            try {
+                projection()
+            } catch (e: Exception) {
+                Logger.w(e) { "Local edit-settings projection failed after device commit" }
+            }
+        }
     }
 
     /** Requires the begin boundary to be admitted before any transactional settings writes are issued. */
     private suspend fun requireEditBoundaryAccepted(destNum: Int, boundary: String, message: () -> AdminMessage) {
-        check(commandSender.sendAdminAwait(destNum, initFn = message)) { editSettingsBoundaryFailureMessage(boundary) }
+        if (!commandSender.sendAdminAwait(destNum, initFn = message)) {
+            throw EditSettingsTransactionException(editSettingsBoundaryFailureMessage(boundary))
+        }
     }
 
     /**
@@ -287,24 +349,28 @@ internal class AdminControllerImpl(
      */
     private suspend fun requireCommitBoundaryAccepted(destNum: Int) {
         val isLocalDestination = destNum == nodeManager.myNodeNum.value
-        val departureBaseline = connectionStateProvider.connectionLifecycle.value.epochs.departures
         val result = commandSender.sendAdminAwaitResult(destNum) { AdminMessage(commit_edit_settings = true) }
         val stoppedAfterDispatch =
-            isLocalDestination && result.dispatched && result.status == AwaitedSendStatus.TRANSPORT_STOPPED
+            isLocalDestination &&
+                result.dispatched &&
+                result.departureEpochAtDispatch != null &&
+                result.status == AwaitedSendStatus.TRANSPORT_STOPPED
         val departedLifecycle =
             if (stoppedAfterDispatch) {
                 withTimeoutOrNull(COMMIT_DEPARTURE_TIMEOUT) {
-                    connectionStateProvider.connectionLifecycle.first { it.epochs.departures > departureBaseline }
+                    connectionStateProvider.connectionLifecycle.first {
+                        it.epochs.departures > checkNotNull(result.departureEpochAtDispatch)
+                    }
                 }
             } else {
                 null
             }
-        // A dispatched local commit is durable once any post-baseline departure is observed. Firmware may move the
+        // A dispatched local commit is durable once a post-dispatch departure is observed. Firmware may move the
         // connection through Disconnected, Connecting, or DeviceSleep while rebooting.
         val committedBeforeLocalDeparture = stoppedAfterDispatch && departedLifecycle != null
 
-        check(result.accepted || committedBeforeLocalDeparture) {
-            editSettingsCommitFailureMessage(result.status, result.dispatched)
+        if (!result.accepted && !committedBeforeLocalDeparture) {
+            throw EditSettingsTransactionException(editSettingsCommitFailureMessage(result.status, result.dispatched))
         }
         if (committedBeforeLocalDeparture) {
             Logger.i { "Edit-settings commit dispatched before expected local transport departure" }
