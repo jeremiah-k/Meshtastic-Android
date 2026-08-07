@@ -308,7 +308,15 @@ class RepositoryFakesTest {
         val failure = assertFailsWith<IllegalStateException> { controller.editLocalSettings { throw blockFailure } }
 
         assertSame(blockFailure, failure)
-        assertSame(commitFailure, failure.suppressedExceptions.single())
+        // Compare by message instead of instance: kotlinx-coroutines 1.11 enables StackTraceRecovery by default on
+        // JVM, so when onEditSettingsCommitted's throw crosses the withContext(NonCancellable) suspension boundary
+        // the runtime rebuilds the exception (same class, same message, new instance) to attach the coroutine's
+        // stack frames. Production's editSettingsSuppressesCommitFailureOnBlockFailure uses message comparison for
+        // the same reason.
+        assertEquals(
+            listOf(commitFailure.message),
+            failure.suppressedExceptions.map(Throwable::message),
+        )
         assertEquals(listOf("begin", "commit"), controller.adminOperations)
     }
 

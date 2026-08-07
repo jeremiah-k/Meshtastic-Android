@@ -653,16 +653,21 @@ class RadioControllerImplTest {
         val node = Node(num = 1234, user = user)
         every { nodeManager.nodeDBbyNodeNum } returns mapOf(1234 to node)
         every { nodeManager.getMyId() } returns "!abcd1234"
-        // This class reuses its mocks; isolate the fallback-status case from status-stamping tests.
-        everySuspend { commandSender.sendData(any()) } returns Unit
+        // Production CommandSenderImpl.sendData stamps QUEUED on successful queue admission. DataPacket.status
+        // defaults to UNKNOWN (not null), so the controller's `dataPacket.status ?: QUEUED` fallback never fires
+        // in practice — the happy-path reaction inherits QUEUED from the stamp. Mirror the stamp here so the
+        // persistence assertion exercises the realistic contract; the explicit ERROR-stamping path is covered by
+        // sendReactionPersistsStatusStampedByCommandSender.
+        everySuspend { commandSender.sendData(any()) } calls {
+            (it.args[0] as DataPacket).status = MessageStatus.QUEUED
+        }
 
         val reactions = mutableListOf<Reaction>()
         everySuspend { packetRepository.insertReaction(capture(reactions), any()) } returns Unit
 
         controller.sendReaction(emoji = "👍", replyId = 42, contactKey = "0!dest5678")
 
-        // Reaction must be persisted (not fire-and-forget). An accepted send is QUEUED even if a test double does not
-        // stamp the mutable DataPacket the way CommandSenderImpl does in production.
+        // Reaction must be persisted (not fire-and-forget) with the queue-admission QUEUED status.
         verifySuspend { commandSender.sendData(any()) }
         assertEquals(MessageStatus.QUEUED, reactions.single().status)
     }
