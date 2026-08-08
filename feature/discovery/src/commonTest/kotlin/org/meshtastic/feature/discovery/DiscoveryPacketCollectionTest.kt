@@ -359,6 +359,16 @@ private class InMemoryDiscoveryDao : DiscoveryDao {
 
     override suspend fun getSession(sessionId: Long): DiscoverySessionEntity? = sessions[sessionId]
 
+    override suspend fun updateSessionCompletionStatus(sessionId: Long, status: String) {
+        sessions[sessionId]?.let { sessions[sessionId] = it.copy(completionStatus = status) }
+    }
+
+    override suspend fun updateRecoverableSessionCompletionStatus(sessionId: Long, status: String) {
+        sessions[sessionId]?.takeIf { it.completionStatus in RECOVERABLE_DISCOVERY_SESSION_STATUSES }?.let {
+            sessions[sessionId] = it.copy(completionStatus = status)
+        }
+    }
+
     override fun getSessionFlow(sessionId: Long): Flow<DiscoverySessionEntity?> = MutableStateFlow(sessions[sessionId])
 
     override suspend fun deleteSession(sessionId: Long) {
@@ -431,6 +441,9 @@ private class InMemoryDiscoveryDao : DiscoveryDao {
     }
 
     override suspend fun getInterruptedSession(deviceAddress: String): DiscoverySessionEntity? = sessions.values
-        .filter { it.deviceAddress == deviceAddress && it.completionStatus in setOf("in_progress", "interrupted") }
+        .filter {
+            it.deviceAddress == deviceAddress &&
+                it.completionStatus in RECOVERABLE_DISCOVERY_SESSION_STATUSES
+        }
         .maxByOrNull { it.timestamp }
 }

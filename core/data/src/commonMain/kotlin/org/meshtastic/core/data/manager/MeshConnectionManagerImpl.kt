@@ -43,6 +43,7 @@ import org.meshtastic.core.repository.CommandSender
 import org.meshtastic.core.repository.DataPair
 import org.meshtastic.core.repository.HandshakeConstants
 import org.meshtastic.core.repository.HistoryManager
+import org.meshtastic.core.repository.LocalNodeUnavailableException
 import org.meshtastic.core.repository.LockdownCoordinator
 import org.meshtastic.core.repository.MeshConnectionManager
 import org.meshtastic.core.repository.MeshLocationManager
@@ -53,6 +54,7 @@ import org.meshtastic.core.repository.NodeManager
 import org.meshtastic.core.repository.NodeRepository
 import org.meshtastic.core.repository.NodeRestartTracker
 import org.meshtastic.core.repository.PacketHandler
+import org.meshtastic.core.repository.PacketQueueRejectedException
 import org.meshtastic.core.repository.PacketRepository
 import org.meshtastic.core.repository.PlatformAnalytics
 import org.meshtastic.core.repository.RadioConfigRepository
@@ -106,6 +108,7 @@ class MeshConnectionManagerImpl(
     private var preHandshakeJob: Job? = null
     private var sleepTimeout: Job? = null
     private var locationRequestsJob: Job? = null
+    private var postHandshakeRequestsJob: Job? = null
 
     private val handshakeTimeout = atomic<Job?>(null)
 
@@ -119,6 +122,7 @@ class MeshConnectionManagerImpl(
      * Connecting-state guard inside [onHandshakeProgress] is insufficient on its own.
      */
     private val handshakeCompleteLatch = atomic(false)
+    private val locationRejectionLogged = atomic(false)
 
     /**
      * Consecutive handshake-recovery failure count for [runSiblingHandshakeRecovery].
@@ -165,14 +169,28 @@ class MeshConnectionManagerImpl(
         nodeRepository.myNodeInfo
             .onEach { myNodeEntity ->
                 locationRequestsJob?.cancel()
+                locationRejectionLogged.value = false
                 if (myNodeEntity != null) {
                     locationRequestsJob =
                         uiPrefs
                             .shouldProvideNodeLocation(myNodeEntity.myNodeNum)
                             .onEach { shouldProvide ->
                                 if (shouldProvide) {
-                                    locationManager.start(scope) { pos -> commandSender.sendPosition(pos) }
+                                    locationManager.start(scope) { pos ->
+                                        try {
+                                            commandSender.sendPosition(pos)
+                                            locationRejectionLogged.value = false
+                                        } catch (e: PacketQueueRejectedException) {
+                                            logLocationSendFailure(e, "Location update was rejected by packet queue")
+                                        } catch (e: LocalNodeUnavailableException) {
+                                            logLocationSendFailure(
+                                                e,
+                                                "Location update is waiting for local node identity",
+                                            )
+                                        }
+                                    }
                                 } else {
+                                    locationRejectionLogged.value = false
                                     locationManager.stop()
                                 }
                             }
@@ -425,6 +443,8 @@ class MeshConnectionManagerImpl(
     }
 
     private fun tearDownConnection() {
+        postHandshakeRequestsJob?.cancel()
+        postHandshakeRequestsJob = null
         packetHandler.stopPacketQueue()
         sessionManager.clearAll() // Prevent stale per-node passkeys on reconnect.
         locationManager.stop()
@@ -522,12 +542,22 @@ class MeshConnectionManagerImpl(
         // orphan a job in the gap between cancel and reassign.
         handshakeTimeout.getAndSet(null)?.cancel()
 
-        val myNodeNum = nodeManager.myNodeNum.value ?: 0
-        // Proactively seed the session passkey. The firmware embeds session_passkey in every
-        // admin *response* (wantResponse=true), but set_time_only (sent at MyNodeInfo) has no
-        // response. A get_owner request is the lightest way to trigger a response and populate the
-        // passkey cache so that subsequent write operations don't fail with ADMIN_BAD_SESSION_KEY.
-        commandSender.sendAdmin(myNodeNum, wantResponse = true) { AdminMessage(get_owner_request = true) }
+        postHandshakeRequestsJob?.cancel()
+        postHandshakeRequestsJob = null
+        val myNodeNum = nodeManager.myNodeNum.value
+        val connectedLifecycle = serviceRepository.connectionLifecycle.value
+        if (myNodeNum == null || connectedLifecycle.state !is ConnectionState.Connected) {
+            Logger.w { "Skipping post-handshake requests because the connected local-node state is unavailable" }
+        } else {
+            postHandshakeRequestsJob =
+                scope.handledLaunch {
+                    // The queue-state collector can observe Connected just after this callback. Retain these initial
+                    // requests until admission opens, but only for the exact lifecycle generation that scheduled them.
+                    seedSessionPasskeyUntilAdmitted(myNodeNum, connectedLifecycle.version)
+                    requestTelemetryUntilAdmitted(myNodeNum, TelemetryType.LOCAL_STATS, connectedLifecycle.version)
+                    requestTelemetryUntilAdmitted(myNodeNum, TelemetryType.DEVICE, connectedLifecycle.version)
+                }
+        }
 
         // Start MQTT if enabled
         scope.handledLaunch {
@@ -543,14 +573,67 @@ class MeshConnectionManagerImpl(
         // Request history
         scope.handledLaunch {
             val moduleConfig = radioConfigRepository.moduleConfigFlow.first()
-            moduleConfig.store_forward?.let {
-                historyManager.requestHistoryReplay("onNodeDbReady", myNodeNum, it, "Unknown")
+            moduleConfig.store_forward?.let { config ->
+                myNodeNum?.let { nodeNum ->
+                    historyManager.requestHistoryReplay("onNodeDbReady", nodeNum, config, "Unknown")
+                }
             }
         }
+    }
 
-        // Request immediate LocalStats and DeviceMetrics update on connection with proper request IDs
-        commandSender.requestTelemetry(commandSender.generatePacketId(), myNodeNum, TelemetryType.LOCAL_STATS.ordinal)
-        commandSender.requestTelemetry(commandSender.generatePacketId(), myNodeNum, TelemetryType.DEVICE.ordinal)
+    private fun logLocationSendFailure(failure: Throwable, warning: String) {
+        if (locationRejectionLogged.compareAndSet(expect = false, update = true)) {
+            Logger.w(failure) { warning }
+        } else {
+            Logger.d { "$warning (still pending)" }
+        }
+    }
+
+    private fun ownsPostHandshakeRequests(myNodeNum: Int, connectedVersion: Long): Boolean =
+        serviceRepository.connectionLifecycle.value.let { lifecycle ->
+            lifecycle.version == connectedVersion &&
+                lifecycle.state is ConnectionState.Connected &&
+                nodeManager.myNodeNum.value == myNodeNum
+        }
+
+    private suspend fun seedSessionPasskeyUntilAdmitted(myNodeNum: Int, connectedVersion: Long) {
+        var rejectionLogged = false
+        while (ownsPostHandshakeRequests(myNodeNum, connectedVersion)) {
+            try {
+                commandSender.sendAdmin(myNodeNum, wantResponse = true) { AdminMessage(get_owner_request = true) }
+                return
+            } catch (e: PacketQueueRejectedException) {
+                if (!rejectionLogged) {
+                    Logger.w(e) { "Session-passkey seed request rejected; waiting for packet-queue admission" }
+                    rejectionLogged = true
+                } else {
+                    Logger.d { "Session-passkey seed request still waiting for packet-queue admission" }
+                }
+                delay(POST_HANDSHAKE_ADMISSION_RETRY_DELAY)
+            }
+        }
+    }
+
+    private suspend fun requestTelemetryUntilAdmitted(
+        myNodeNum: Int,
+        type: TelemetryType,
+        connectedVersion: Long,
+    ) {
+        var rejectionLogged = false
+        while (ownsPostHandshakeRequests(myNodeNum, connectedVersion)) {
+            try {
+                commandSender.requestTelemetry(commandSender.generatePacketId(), myNodeNum, type.ordinal)
+                return
+            } catch (e: PacketQueueRejectedException) {
+                if (!rejectionLogged) {
+                    Logger.w(e) { "$type telemetry request rejected; waiting for packet-queue admission" }
+                    rejectionLogged = true
+                } else {
+                    Logger.d { "$type telemetry request still waiting for packet-queue admission" }
+                }
+                delay(POST_HANDSHAKE_ADMISSION_RETRY_DELAY)
+            }
+        }
     }
 
     /**
@@ -679,6 +762,8 @@ class MeshConnectionManagerImpl(
          * negligible connection latency.
          */
         private const val PRE_HANDSHAKE_SETTLE_MS = 100L
+
+        private val POST_HANDSHAKE_ADMISSION_RETRY_DELAY = 1.seconds
 
         private val HANDSHAKE_TIMEOUT_STAGE1 = 30.seconds
 

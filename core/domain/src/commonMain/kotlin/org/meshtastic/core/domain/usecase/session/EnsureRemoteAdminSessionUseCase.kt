@@ -22,6 +22,7 @@ import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
@@ -57,7 +58,7 @@ open class EnsureRemoteAdminSessionUseCase(
     private val serviceRepository: ServiceRepository,
     private val serviceScope: ServiceScope,
 ) {
-    private val mutex = Mutex()
+    private val inFlightMutex = Mutex()
     private val inFlight = mutableMapOf<Int, Deferred<EnsureSessionResult>>()
 
     @Suppress("ReturnCount")
@@ -70,17 +71,25 @@ open class EnsureRemoteAdminSessionUseCase(
         }
 
         val deferred =
-            mutex.withLock {
+            inFlightMutex.withLock {
                 inFlight[destNum]
                     ?: serviceScope
                         .async(start = CoroutineStart.LAZY) { runEnsure(destNum) }
-                        .also { inFlight[destNum] = it }
+                        .also { newDeferred ->
+                            inFlight[destNum] = newDeferred
+                            // Register before the lazy deferred can start. Cleanup is identity-checked so an old
+                            // completion
+                            // cannot remove a newer ensure for the same node.
+                            newDeferred.invokeOnCompletion {
+                                serviceScope.launch(start = CoroutineStart.UNDISPATCHED) {
+                                    inFlightMutex.withLock {
+                                        if (inFlight[destNum] === newDeferred) inFlight.remove(destNum)
+                                    }
+                                }
+                            }
+                        }
             }
-        return try {
-            deferred.await()
-        } finally {
-            mutex.withLock { if (inFlight[destNum] === deferred) inFlight.remove(destNum) }
-        }
+        return deferred.await()
     }
 
     private suspend fun runEnsure(destNum: Int): EnsureSessionResult {
@@ -103,9 +112,10 @@ open class EnsureRemoteAdminSessionUseCase(
 
     companion object {
         /**
-         * UX deadline for surfacing a result to the user. The metadata request keeps flying after this — late responses
-         * still update the durable `SessionStatus` flow.
+         * UX deadline for surfacing a result to the user. Multi-hop remote-admin responses can legitimately take well
+         * over ten seconds; the metadata request keeps flying after this, and late responses still update the durable
+         * `SessionStatus` flow.
          */
-        val UX_TIMEOUT = 10.seconds
+        val UX_TIMEOUT = 30.seconds
     }
 }

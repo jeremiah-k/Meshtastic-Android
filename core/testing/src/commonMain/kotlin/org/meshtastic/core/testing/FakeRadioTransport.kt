@@ -27,12 +27,14 @@ class FakeRadioTransport : RadioTransport {
 
     var keepAliveCalled = false
 
-    override fun handleSendToRadio(p: ByteArray) {
+    override fun handleSendToRadio(p: ByteArray): Boolean {
+        if (closeCalled) return false
         sentData.add(p)
+        return true
     }
 
     override fun keepAlive() {
-        keepAliveCalled = true
+        if (!closeCalled) keepAliveCalled = true
     }
 
     override suspend fun close() {

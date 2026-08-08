@@ -25,6 +25,7 @@ import kotlinx.coroutines.flow.Flow
 import org.meshtastic.core.database.entity.DiscoveredNodeEntity
 import org.meshtastic.core.database.entity.DiscoveryPresetResultEntity
 import org.meshtastic.core.database.entity.DiscoverySessionEntity
+import org.meshtastic.core.database.entity.DiscoverySessionStatus
 
 @Dao
 @Suppress("TooManyFunctions")
@@ -46,25 +47,58 @@ interface DiscoveryDao {
     @Query("SELECT * FROM discovery_session WHERE id = :sessionId")
     suspend fun getSession(sessionId: Long): DiscoverySessionEntity?
 
+    @Query("UPDATE discovery_session SET completion_status = :status WHERE id = :sessionId")
+    suspend fun updateSessionCompletionStatus(sessionId: Long, status: String)
+
+    @Query(
+        "UPDATE discovery_session SET completion_status = :status WHERE id = :sessionId " +
+            "AND completion_status IN ('" +
+            DiscoverySessionStatus.IN_PROGRESS +
+            "', '" +
+            DiscoverySessionStatus.INTERRUPTED +
+            "', '" +
+            DiscoverySessionStatus.RESTORE_PENDING_COMPLETE +
+            "', '" +
+            DiscoverySessionStatus.RESTORE_PENDING_FAILED +
+            "', '" +
+            DiscoverySessionStatus.RESTORE_PENDING_STOPPED +
+            "')",
+    )
+    suspend fun updateRecoverableSessionCompletionStatus(sessionId: Long, status: String)
+
     @Query("SELECT * FROM discovery_session WHERE id = :sessionId")
     fun getSessionFlow(sessionId: Long): Flow<DiscoverySessionEntity?>
 
     @Query("DELETE FROM discovery_session WHERE id = :sessionId")
     suspend fun deleteSession(sessionId: Long)
 
-    @Query("UPDATE discovery_session SET completion_status = 'interrupted' WHERE completion_status = 'in_progress'")
+    @Query(
+        "UPDATE discovery_session SET completion_status = '" +
+            DiscoverySessionStatus.INTERRUPTED +
+            "' WHERE completion_status = '" +
+            DiscoverySessionStatus.IN_PROGRESS +
+            "'",
+    )
     suspend fun markInterruptedSessions()
 
     /**
      * The most recent session left mid-scan by a prior process (crash, BLE loss, or force-quit) for [deviceAddress] —
-     * "in_progress" if the process died before [markInterruptedSessions] ever ran, "interrupted" otherwise.
+     * Includes active/interrupted scans and terminal scans whose home-radio restoration is still pending.
      */
     @Query(
-        """
-        SELECT * FROM discovery_session
-        WHERE device_address = :deviceAddress AND completion_status IN ('in_progress', 'interrupted')
-        ORDER BY timestamp DESC LIMIT 1
-        """,
+        "SELECT * FROM discovery_session " +
+            "WHERE device_address = :deviceAddress " +
+            "AND completion_status IN ('" +
+            DiscoverySessionStatus.IN_PROGRESS +
+            "', '" +
+            DiscoverySessionStatus.INTERRUPTED +
+            "', '" +
+            DiscoverySessionStatus.RESTORE_PENDING_COMPLETE +
+            "', '" +
+            DiscoverySessionStatus.RESTORE_PENDING_FAILED +
+            "', '" +
+            DiscoverySessionStatus.RESTORE_PENDING_STOPPED +
+            "') ORDER BY timestamp DESC LIMIT 1",
     )
     suspend fun getInterruptedSession(deviceAddress: String): DiscoverySessionEntity?
 

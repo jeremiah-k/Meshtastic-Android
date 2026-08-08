@@ -1,0 +1,420 @@
+/*
+ * Copyright (c) 2026 Meshtastic LLC
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+package org.meshtastic.core.network.radio
+
+import com.hoho.android.usbserial.driver.UsbSerialDriver
+import dev.mokkery.MockMode
+import dev.mokkery.answering.calls
+import dev.mokkery.answering.throws
+import dev.mokkery.every
+import dev.mokkery.matcher.any
+import dev.mokkery.mock
+import dev.mokkery.verify
+import dev.mokkery.verify.VerifyMode.Companion.exactly
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.runTest
+import org.meshtastic.core.network.repository.SerialConnection
+import org.meshtastic.core.network.repository.SerialConnectionListener
+import org.meshtastic.core.repository.RadioTransportCallback
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
+import kotlin.test.assertSame
+import kotlin.test.assertTrue
+
+class SerialRadioTransportTest {
+
+    private val callback: RadioTransportCallback = mock(MockMode.autofill)
+    private val serialDriver: UsbSerialDriver = mock(MockMode.autofill)
+    private val serialConnection: SerialConnection = mock(MockMode.autofill)
+    private lateinit var serialConnectionListener: SerialConnectionListener
+
+    private fun createTransport(address: String, scope: CoroutineScope): SerialRadioTransport = SerialRadioTransport(
+        callback = callback,
+        scope = scope,
+        serialDevices = MutableStateFlow(mapOf(address to serialDriver)),
+        createSerialConnection = { driver, listener ->
+            assertSame(serialDriver, driver)
+            serialConnectionListener = listener
+            serialConnection
+        },
+        address = address,
+    )
+
+    private fun createRecordingTransport(
+        address: String,
+        connections: MutableList<RecordingSerialConnection>,
+        scope: CoroutineScope,
+        devices: Map<String, UsbSerialDriver> = mapOf(address to serialDriver),
+    ): SerialRadioTransport = SerialRadioTransport(
+        callback = callback,
+        scope = scope,
+        serialDevices = MutableStateFlow(devices),
+        createSerialConnection = { driver, listener ->
+            assertSame(devices.getValue(address), driver)
+            RecordingSerialConnection(listener).also(connections::add)
+        },
+        address = address,
+    )
+
+    @Test
+    fun `failed connection is not left admitted`() = runTest {
+        val address = "serial-device"
+        every { serialConnection.connect() } throws IllegalStateException("connect failed")
+        val transport = createTransport(address, backgroundScope)
+
+        transport.start()
+        testScheduler.runCurrent()
+
+        verify(exactly(1)) { serialConnection.close(waitForStopped = false) }
+        verify(exactly(1)) {
+            callback.onDisconnect(isPermanent = false, errorMessage = "connect failed", reason = null)
+        }
+        assertFalse(transport.handleSendToRadio(byteArrayOf(1)))
+        transport.close()
+    }
+
+    @Test
+    fun `send is rejected promptly while connection is still opening`() = runTest {
+        val address = "serial-device"
+        val connectEntered = CountDownLatch(1)
+        val releaseConnect = CountDownLatch(1)
+        every { serialConnection.connect() } calls
+            {
+                connectEntered.countDown()
+                check(releaseConnect.await(5, TimeUnit.SECONDS))
+                serialConnectionListener.onConnected()
+            }
+        val transportScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val transport = createTransport(address, transportScope)
+        val executor = Executors.newFixedThreadPool(2)
+
+        try {
+            val startFuture = executor.submit { transport.start() }
+            assertTrue(connectEntered.await(1, TimeUnit.SECONDS), "connect should enter the blocking open")
+
+            val sendFuture = executor.submit<Boolean> { transport.handleSendToRadio(byteArrayOf(1)) }
+            assertFalse(sendFuture.get(1, TimeUnit.SECONDS), "an opening transport must reject promptly")
+
+            releaseConnect.countDown()
+            startFuture.get(1, TimeUnit.SECONDS)
+        } finally {
+            releaseConnect.countDown()
+            transport.close()
+            transportScope.cancel()
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `close waits for wake IO then revokes without publishing connected`() = runTest {
+        val address = "serial-device"
+        val wakeWriteEntered = CountDownLatch(1)
+        val releaseWakeWrite = CountDownLatch(1)
+        val closeEntered = CountDownLatch(1)
+        every { serialConnection.connect() } calls { serialConnectionListener.onConnected() }
+        every { serialConnection.sendBytes(any()) } calls
+            {
+                wakeWriteEntered.countDown()
+                check(releaseWakeWrite.await(5, TimeUnit.SECONDS))
+            }
+        every { serialConnection.close(waitForStopped = true) } calls { closeEntered.countDown() }
+        val transportScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val transport = createTransport(address, transportScope)
+        val executor = Executors.newFixedThreadPool(2)
+
+        try {
+            val startFuture = executor.submit { transport.start() }
+            assertTrue(wakeWriteEntered.await(1, TimeUnit.SECONDS), "connected callback should enter wake I/O")
+            assertFalse(
+                transport.handleSendToRadio(byteArrayOf(1)),
+                "ordinary writes must remain closed until wake I/O completes",
+            )
+
+            val closeFuture = executor.submit { runBlocking { transport.close() } }
+            assertFalse(
+                closeEntered.await(NOT_YET_WINDOW_MS, TimeUnit.MILLISECONDS),
+                "close must not close the connection while admitted wake I/O is still running",
+            )
+
+            releaseWakeWrite.countDown()
+            startFuture.get(1, TimeUnit.SECONDS)
+            closeFuture.get(1, TimeUnit.SECONDS)
+            assertTrue(closeEntered.await(1, TimeUnit.SECONDS))
+            verify(exactly(0)) { callback.onConnect() }
+        } finally {
+            releaseWakeWrite.countDown()
+            transport.close()
+            transportScope.cancel()
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `failed wake closes the connection without publishing connected`() = runTest {
+        val address = "serial-device"
+        every { serialConnection.connect() } calls { serialConnectionListener.onConnected() }
+        every { serialConnection.sendBytes(any()) } throws IllegalStateException("wake failed")
+        val transport = createTransport(address, backgroundScope)
+
+        transport.start()
+        testScheduler.runCurrent()
+
+        verify(exactly(0)) { callback.onConnect() }
+        verify(exactly(1)) { callback.onDisconnect(isPermanent = false, errorMessage = null, reason = null) }
+        verify(exactly(1)) { serialConnection.close(waitForStopped = false) }
+        assertFalse(transport.handleSendToRadio(byteArrayOf(1)))
+        transport.close()
+    }
+
+    @Test
+    fun `explicit close suppresses a disconnect notification deferred by admitted IO`() = runTest {
+        val address = "serial-device"
+        every { serialConnection.connect() } calls { serialConnectionListener.onConnected() }
+        val transport = createTransport(address, this)
+
+        transport.start()
+        assertTrue(transport.handleSendToRadio(byteArrayOf(1)))
+        serialConnectionListener.onDisconnected(null)
+        transport.close()
+        testScheduler.runCurrent()
+
+        verify(exactly(0)) { callback.onDisconnect(isPermanent = false, errorMessage = null, reason = null) }
+        verify(exactly(1)) { serialConnection.close(waitForStopped = false) }
+    }
+
+    @Test
+    fun `close drains an admitted queued write before closing its connection`() = runTest {
+        val address = "serial-device"
+        val writeEntered = CountDownLatch(1)
+        val releaseWrite = CountDownLatch(1)
+        val closeEntered = CountDownLatch(1)
+        every { serialConnection.connect() } calls { serialConnectionListener.onConnected() }
+        val transportScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val transport = createTransport(address, transportScope)
+        val executor = Executors.newSingleThreadExecutor()
+
+        transport.start()
+        every { serialConnection.sendBytes(any()) } calls
+            {
+                writeEntered.countDown()
+                check(releaseWrite.await(5, TimeUnit.SECONDS))
+            }
+        every { serialConnection.close(waitForStopped = true) } calls { closeEntered.countDown() }
+
+        try {
+            assertTrue(transport.handleSendToRadio(byteArrayOf(1, 2, 3)))
+            assertTrue(writeEntered.await(1, TimeUnit.SECONDS), "the admitted write should reach the connection")
+
+            val closeFuture = executor.submit { runBlocking { transport.close() } }
+            assertFalse(
+                closeEntered.await(NOT_YET_WINDOW_MS, TimeUnit.MILLISECONDS),
+                "close must wait for the admitted write handoff",
+            )
+
+            releaseWrite.countDown()
+            closeFuture.get(1, TimeUnit.SECONDS)
+            assertTrue(closeEntered.await(1, TimeUnit.SECONDS))
+        } finally {
+            releaseWrite.countDown()
+            transport.close()
+            transportScope.cancel()
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `stale terminal callbacks do not tear down a replacement connection`() = runTest {
+        val address = "serial-device"
+        val connections = mutableListOf<RecordingSerialConnection>()
+        val transport = createRecordingTransport(address, connections, this)
+
+        transport.start()
+        assertTrue(transport.handleSendToRadio(byteArrayOf(1)))
+        connections[0].listener.onDisconnected(null)
+        assertFalse(transport.handleSendToRadio(byteArrayOf(2)))
+        testScheduler.runCurrent()
+        verify(exactly(1)) { callback.onDisconnect(isPermanent = false, errorMessage = null, reason = null) }
+        assertEquals(listOf(false), connections[0].closeRequests)
+
+        transport.start()
+        assertTrue(transport.handleSendToRadio(byteArrayOf(3)))
+        connections[0].listener.onDisconnected(IllegalStateException("late disconnect"))
+        assertTrue(transport.handleSendToRadio(byteArrayOf(4)))
+        connections[0].listener.onMissingPermission()
+        assertTrue(transport.handleSendToRadio(byteArrayOf(5)))
+
+        testScheduler.runCurrent()
+        // Mokkery verifies only calls not consumed by the earlier assertion, so stale callbacks add zero new events.
+        verify(exactly(0)) { callback.onDisconnect(isPermanent = false, errorMessage = null, reason = null) }
+        assertEquals(listOf(false), connections[0].closeRequests)
+        assertTrue(connections[1].closeRequests.isEmpty(), "stale callbacks must not close the replacement")
+        transport.close()
+        assertEquals(listOf(true), connections[1].closeRequests)
+    }
+
+    @Test
+    fun `start during connection cleanup opens a replacement after cleanup completes`() = runTest {
+        val address = "serial-device"
+        val connections = mutableListOf<RecordingSerialConnection>()
+        val transport = createRecordingTransport(address, connections, this)
+
+        transport.start()
+        assertTrue(transport.handleSendToRadio(byteArrayOf(1)))
+        connections.single().listener.onDisconnected(null)
+
+        transport.start()
+        assertEquals(1, connections.size, "replacement must wait for physical cleanup")
+        testScheduler.runCurrent()
+
+        assertEquals(2, connections.size)
+        assertTrue(transport.handleSendToRadio(byteArrayOf(2)))
+        transport.close()
+        assertEquals(listOf(true), connections[1].closeRequests)
+    }
+
+    @Test
+    fun `repeated start cannot replace an active connection generation`() = runTest {
+        val address = "serial-device"
+        val connections = mutableListOf<RecordingSerialConnection>()
+        val transport = createRecordingTransport(address, connections, this)
+
+        transport.start()
+        assertTrue(transport.handleSendToRadio(byteArrayOf(1)))
+        transport.start()
+
+        assertEquals(1, connections.size, "repeated start must not open a throwaway USB generation")
+        assertEquals(emptyList(), connections[0].closeRequests)
+        assertTrue(transport.handleSendToRadio(byteArrayOf(2)))
+        transport.close()
+        assertEquals(listOf(true), connections[0].closeRequests)
+    }
+
+    @Test
+    fun `concurrent close callers await the same physical teardown`() = runTest {
+        val address = "serial-device"
+        val closeEntered = CountDownLatch(1)
+        val releaseClose = CountDownLatch(1)
+        every { serialConnection.connect() } calls { serialConnectionListener.onConnected() }
+        every { serialConnection.close(waitForStopped = true) } calls
+            {
+                closeEntered.countDown()
+                check(releaseClose.await(5, TimeUnit.SECONDS))
+            }
+        val transportScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val transport = createTransport(address, transportScope)
+        val executor = Executors.newFixedThreadPool(2)
+
+        try {
+            transport.start()
+            val first = executor.submit { runBlocking { transport.close() } }
+            assertTrue(closeEntered.await(1, TimeUnit.SECONDS))
+            val second = executor.submit { runBlocking { transport.close() } }
+            assertFailsWith<TimeoutException> { second.get(NOT_YET_WINDOW_MS, TimeUnit.MILLISECONDS) }
+
+            releaseClose.countDown()
+            first.get(1, TimeUnit.SECONDS)
+            second.get(1, TimeUnit.SECONDS)
+            verify(exactly(1)) { serialConnection.close(waitForStopped = true) }
+        } finally {
+            releaseClose.countDown()
+            transportScope.cancel()
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `missing selected device never falls back to another USB serial device`() = runTest {
+        val selectedAddress = "selected-device"
+        val otherDevice = mock<UsbSerialDriver>()
+        val connections = mutableListOf<RecordingSerialConnection>()
+        val transport =
+            createRecordingTransport(
+                address = selectedAddress,
+                connections = connections,
+                scope = backgroundScope,
+                devices = mapOf("other-device" to otherDevice),
+            )
+
+        transport.start()
+        testScheduler.runCurrent()
+
+        assertTrue(connections.isEmpty(), "a selected-address miss must not open an unrelated serial device")
+        assertFalse(transport.handleSendToRadio(byteArrayOf(1)))
+        transport.close()
+    }
+
+    @Test
+    fun `start after close cannot reopen a serial transport`() = runTest {
+        val address = "serial-device"
+        every { serialConnection.connect() } calls { serialConnectionListener.onConnected() }
+        val transport = createTransport(address, this)
+
+        transport.start()
+        transport.close()
+        transport.start()
+
+        verify(exactly(1)) { serialConnection.connect() }
+        verify(exactly(1)) { serialConnection.close(waitForStopped = true) }
+        assertFalse(transport.handleSendToRadio(byteArrayOf(1)))
+    }
+
+    @Test
+    fun `send is rejected before connection and after close`() = runTest {
+        val address = "serial-device"
+        val transport = createTransport(address, this)
+
+        assertFalse(transport.handleSendToRadio(byteArrayOf(1)))
+
+        every { serialConnection.connect() } calls { serialConnectionListener.onConnected() }
+        transport.start()
+        assertTrue(transport.handleSendToRadio(byteArrayOf(2)), "an established connection must accept the handoff")
+        transport.close()
+
+        verify(exactly(1)) { serialConnection.close(waitForStopped = true) }
+        assertFalse(transport.handleSendToRadio(byteArrayOf(3)))
+    }
+
+    private class RecordingSerialConnection(val listener: SerialConnectionListener) : SerialConnection {
+        val closeRequests = mutableListOf<Boolean>()
+
+        override fun connect() = listener.onConnected()
+
+        override fun sendBytes(bytes: ByteArray) = Unit
+
+        override fun close(waitForStopped: Boolean) {
+            closeRequests += waitForStopped
+        }
+
+        override fun close() = close(waitForStopped = false)
+    }
+
+    private companion object {
+        // Negative wall-clock assertions get a generous scheduler margin without slowing successful paths.
+        const val NOT_YET_WINDOW_MS = 500L
+    }
+}
