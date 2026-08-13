@@ -16,6 +16,7 @@
  */
 package org.meshtastic.feature.connections
 
+import androidx.lifecycle.ViewModelStore
 import app.cash.turbine.test
 import dev.mokkery.answering.returns
 import dev.mokkery.every
@@ -24,9 +25,10 @@ import dev.mokkery.verifySuspend
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.resetMain
-import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.meshtastic.core.ble.BleDevice
 import org.meshtastic.core.ble.BleScanStartException
@@ -50,6 +52,7 @@ class ScannerViewModelTest {
 
     private lateinit var harness: ScannerViewModelHarness
     private lateinit var viewModel: ScannerViewModel
+    private lateinit var viewModelStore: ViewModelStore
 
     // Convenience aliases so the existing test bodies read unchanged.
     private val serviceRepository
@@ -70,6 +73,7 @@ class ScannerViewModelTest {
     @BeforeTest
     fun setUp() {
         harness = ScannerViewModelHarness()
+        viewModelStore = ViewModelStore()
         Dispatchers.setMain(harness.testDispatcher)
 
         serviceRepository.setConnectionProgress("")
@@ -77,12 +81,19 @@ class ScannerViewModelTest {
         resolvedServicesFlow.value = emptyList()
 
         viewModel = harness.buildBase()
+        viewModelStore.put("scanner", viewModel)
     }
 
     @AfterTest
     fun tearDown() {
+        viewModelStore.clear()
+        harness.testDispatcher.scheduler.runCurrent()
         Dispatchers.resetMain()
     }
+
+    /** Keeps assertions and ViewModel Main work on the same virtual-time scheduler. */
+    private fun runTest(block: suspend TestScope.() -> Unit) =
+        kotlinx.coroutines.test.runTest(harness.testDispatcher, testBody = block)
 
     @Test
     fun testInitialization() {
@@ -118,12 +129,13 @@ class ScannerViewModelTest {
         every { bleScanner.scan(any(), any()) } returns failingScanFlow()
 
         viewModel.startBleScan()
+        val errorMessage = serviceRepository.errorMessage.filterNotNull().first()
 
         assertEquals(false, viewModel.isBleScanning.value)
         assertEquals(false, viewModel.bleAutoScan.value)
         assertEquals(
             "Bluetooth scan couldn't start. Try again, or toggle Bluetooth if the problem continues.",
-            serviceRepository.errorMessage.value,
+            errorMessage,
         )
     }
 
@@ -167,9 +179,10 @@ class ScannerViewModelTest {
             }
 
         viewModel.startBleScan()
+        val errorMessage = serviceRepository.errorMessage.filterNotNull().first()
         assertEquals(1, scanAttempts)
         assertEquals(false, viewModel.isBleScanning.value)
-        assertEquals("Bluetooth is off. Turn it on to scan for nearby devices.", serviceRepository.errorMessage.value)
+        assertEquals("Bluetooth is off. Turn it on to scan for nearby devices.", errorMessage)
 
         // Immediately retryable — no waiting on the scheduler.
         viewModel.startBleScan()
@@ -189,10 +202,11 @@ class ScannerViewModelTest {
             }
 
         viewModel.startBleScan()
+        val errorMessage = serviceRepository.errorMessage.filterNotNull().first()
         assertEquals(1, scanAttempts)
         assertEquals(
             "Location services are off. Turn them on to scan for nearby devices.",
-            serviceRepository.errorMessage.value,
+            errorMessage,
         )
 
         viewModel.startBleScan()
@@ -213,8 +227,9 @@ class ScannerViewModelTest {
             }
 
         viewModel.startBleScan()
+        val errorMessage = serviceRepository.errorMessage.filterNotNull().first()
         assertEquals(1, scanAttempts)
-        assertEquals("Bluetooth scan limit reached. Try again in 31 seconds.", serviceRepository.errorMessage.value)
+        assertEquals("Bluetooth scan limit reached. Try again in 31 seconds.", errorMessage)
 
         harness.testDispatcher.scheduler.advanceTimeBy(BLE_SCAN_START_FAILURE_RETRY_COOLDOWN.inWholeMilliseconds + 1)
         viewModel.startBleScan()

@@ -85,6 +85,7 @@ class NodeDetailCompassLifecycleTest {
 
     @AfterTest
     fun tearDown() {
+        testDispatcher.scheduler.runCurrent()
         Dispatchers.resetMain()
     }
 
@@ -127,26 +128,36 @@ class NodeDetailCompassLifecycleTest {
             val openCompass = getString(Res.string.open_compass)
             onNodeWithText(openCompass).performScrollTo().performClick()
             onNodeWithText(getString(Res.string.compass_title)).assertExists()
-            waitUntil { headingProvider.starts == 1 }
+            waitForIdle()
+            testDispatcher.scheduler.runCurrent()
+            assertEquals(1, headingProvider.starts)
 
             lifecycleOwner.moveTo(Lifecycle.State.CREATED)
-            waitUntil { headingProvider.stops == 1 }
+            waitForIdle()
+            testDispatcher.scheduler.runCurrent()
+            assertEquals(1, headingProvider.stops)
 
             lifecycleOwner.moveTo(Lifecycle.State.STARTED)
-            waitUntil { headingProvider.starts == 2 }
+            waitForIdle()
+            testDispatcher.scheduler.runCurrent()
+            assertEquals(2, headingProvider.starts)
 
             onNode(SemanticsMatcher.keyIsDefined(SemanticsActions.Dismiss), useUnmergedTree = true)
                 .performSemanticsAction(SemanticsActions.Dismiss)
-            waitUntil { headingProvider.stops == 2 }
+            waitForIdle()
+            testDispatcher.scheduler.runCurrent()
+            assertEquals(2, headingProvider.stops)
             onNodeWithText(getString(Res.string.compass_title)).assertDoesNotExist()
 
             lifecycleOwner.moveTo(Lifecycle.State.CREATED)
             lifecycleOwner.moveTo(Lifecycle.State.STARTED)
             waitForIdle()
+            testDispatcher.scheduler.runCurrent()
             assertEquals(2, headingProvider.starts, "a dismissed compass must not restart")
             assertEquals(2, headingProvider.stops, "dismissal must clean up exactly once")
         } finally {
             viewModelStore.clear()
+            testDispatcher.scheduler.runCurrent()
         }
     }
 

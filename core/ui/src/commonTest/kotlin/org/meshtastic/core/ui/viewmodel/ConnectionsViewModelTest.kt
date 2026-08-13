@@ -16,20 +16,25 @@
  */
 package org.meshtastic.core.ui.viewmodel
 
+import androidx.lifecycle.ViewModelStore
 import app.cash.turbine.test
 import dev.mokkery.MockMode
 import dev.mokkery.answering.returns
 import dev.mokkery.every
 import dev.mokkery.mock
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
-import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.meshtastic.core.database.entity.FirmwareRelease
 import org.meshtastic.core.model.ConnectionState
@@ -60,21 +65,27 @@ import kotlin.test.assertNotNull
 class ConnectionsViewModelTest {
 
     private val testDispatcher = StandardTestDispatcher()
+    private val nodeRestartScope = CoroutineScope(SupervisorJob())
+    private val viewModelStore = ViewModelStore()
     private lateinit var viewModel: ConnectionsViewModel
     private val radioConfigRepository: RadioConfigRepository = mock(MockMode.autofill)
     private val serviceRepository = FakeServiceRepository()
-    private val nodeRestartTracker = NodeRestartTracker(CoroutineScope(SupervisorJob()))
+    private val nodeRestartTracker = NodeRestartTracker(nodeRestartScope)
     private val nodeRepository = FakeNodeRepository()
     private val uiPrefs = FakeUiPrefs()
     private val deviceHardwareRepository = FakeDeviceHardwareRepository()
     private val firmwareReleaseRepository = FakeFirmwareReleaseRepository()
     private val radioPrefs = FakeRadioPrefs()
     private val dispatchedNotifications = mutableListOf<Notification>()
+    private lateinit var notificationDispatched: CompletableDeferred<Notification>
     private var notificationsCanBeScheduled = true
     private val notificationManager =
         object : NotificationManager {
             override suspend fun dispatch(notification: Notification): Boolean {
-                if (notificationsCanBeScheduled) dispatchedNotifications += notification
+                if (notificationsCanBeScheduled) {
+                    dispatchedNotifications += notification
+                    notificationDispatched.complete(notification)
+                }
                 return notificationsCanBeScheduled
             }
 
@@ -87,6 +98,7 @@ class ConnectionsViewModelTest {
     fun setUp() {
         Dispatchers.setMain(testDispatcher)
         dispatchedNotifications.clear()
+        notificationDispatched = CompletableDeferred()
         notificationsCanBeScheduled = true
 
         every { radioConfigRepository.localConfigFlow } returns MutableStateFlow(LocalConfig())
@@ -105,12 +117,20 @@ class ConnectionsViewModelTest {
                 radioPrefs = radioPrefs,
                 notificationManager = notificationManager,
             )
+        viewModelStore.put("connections", viewModel)
     }
 
     @AfterTest
     fun tearDown() {
+        viewModelStore.clear()
+        nodeRestartScope.cancel()
+        testDispatcher.scheduler.runCurrent()
         Dispatchers.resetMain()
     }
+
+    /** Keeps assertions and ViewModel Main work on the same virtual-time scheduler. */
+    private fun runTest(block: suspend TestScope.() -> Unit) =
+        kotlinx.coroutines.test.runTest(testDispatcher, testBody = block)
 
     @Test
     fun testInitialization() {
@@ -192,17 +212,16 @@ class ConnectionsViewModelTest {
         firmwareReleaseRepository.setStableRelease(FirmwareRelease(id = "v2.8.0"))
         serviceRepository.setConnectionState(ConnectionState.Connected)
 
-        advanceUntilIdle()
-
-        val notice = assertNotNull(viewModel.firmwareUpdateNotice.value)
+        val notice = viewModel.firmwareUpdateNotice.filterNotNull().first()
+        val notification = notificationDispatched.await()
         assertEquals("2.7.0", notice.currentVersion)
         assertEquals("2.8.0", notice.stableVersion)
         assertEquals(FirmwareUpdateDestination.AndroidUpdate, notice.destination)
         assertEquals(1, dispatchedNotifications.size)
         assertEquals(setOf(notice.notificationKey), uiPrefs.firmwareUpdateNotificationKeys.value)
-        assertEquals("Firmware update available", dispatchedNotifications.single().title)
-        assertEquals(Notification.Type.Info, dispatchedNotifications.single().type)
-        assertEquals("meshtastic:///firmware/update", dispatchedNotifications.single().deepLinkUri)
+        assertEquals("Firmware update available", notification.title)
+        assertEquals(Notification.Type.Info, notification.type)
+        assertEquals("meshtastic:///firmware/update", notification.deepLinkUri)
     }
 
     @Test
@@ -223,9 +242,7 @@ class ConnectionsViewModelTest {
         firmwareReleaseRepository.setStableRelease(FirmwareRelease(id = "v2.8.0"))
         serviceRepository.setConnectionState(ConnectionState.Connected)
 
-        advanceUntilIdle()
-
-        assertNotNull(viewModel.firmwareUpdateNotice.value)
+        assertNotNull(viewModel.firmwareUpdateNotice.filterNotNull().first())
         assertEquals(emptyList(), dispatchedNotifications)
         assertEquals(emptySet(), uiPrefs.firmwareUpdateNotificationKeys.value)
     }

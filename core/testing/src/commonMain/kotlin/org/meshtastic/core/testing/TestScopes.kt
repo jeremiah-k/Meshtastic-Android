@@ -22,13 +22,15 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.runCurrent
 
-/** Runs a test with a structured child scope driven by the test scheduler and always cancels it afterward. */
+/** Runs a test with a structured child scope, then cancels and drains that scope before the scheduler is released. */
 fun runWithRenderScope(block: suspend TestScope.(CoroutineScope) -> Unit) = runTest {
     val renderScope = CoroutineScope(StandardTestDispatcher(testScheduler) + Job(coroutineContext[Job]))
     try {
         block(renderScope)
     } finally {
         renderScope.cancel()
+        runCurrent()
     }
 }

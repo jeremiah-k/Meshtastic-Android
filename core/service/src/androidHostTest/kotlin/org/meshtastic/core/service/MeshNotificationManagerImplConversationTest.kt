@@ -32,6 +32,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -44,6 +45,7 @@ import org.meshtastic.core.model.Node
 import org.meshtastic.core.repository.NodeRepository
 import org.meshtastic.core.repository.PacketRepository
 import org.meshtastic.core.repository.RadioConfigRepository
+import org.meshtastic.core.repository.SERVICE_NOTIFY_ID
 import org.meshtastic.core.testing.runWithRenderScope
 import org.meshtastic.proto.ChannelSet
 import org.meshtastic.proto.User
@@ -214,10 +216,10 @@ class MeshNotificationManagerImplConversationTest {
     fun `notification ids are namespaced per type so a node num cannot clobber the service notification`() =
         runWithRenderScope { scope ->
             val manager = createManager(scope).also { it.initChannels() }
+            runCurrent()
             // SERVICE_NOTIFY_ID is 101; a node whose num is also 101 used to overwrite the foreground notification.
-            manager.updateServiceStateNotification(ConnectionState.Connected, telemetry = null)
+            systemNotificationManager.notify(SERVICE_NOTIFY_ID, manager.getServiceNotification())
             manager.showOrUpdateLowBatteryNotification(Node(num = 101), isRemote = false)
-            advanceUntilIdle()
 
             val service = systemNotificationManager.activeNotifications.filter { it.id == 101 && it.tag == null }
             val battery = activeByTag("low_battery").filter { it.id == 101 }

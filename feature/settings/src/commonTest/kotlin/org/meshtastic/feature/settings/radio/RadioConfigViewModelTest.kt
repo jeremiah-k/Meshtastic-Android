@@ -16,6 +16,7 @@
  */
 package org.meshtastic.feature.settings.radio
 
+import androidx.lifecycle.ViewModelStore
 import app.cash.turbine.test
 import dev.mokkery.MockMode
 import dev.mokkery.answering.calls
@@ -31,15 +32,16 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runCurrent
-import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import okio.ByteString.Companion.encodeUtf8
 import org.meshtastic.core.domain.usecase.settings.AdminActionsUseCase
@@ -100,6 +102,8 @@ import kotlin.time.Duration
 class RadioConfigViewModelTest {
 
     private val testDispatcher = UnconfinedTestDispatcher()
+    private val nodeRestartScope = CoroutineScope(SupervisorJob())
+    private val viewModelStore = ViewModelStore()
 
     private val radioConfigRepository: RadioConfigRepository = mock(MockMode.autofill)
     private val packetRepository: PacketRepository = mock(MockMode.autofill)
@@ -123,7 +127,7 @@ class RadioConfigViewModelTest {
     private val uiPrefs: UiPrefs = mock(MockMode.autofill)
     private val securityKeyBackupStore: SecurityKeyBackupStore = mock(MockMode.autofill)
     private val snackbarManager: SnackbarManager = mock(MockMode.autofill)
-    private val nodeRestartTracker = NodeRestartTracker(CoroutineScope(SupervisorJob()))
+    private val nodeRestartTracker = NodeRestartTracker(nodeRestartScope)
 
     private lateinit var viewModel: RadioConfigViewModel
 
@@ -157,8 +161,15 @@ class RadioConfigViewModelTest {
 
     @AfterTest
     fun tearDown() {
+        viewModelStore.clear()
+        nodeRestartScope.cancel()
+        testDispatcher.scheduler.runCurrent()
         Dispatchers.resetMain()
     }
+
+    /** Keeps assertions and ViewModel Main work on the same virtual-time scheduler. */
+    private fun runTest(block: suspend TestScope.() -> Unit) =
+        kotlinx.coroutines.test.runTest(testDispatcher, testBody = block)
 
     private fun createViewModel(destNum: Int? = null) = RadioConfigViewModel(
         destNum = destNum,
@@ -185,7 +196,7 @@ class RadioConfigViewModelTest {
         mqttManager = mqttManager,
         lockdownCoordinator = FakeLockdownCoordinator(),
         analytics = mock(MockMode.autofill),
-    )
+    ).also { viewModelStore.put("radio-config", it) }
 
     @Test
     fun `setConfig calls useCase`() = runTest {

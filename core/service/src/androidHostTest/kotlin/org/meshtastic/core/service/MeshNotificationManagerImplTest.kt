@@ -29,6 +29,7 @@ import dev.mokkery.mock
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import org.junit.After
 import org.junit.Before
 import org.junit.Test
@@ -117,18 +118,27 @@ class MeshNotificationManagerImplTest {
     fun `service state rendering is deferred from the caller`() = runWithRenderScope { renderScope ->
         val notifications = createManager(renderScope)
         notifications.initChannels()
+        runCurrent()
+        val immediateTitle =
+            notifications.getServiceNotification().extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()
 
         notifications.updateServiceStateNotification(ConnectionState.Disconnected, populatedTelemetry())
 
-        assertNull(activeServiceNotification())
+        assertEquals(
+            immediateTitle,
+            notifications.getServiceNotification().extras.getCharSequence(Notification.EXTRA_TITLE)?.toString(),
+        )
         advanceUntilIdle()
-        assertNotNull(activeServiceNotification())
+        val renderedTitle =
+            notifications.getServiceNotification().extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()
+        assertEquals(getString(Res.string.disconnected), renderedTitle)
     }
 
     @Test
     fun `newer service state cancels a pending render`() = runWithRenderScope { renderScope ->
         val notifications = createManager(renderScope)
         notifications.initChannels()
+        runCurrent()
 
         notifications.updateServiceStateNotification(ConnectionState.Connecting, populatedTelemetry())
         notifications.updateServiceStateNotification(ConnectionState.Disconnected, populatedTelemetry())
@@ -143,6 +153,7 @@ class MeshNotificationManagerImplTest {
     fun `identical service state can repost after notifications are cleared`() = runWithRenderScope { renderScope ->
         val notifications = createManager(renderScope)
         notifications.initChannels()
+        runCurrent()
         val telemetry = populatedTelemetry()
 
         notifications.updateServiceStateNotification(ConnectionState.Disconnected, telemetry)
@@ -165,11 +176,12 @@ class MeshNotificationManagerImplTest {
         every { nodeRepository.localStats } returns MutableStateFlow(stats)
         val notifications = createManager(renderScope)
         notifications.initChannels()
+        runCurrent()
 
         notifications.updateServiceStateNotification(ConnectionState.Disconnected, telemetry = null)
         advanceUntilIdle()
 
-        val text = activeServiceNotification()?.notification?.extras?.getCharSequence(Notification.EXTRA_TEXT)
+        val text = notifications.getServiceNotification().extras.getCharSequence(Notification.EXTRA_TEXT)
         assertNotNull(text)
         assertTrue(text.contains(getString(Res.string.local_stats_nodes, 2, 3)))
     }

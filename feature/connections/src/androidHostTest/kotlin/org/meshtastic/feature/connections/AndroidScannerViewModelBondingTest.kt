@@ -18,6 +18,7 @@ package org.meshtastic.feature.connections
 
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleObserver
+import androidx.lifecycle.ViewModelStore
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -64,10 +65,12 @@ class AndroidScannerViewModelBondingTest {
 
     private lateinit var harness: ScannerViewModelHarness
     private lateinit var viewModel: AndroidScannerViewModel
+    private lateinit var viewModelStore: ViewModelStore
 
     @BeforeTest
     fun setUp() {
         harness = ScannerViewModelHarness()
+        viewModelStore = ViewModelStore()
         Dispatchers.setMain(harness.testDispatcher)
         viewModel =
             AndroidScannerViewModel(
@@ -85,10 +88,13 @@ class AndroidScannerViewModelBondingTest {
                 firmwareRecoveryDataSource = harness.firmwareRecoveryDataSource,
                 bleScanner = harness.bleScanner,
             )
+        viewModelStore.put("scanner", viewModel)
     }
 
     @AfterTest
     fun tearDown() {
+        viewModelStore.clear()
+        harness.testDispatcher.scheduler.runCurrent()
         Dispatchers.resetMain()
     }
 
