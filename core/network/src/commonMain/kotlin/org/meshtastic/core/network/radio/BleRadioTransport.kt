@@ -106,16 +106,6 @@ private val CONNECTED_GATE_TIMEOUT = 5.seconds
 private val SUBSCRIPTION_READY_TIMEOUT = 5.seconds
 
 /**
- * Delay after onConnect before downgrading BLE connection priority to Balanced.
- *
- * The initial config drain (fromRadio burst) typically completes within 2–5 seconds on most devices, but slower radios
- * (ESP32 with large node databases, many channels, or dense position history) can take significantly longer. 30 seconds
- * provides generous margin while still ensuring we don't sustain the 7.5 ms connection interval indefinitely, which
- * significantly increases battery draw on both the phone and the radio.
- */
-private val PRIORITY_DOWNGRADE_DELAY = 30.seconds
-
-/**
  * Settle delay after disconnecting to let the BLE stack release GATT resources before reconnecting post cache
  * invalidation.
  *
@@ -626,7 +616,11 @@ class BleRadioTransport(
                 val maxLen = bleConnection.maximumWriteValueLength(BleWriteType.WITHOUT_RESPONSE)
                 Logger.i { "[$address] BLE Radio Session Ready. Max write length (WITHOUT_RESPONSE): $maxLen bytes" }
 
-                requestHighPriorityAndScheduleDowngrade()
+                // Leave connection-parameter negotiation to the radio during normal sessions. Current firmware already
+                // raises throughput for config transfer and lowers it again afterward; issuing a competing Android-side
+                // priority request here can destabilize otherwise healthy links on controller/peripheral combinations
+                // that are sensitive to overlapping parameter updates. Explicit high priority remains available to
+                // DFU/OTA.
 
                 // Guard: if handleFailure fired during setup (e.g., fromRadio/logRadio fatal
                 // exception after subscriptionReady completed but before this line), do NOT call
@@ -697,24 +691,6 @@ class BleRadioTransport(
             // Another failure path may already own cleanup for this exact generation. Wait for it, but never disconnect
             // a replacement profile that became active after the failing generation retired.
             awaitPendingSessionCleanup()
-        }
-    }
-
-    /**
-     * Requests high BLE connection priority for the initial config burst, then schedules a downgrade to balanced
-     * priority after [PRIORITY_DOWNGRADE_DELAY] to conserve battery.
-     */
-    private suspend fun CoroutineScope.requestHighPriorityAndScheduleDowngrade() {
-        if (bleConnection.requestHighConnectionPriority()) {
-            Logger.d { "[$address] Requested high BLE connection priority" }
-            // Wait for the connection parameter update before starting heavy traffic.
-            delay(1.seconds)
-        }
-        launch {
-            delay(PRIORITY_DOWNGRADE_DELAY)
-            if (bleConnection.requestBalancedConnectionPriority()) {
-                Logger.d { "[$address] Downgraded to balanced BLE connection priority" }
-            }
         }
     }
 
