@@ -43,6 +43,7 @@ import org.meshtastic.core.ble.MeshtasticBleConstants.FROMNUM_CHARACTERISTIC
 import org.meshtastic.core.ble.MeshtasticBleConstants.FROMRADIO_CHARACTERISTIC
 import org.meshtastic.core.ble.MeshtasticBleConstants.SERVICE_UUID
 import org.meshtastic.core.model.RadioNotConnectedException
+import org.meshtastic.core.model.util.anonymize
 import org.meshtastic.core.repository.RadioInterfaceService
 import org.meshtastic.core.testing.FakeBleConnection
 import org.meshtastic.core.testing.FakeBleConnectionFactory
@@ -86,7 +87,7 @@ class BleRadioTransportTest {
 
         val bleTransport =
             BleRadioTransport(
-                scope = testScope,
+                scope = backgroundScope,
                 scanner = scanner,
                 bluetoothRepository = bluetoothRepository,
                 connectionFactory = connectionFactory,
@@ -95,27 +96,14 @@ class BleRadioTransportTest {
             )
         bleTransport.start()
         try {
-            // start() begins connect() which is async
-            // In a real test we'd verify the connection state,
-            // but for now this confirms it works with the fakes.
-            assertEquals(address, bleTransport.address)
+            // start() begins connect() which is async; after the settle delay the locator must have scanned for the
+            // configured device. The transport's raw address is no longer exposed for assertions.
+            advanceTimeBy(BleReconnectPolicy.DEFAULT_SETTLE_DELAY.inWholeMilliseconds)
+            runCurrent()
+            assertEquals(address, scanner.lastScanAddress)
         } finally {
             bleTransport.close()
         }
-    }
-
-    @Test
-    fun `address returns correct value`() {
-        val bleTransport =
-            BleRadioTransport(
-                scope = testScope,
-                scanner = scanner,
-                bluetoothRepository = bluetoothRepository,
-                connectionFactory = connectionFactory,
-                callback = service,
-                address = address,
-            )
-        assertEquals(address, bleTransport.address)
     }
 
     @Test
@@ -162,6 +150,13 @@ class BleRadioTransportTest {
             assertFalse(bleTransport.handleSendToRadio(byteArrayOf(1, 2, 3)))
             assertEquals(1, transportRejections.size)
             assertTrue("toRadio characteristic unavailable" in transportRejections.single())
+
+            val rejection = transportRejections.single()
+            assertTrue(
+                address.anonymize() in rejection,
+                "rejection log must identify the device only through the anonymized address",
+            )
+            assertFalse(address in rejection, "rejection log must never carry the raw device address")
         } finally {
             bleTransport.close()
         }
