@@ -78,57 +78,67 @@ fun ProfileInstallOverlay(state: ProfileInstallState, modifier: Modifier = Modif
                 },
             contentAlignment = Alignment.Center,
         ) {
-            Column(
-                modifier = Modifier.padding(32.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(24.dp),
-            ) {
-                val total = (displayedState as? ProfileInstallState.Installing)?.totalStages?.coerceAtLeast(1) ?: 1
-                val current = (displayedState as? ProfileInstallState.Installing)?.currentStage?.coerceIn(0, total) ?: 0
-                val isPreparing = displayedState is ProfileInstallState.Preparing
-                val isInstalling = displayedState is ProfileInstallState.Installing
-                val progress by
-                    animateFloatAsState(
-                        targetValue = if (isInstalling) current.toFloat() / total.toFloat() else 0f,
-                        label = "profile-install-progress",
-                    )
+            ProfileInstallOverlayContent(displayedState)
+        }
+    }
+}
 
-                Box(contentAlignment = Alignment.Center) {
-                    // Indeterminate during Preparing, determinate once Installing reports a stage count.
-                    if (isInstalling) {
-                        CircularProgressIndicator(
-                            progress = { progress },
-                            modifier = Modifier.size(80.dp),
-                            trackColor = MaterialTheme.colorScheme.surfaceVariant,
-                        )
-                        Text(
-                            text = MetricFormatter.percent(progress * PERCENTAGE_FACTOR, decimalPlaces = 0),
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold,
-                        )
-                    } else {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(80.dp),
-                            trackColor = MaterialTheme.colorScheme.surfaceVariant,
-                        )
-                    }
-                }
+/**
+ * Centered overlay content: the indeterminate or determinate progress spinner with its percentage label, the
+ * stage/status caption, and the persistent "install in progress" note. Extracted so [ProfileInstallOverlay] only owns
+ * visibility, stage retention, and input blocking.
+ */
+@Composable
+private fun ProfileInstallOverlayContent(displayedState: ProfileInstallState) {
+    Column(
+        modifier = Modifier.padding(32.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(24.dp),
+    ) {
+        val total = (displayedState as? ProfileInstallState.Installing)?.totalStages?.coerceAtLeast(1) ?: 1
+        val current = (displayedState as? ProfileInstallState.Installing)?.currentStage?.coerceIn(0, total) ?: 0
+        val isPreparing = displayedState is ProfileInstallState.Preparing
+        val isInstalling = displayedState is ProfileInstallState.Installing
+        val progress by
+            animateFloatAsState(
+                targetValue = if (isInstalling) current.toFloat() / total.toFloat() else 0f,
+                label = "profile-install-progress",
+            )
 
-                Text(
-                    text = profileInstallStatusText(displayedState, current, total),
-                    style = MaterialTheme.typography.titleMedium,
-                    textAlign = TextAlign.Center,
+        Box(contentAlignment = Alignment.Center) {
+            // Indeterminate during Preparing, determinate once Installing reports a stage count.
+            if (isInstalling) {
+                CircularProgressIndicator(
+                    progress = { progress },
+                    modifier = Modifier.size(80.dp),
+                    trackColor = MaterialTheme.colorScheme.surfaceVariant,
                 )
-
-                if (isPreparing || isInstalling) {
-                    Text(
-                        text = stringResource(Res.string.profile_install_in_progress),
-                        style = MaterialTheme.typography.bodyMedium,
-                        textAlign = TextAlign.Center,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
+                Text(
+                    text = MetricFormatter.percent(progress * PERCENTAGE_FACTOR, decimalPlaces = 0),
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                )
+            } else {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(80.dp),
+                    trackColor = MaterialTheme.colorScheme.surfaceVariant,
+                )
             }
+        }
+
+        Text(
+            text = profileInstallStatusText(displayedState, current, total),
+            style = MaterialTheme.typography.titleMedium,
+            textAlign = TextAlign.Center,
+        )
+
+        if (isPreparing || isInstalling) {
+            Text(
+                text = stringResource(Res.string.profile_install_in_progress),
+                style = MaterialTheme.typography.bodyMedium,
+                textAlign = TextAlign.Center,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }
