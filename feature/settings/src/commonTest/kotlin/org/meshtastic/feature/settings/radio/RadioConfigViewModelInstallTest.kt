@@ -60,6 +60,7 @@ import org.meshtastic.core.repository.HomoglyphPrefs
 import org.meshtastic.core.repository.LocationRepository
 import org.meshtastic.core.repository.LocationService
 import org.meshtastic.core.repository.MapConsentPrefs
+import org.meshtastic.core.repository.MeshConnectionManager
 import org.meshtastic.core.repository.MqttManager
 import org.meshtastic.core.repository.NodeRestartTracker
 import org.meshtastic.core.repository.PacketRepository
@@ -116,6 +117,7 @@ class RadioConfigViewModelInstallTest {
     private val uiPrefs: UiPrefs = mock(MockMode.autofill)
     private val securityKeyBackupStore: SecurityKeyBackupStore = mock(MockMode.autofill)
     private val snackbarManager: SnackbarManager = mock(MockMode.autofill)
+    private val connectionManager: MeshConnectionManager = mock(MockMode.autofill)
     private val trackerScope = CoroutineScope(SupervisorJob() + testDispatcher)
     private val nodeRestartTracker = NodeRestartTracker(trackerScope)
 
@@ -166,7 +168,7 @@ class RadioConfigViewModelInstallTest {
     }
 
     private fun createViewModel(destNum: Int? = null) = RadioConfigViewModel(
-        destNum = destNum,
+        initialDestNum = destNum,
         radioConfigRepository = radioConfigRepository,
         packetRepository = packetRepository,
         serviceRepository = serviceRepository,
@@ -189,6 +191,7 @@ class RadioConfigViewModelInstallTest {
         fileService = fileService,
         mqttManager = mqttManager,
         lockdownCoordinator = FakeLockdownCoordinator(),
+        connectionManager = connectionManager,
         analytics = analytics,
     )
         .also { createdViewModels += it }
@@ -253,11 +256,13 @@ class RadioConfigViewModelInstallTest {
         val profile = DeviceProfile(long_name = "Updated")
         everySuspend { installProfileUseCase(any(), any(), any(), any(), any()) } returns
             ProfileInstallOutcome.Completed
-        viewModel.installProfile(profile)
+        var result: Result<ProfileInstallOutcome>? = null
+        viewModel.installProfile(profile) { result = it }
         nodeRepository.setNodes(listOf(replacementNode))
         advanceUntilIdle()
 
         verifySuspend { installProfileUseCase(123, profile, originalNode.user, true, any()) }
+        assertEquals(ProfileInstallOutcome.Completed, assertNotNull(result).getOrThrow())
     }
 
     @Test
@@ -304,7 +309,7 @@ class RadioConfigViewModelInstallTest {
                 releaseInstall.await()
                 ProfileInstallOutcome.Completed
             }
-        var secondResult: Result<Unit>? = null
+        var secondResult: Result<ProfileInstallOutcome>? = null
         viewModel.installProfile(DeviceProfile()) { secondResult = it }
 
         assertFalse(assertNotNull(secondResult).isSuccess)
@@ -316,7 +321,7 @@ class RadioConfigViewModelInstallTest {
     @Test
     fun `installProfile reports missing destination`() = runTest {
         viewModel = createViewModel()
-        var result: Result<Unit>? = null
+        var result: Result<ProfileInstallOutcome>? = null
 
         viewModel.installProfile(DeviceProfile()) { result = it }
 
@@ -335,7 +340,7 @@ class RadioConfigViewModelInstallTest {
         runCurrent()
         everySuspend { installProfileUseCase(123, profile, node.user, true, any()) } throws
             IllegalStateException("restore interrupted")
-        var result: Result<Unit>? = null
+        var result: Result<ProfileInstallOutcome>? = null
 
         viewModel.installProfile(profile) { result = it }
         advanceUntilIdle()
