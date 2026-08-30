@@ -634,6 +634,125 @@ class InstallProfileUseCaseTest {
     }
 
     @Test
+    fun `security restore overlays the running private key when the imported key is invalid`() =
+        runTest(testDispatcher) {
+            radioConfigRepository.setLocalConfigDirect(
+                LocalConfig(
+                    security = SecurityConfig(private_key = securityKey(32, 7), public_key = securityKey(32, 9)),
+                ),
+            )
+            radioController.onEditSettingsCommitted = { commitAndRestart() }
+            val importedAdminKeys = listOf(securityKey(32, 1), securityKey(32, 2))
+            val requested =
+                SecurityConfig(
+                    private_key = securityKey(16, 5),
+                    is_managed = true,
+                    admin_channel_enabled = true,
+                    admin_key = importedAdminKeys,
+                )
+            val profile = DeviceProfile(config = LocalConfig(security = requested))
+
+            useCase(1234, profile, User(), isLocal = true)
+
+            val written = radioController.configWrites.single { it.config.security != null }.config.security!!
+            assertEquals(securityKey(32, 7), written.private_key)
+            assertEquals(securityKey(32, 9), written.public_key)
+            assertEquals(true, written.is_managed)
+            assertEquals(true, written.admin_channel_enabled)
+            assertEquals(importedAdminKeys, written.admin_key)
+            assertEquals(securityKey(16, 5), profile.config?.security?.private_key)
+        }
+
+    @Test
+    fun `security restore sends an imported valid private key and clears the public key`() = runTest(testDispatcher) {
+        radioConfigRepository.setLocalConfigDirect(
+            LocalConfig(
+                security = SecurityConfig(private_key = securityKey(32, 7), public_key = securityKey(32, 9)),
+            ),
+        )
+        radioController.onEditSettingsCommitted = { commitAndRestart() }
+        val profile =
+            DeviceProfile(
+                config =
+                LocalConfig(
+                    security =
+                    SecurityConfig(
+                        private_key = securityKey(32, 2),
+                        public_key = securityKey(32, 8),
+                        is_managed = true,
+                        packet_signature_policy =
+                        SecurityConfig.PacketSignaturePolicy.PACKET_SIGNATURE_POLICY_BALANCED,
+                    ),
+                ),
+            )
+
+        useCase(1234, profile, User(), isLocal = true)
+
+        val written = radioController.configWrites.single { it.config.security != null }.config.security!!
+        assertEquals(securityKey(32, 2), written.private_key)
+        assertEquals(securityKey(0, 0), written.public_key)
+        assertEquals(true, written.is_managed)
+        assertEquals(
+            SecurityConfig.PacketSignaturePolicy.PACKET_SIGNATURE_POLICY_BALANCED,
+            written.packet_signature_policy,
+        )
+    }
+
+    @Test
+    fun `security restore is skipped when the overlaid section matches the running config`() = runTest(testDispatcher) {
+        radioConfigRepository.setLocalConfigDirect(
+            LocalConfig(security = SecurityConfig(private_key = securityKey(32, 7), is_managed = true)),
+        )
+        val profile =
+            DeviceProfile(
+                config = LocalConfig(security = SecurityConfig(private_key = securityKey(16, 5), is_managed = true)),
+            )
+
+        useCase(1234, profile, User(), isLocal = true)
+
+        assertNoDeviceWrites()
+        assertFalse(restartTracker.restartExpected.value)
+    }
+
+    @Test
+    fun `security restore is not written when the profile has no security section`() = runTest(testDispatcher) {
+        radioConfigRepository.setLocalConfigDirect(
+            LocalConfig(security = SecurityConfig(private_key = securityKey(32, 7))),
+        )
+        radioController.onEditSettingsCommitted = { commitAndRestart() }
+        val profile = DeviceProfile(config = LocalConfig(lora = LoRaConfig(region = LoRaConfig.RegionCode.US)))
+
+        useCase(1234, profile, User(), isLocal = true)
+
+        assertTrue(radioController.configWrites.none { it.config.security != null })
+    }
+
+    @Test
+    fun `security restore sends requested security unchanged when neither side has a valid private key`() =
+        runTest(testDispatcher) {
+            radioConfigRepository.setLocalConfigDirect(
+                LocalConfig(
+                    security = SecurityConfig(private_key = securityKey(16, 6), public_key = securityKey(31, 7)),
+                ),
+            )
+            radioController.onEditSettingsCommitted = { commitAndRestart() }
+            val requested =
+                SecurityConfig(
+                    private_key = securityKey(31, 1),
+                    public_key = securityKey(16, 2),
+                    is_managed = true,
+                    serial_enabled = false,
+                    admin_channel_enabled = false,
+                    packet_signature_policy = SecurityConfig.PacketSignaturePolicy.PACKET_SIGNATURE_POLICY_STRICT,
+                )
+            val profile = DeviceProfile(config = LocalConfig(security = requested))
+
+            useCase(1234, profile, User(), isLocal = true)
+
+            assertEquals(requested, radioController.configWrites.single { it.config.security != null }.config.security)
+        }
+
+    @Test
     fun `profile install rejects a stale local destination before writes`() = runTest(testDispatcher) {
         nodeRepository.setMyNodeInfo(TestDataFactory.createMyNodeInfo(myNodeNum = 5678))
 
@@ -1016,4 +1135,7 @@ class InstallProfileUseCaseTest {
         radioController.setConnectionState(ConnectionState.Disconnected)
         yield()
     }
+
+    /** Deterministic single-byte fills keep raw key material out of test sources. */
+    private fun securityKey(size: Int, fill: Byte) = ByteArray(size) { fill }.toByteString()
 }

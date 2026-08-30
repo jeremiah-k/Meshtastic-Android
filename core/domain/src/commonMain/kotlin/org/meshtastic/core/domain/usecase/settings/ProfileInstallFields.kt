@@ -54,9 +54,10 @@ private fun LocalConfig?.withoutUnchangedFields(current: LocalConfig): LocalConf
             display = incoming.display?.takeUnless { it == current.display },
             lora = incoming.lora?.takeUnless { it == current.lora },
             bluetooth = incoming.bluetooth?.takeUnless { it == current.bluetooth },
-            // The security section is compared and written verbatim; identity-preserving key handling is the
-            // security restore branch's concern and must not be duplicated here.
-            security = incoming.security?.takeUnless { it == current.security },
+            // The restore policy (safeRestoreOverlay) overlays identity keys first, so an incoming section whose
+            // overlaid form already matches the running config is pruned like any other unchanged section.
+            security =
+            incoming.security?.safeRestoreOverlay(current.security)?.takeUnless { it == current.security },
         )
         .takeIf { it.installableConfigs().isNotEmpty() || it.network != null || it.bluetooth != null }
 }
