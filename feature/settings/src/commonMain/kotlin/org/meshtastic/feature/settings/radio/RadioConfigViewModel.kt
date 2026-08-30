@@ -91,7 +91,6 @@ import org.meshtastic.core.resources.key_backup_not_found
 import org.meshtastic.core.resources.key_backup_restore_failed
 import org.meshtastic.core.resources.key_backup_restored
 import org.meshtastic.core.resources.key_backup_saved
-import org.meshtastic.core.resources.profile_transport_handoff_notice
 import org.meshtastic.core.resources.timeout
 import org.meshtastic.core.resources.unknown_error
 import org.meshtastic.core.ui.util.SnackbarManager
@@ -803,7 +802,7 @@ open class RadioConfigViewModel(
         }
     }
 
-    fun installProfile(protobuf: DeviceProfile, onResult: (Result<Unit>) -> Unit = {}) {
+    fun installProfile(protobuf: DeviceProfile, onResult: (Result<ProfileInstallOutcome>) -> Unit = {}) {
         val destNum = destNum ?: destNode.value?.num
         val currentUser = destNode.value?.user
         val isLocal = radioConfigState.value.isLocal
@@ -820,25 +819,15 @@ open class RadioConfigViewModel(
             viewModelScope.launch(start = CoroutineStart.LAZY) {
                 try {
                     val result = safeCatching {
-                        val outcome =
-                            installProfileUseCase(
-                                destNum = destNum,
-                                profile = protobuf,
-                                currentUser = currentUser,
-                                isLocal = isLocal,
-                            ) { progress ->
-                                _profileInstallState.value =
-                                    ProfileInstallState.Installing(progress.currentStage, progress.totalStages)
-                            }
-                        // The final stage intentionally ended the connection (Wi-Fi enabled over BLE, for
-                        // example); tell the user to reach the radio through its new transport instead of
-                        // leaving an unbounded reconnect loop running.
-                        if (outcome is ProfileInstallOutcome.TransportHandedOff) {
-                            snackbarManager.showSnackbar(
-                                message = UiText.Resource(Res.string.profile_transport_handoff_notice).resolve(),
-                            )
+                        installProfileUseCase(
+                            destNum = destNum,
+                            profile = protobuf,
+                            currentUser = currentUser,
+                            isLocal = isLocal,
+                        ) { progress ->
+                            _profileInstallState.value =
+                                ProfileInstallState.Installing(progress.currentStage, progress.totalStages)
                         }
-                        Unit
                     }
                     // Keep device/profile identifiers and exception messages out of logs while retaining the
                     // failure type.
