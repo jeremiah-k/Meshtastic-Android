@@ -16,6 +16,7 @@
  */
 package org.meshtastic.core.domain.usecase.settings
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
@@ -847,6 +848,108 @@ class InstallProfileUseCaseTest {
 
         assertEquals(channelLora, radioController.configWrites.single().config.lora)
         assertEquals(settings, radioConfigRepository.currentChannelSet.settings)
+    }
+
+    @Test
+    fun `channel replacement rewrites every slot in order and refreshes the cache after commit`() =
+        runTest(testDispatcher) {
+            val staleSettings =
+                (0 until 4).map { index ->
+                    ChannelSettings(name = "Stale $index", psk = byteArrayOf(index.toByte()).toByteString())
+                }
+            radioConfigRepository.setChannelSet(ChannelSet(settings = staleSettings))
+            val importedSettings =
+                listOf(
+                    ChannelSettings(name = "Imported", psk = byteArrayOf(1).toByteString()),
+                    ChannelSettings(name = "Private", psk = byteArrayOf(2).toByteString()),
+                )
+            val channelUrl = ChannelSet(settings = importedSettings).getChannelUrl().toString()
+            var cacheAtCommit: List<ChannelSettings>? = null
+            radioController.onEditSettingsCommitted = {
+                cacheAtCommit = radioConfigRepository.currentChannelSet.settings
+                emitRestartCycle()
+            }
+
+            useCase(1234, DeviceProfile(channel_url = channelUrl), User(), isLocal = true)
+
+            // The imported set is authoritative: slots 0..1 carry it and every stale trailing slot is disabled so it
+            // cannot survive the replacement.
+            assertEquals(
+                (0 until CHANNEL_REPLACEMENT_SLOT_COUNT).map { index ->
+                    Channel(
+                        role =
+                        when (index) {
+                            0 -> Channel.Role.PRIMARY
+                            1 -> Channel.Role.SECONDARY
+                            else -> Channel.Role.DISABLED
+                        },
+                        index = index,
+                        settings = importedSettings.getOrNull(index) ?: ChannelSettings(),
+                    )
+                },
+                radioController.localChannels,
+            )
+            assertEquals(staleSettings, cacheAtCommit)
+            assertEquals(
+                listOf(FakeRadioConfigRepository.ChannelSetUpdate(importedSettings, null)),
+                radioConfigRepository.channelSetUpdates,
+            )
+            assertEquals(importedSettings, radioConfigRepository.currentChannelSet.settings)
+            assertFalse(restartTracker.restartExpected.value)
+        }
+
+    @Test
+    fun `failed channel write aborts the install without claiming the imported set`() = runTest(testDispatcher) {
+        val staleSettings = listOf(ChannelSettings(name = "Old"), ChannelSettings(name = "Stale"))
+        radioConfigRepository.setChannelSet(ChannelSet(settings = staleSettings))
+        val importedSettings = listOf(ChannelSettings(name = "Imported", psk = byteArrayOf(1).toByteString()))
+        val channelUrl = ChannelSet(settings = importedSettings).getChannelUrl().toString()
+        radioController.failChannelWriteAfter = 1
+
+        assertFailsWith<IllegalStateException> {
+            useCase(1234, DeviceProfile(channel_url = channelUrl), User(), isLocal = true)
+        }
+
+        assertEquals(listOf(0), radioController.localChannels.map(Channel::index))
+        assertTrue(radioConfigRepository.channelSetUpdates.isEmpty())
+        assertEquals(staleSettings, radioConfigRepository.currentChannelSet.settings)
+        assertFalse(restartTracker.restartExpected.value)
+    }
+
+    @Test
+    fun `cancelling inside the transaction leaves the channel cache at the previous set`() = runTest(testDispatcher) {
+        val staleSettings = listOf(ChannelSettings(name = "Old"))
+        radioConfigRepository.setChannelSet(ChannelSet(settings = staleSettings))
+        val importedSettings = listOf(ChannelSettings(name = "Imported", psk = byteArrayOf(1).toByteString()))
+        val channelUrl = ChannelSet(settings = importedSettings).getChannelUrl().toString()
+        radioController.onSetFixedPosition = { _, _ -> throw CancellationException("Cancelled before commit") }
+        val profile =
+            DeviceProfile(
+                channel_url = channelUrl,
+                fixed_position = org.meshtastic.proto.Position(latitude_i = 1, longitude_i = 2),
+            )
+        val installation = launch { useCase(1234, profile, User(), isLocal = true) }
+
+        installation.join()
+
+        assertTrue(installation.isCancelled)
+        assertTrue(radioController.localChannels.isNotEmpty())
+        assertTrue(radioConfigRepository.channelSetUpdates.isEmpty())
+        assertEquals(staleSettings, radioConfigRepository.currentChannelSet.settings)
+        assertFalse(restartTracker.restartExpected.value)
+    }
+
+    @Test
+    fun `oversized channel URL fails before any device write`() = runTest(testDispatcher) {
+        val oversized =
+            (0..CHANNEL_REPLACEMENT_SLOT_COUNT).map { index ->
+                ChannelSettings(name = "Channel $index", psk = byteArrayOf(index.toByte()).toByteString())
+            }
+        val profile = DeviceProfile(channel_url = ChannelSet(settings = oversized).getChannelUrl().toString())
+
+        assertFailsWith<MalformedMeshtasticUrlException> { useCase(1234, profile, User(), isLocal = true) }
+
+        assertNoDeviceWrites()
     }
 
     @Test
