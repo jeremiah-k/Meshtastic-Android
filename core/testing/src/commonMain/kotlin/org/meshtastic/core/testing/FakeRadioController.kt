@@ -127,6 +127,12 @@ class FakeRadioController :
     /** Test hook invoked after an edit transaction commits. */
     var onEditSettingsCommitted: suspend () -> Unit = {}
 
+    /** Test hook invoked after a reboot command is recorded; models the firmware restart it causes. */
+    var onRebooted: suspend (Int) -> Unit = {}
+
+    /** Destination node numbers of [reboot] calls, in call order. */
+    val reboots = mutableListOf<Int>()
+
     /** Test hook invoked before a fixed-position write is recorded. */
     var onSetFixedPosition: suspend (Int, Position) -> Unit = { _, _ -> }
 
@@ -346,7 +352,10 @@ class FakeRadioController :
 
     override suspend fun getDeviceConnectionStatus(destNum: Int, packetId: Int) {}
 
-    override suspend fun reboot(destNum: Int, packetId: Int) {}
+    override suspend fun reboot(destNum: Int, packetId: Int) {
+        reboots.add(destNum)
+        onRebooted(destNum)
+    }
 
     override suspend fun rebootToDfu(nodeNum: Int) {}
 
