@@ -28,7 +28,6 @@ import dev.mokkery.mock
 import dev.mokkery.verify
 import dev.mokkery.verify.VerifyMode.Companion.exactly
 import dev.mokkery.verifySuspend
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -52,13 +51,13 @@ import org.meshtastic.core.domain.usecase.settings.ImportProfileUseCase
 import org.meshtastic.core.domain.usecase.settings.ImportSecurityConfigUseCase
 import org.meshtastic.core.domain.usecase.settings.InstallProfileUseCase
 import org.meshtastic.core.domain.usecase.settings.ProcessRadioResponseUseCase
+import org.meshtastic.core.domain.usecase.settings.ProfileInstallOutcome
 import org.meshtastic.core.domain.usecase.settings.RadioConfigUseCase
 import org.meshtastic.core.domain.usecase.settings.RadioResponseResult
 import org.meshtastic.core.model.ConnectionState
 import org.meshtastic.core.model.MqttProbeStatus
 import org.meshtastic.core.model.MyNodeInfo
 import org.meshtastic.core.model.Node
-import org.meshtastic.core.model.util.MalformedMeshtasticUrlException
 import org.meshtastic.core.repository.AnalyticsPrefs
 import org.meshtastic.core.repository.FileService
 import org.meshtastic.core.repository.HomoglyphPrefs
@@ -1317,32 +1316,15 @@ class RadioConfigViewModelTest {
         viewModel = createViewModel()
 
         val profile = DeviceProfile()
-        everySuspend { installProfileUseCase(any(), any(), any(), any(), any()) } returns Unit
+        everySuspend { installProfileUseCase(any(), any(), any(), any(), any()) } returns
+            ProfileInstallOutcome.Completed
 
-        viewModel.installProfile(profile)
+        var result: Result<Unit>? = null
+        viewModel.installProfile(profile) { result = it }
+        advanceUntilIdle()
 
-        verifySuspend { installProfileUseCase(123, profile, any(), null, true) }
-    }
-
-    @Test
-    fun `installProfile surfaces malformed channel URL in snackbar`() = runTest {
-        val node = Node(num = 123, user = User(id = "!123"))
-        nodeRepository.setNodes(listOf(node))
-        viewModel = createViewModel()
-        val profile = DeviceProfile(channel_url = "not-a-channel-url")
-        everySuspend { installProfileUseCase(any(), any(), any(), any(), any()) } calls
-            {
-                throw MalformedMeshtasticUrlException("bad profile")
-            }
-        // UiText.resolve() loads the string on real Dispatchers.Default, outside the test scheduler,
-        // so await the snackbar call instead of draining with runCurrent().
-        val snackbarShown = CompletableDeferred<Unit>()
-        every { snackbarManager.showSnackbar(any(), any(), any(), any(), any()) } calls { snackbarShown.complete(Unit) }
-
-        viewModel.installProfile(profile)
-        snackbarShown.await()
-
-        verify { snackbarManager.showSnackbar(message = "This Channel URL is invalid and can not be used") }
+        verifySuspend { installProfileUseCase(123, profile, any(), true, any()) }
+        assertTrue(assertNotNull(result).isSuccess)
     }
 
     @Test

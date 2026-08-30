@@ -22,6 +22,7 @@ import co.touchlab.kermit.Logger
 import kotlinx.atomicfu.locks.SynchronizedObject
 import kotlinx.atomicfu.locks.synchronized
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
@@ -54,6 +55,7 @@ import org.meshtastic.core.domain.usecase.settings.ImportProfileUseCase
 import org.meshtastic.core.domain.usecase.settings.ImportSecurityConfigUseCase
 import org.meshtastic.core.domain.usecase.settings.InstallProfileUseCase
 import org.meshtastic.core.domain.usecase.settings.ProcessRadioResponseUseCase
+import org.meshtastic.core.domain.usecase.settings.ProfileInstallOutcome
 import org.meshtastic.core.domain.usecase.settings.RadioConfigUseCase
 import org.meshtastic.core.domain.usecase.settings.RadioResponseResult
 import org.meshtastic.core.model.Capabilities
@@ -64,7 +66,6 @@ import org.meshtastic.core.model.MqttProbeStatus
 import org.meshtastic.core.model.MyNodeInfo
 import org.meshtastic.core.model.Node
 import org.meshtastic.core.model.Position
-import org.meshtastic.core.model.util.MalformedMeshtasticUrlException
 import org.meshtastic.core.repository.AnalyticsPrefs
 import org.meshtastic.core.repository.FileService
 import org.meshtastic.core.repository.HomoglyphPrefs
@@ -85,12 +86,12 @@ import org.meshtastic.core.repository.ServiceRepository
 import org.meshtastic.core.resources.Res
 import org.meshtastic.core.resources.UiText
 import org.meshtastic.core.resources.cant_shutdown
-import org.meshtastic.core.resources.channel_invalid
 import org.meshtastic.core.resources.key_backup_deleted
 import org.meshtastic.core.resources.key_backup_not_found
 import org.meshtastic.core.resources.key_backup_restore_failed
 import org.meshtastic.core.resources.key_backup_restored
 import org.meshtastic.core.resources.key_backup_saved
+import org.meshtastic.core.resources.profile_transport_handoff_notice
 import org.meshtastic.core.resources.timeout
 import org.meshtastic.core.resources.unknown_error
 import org.meshtastic.core.ui.util.SnackbarManager
@@ -150,6 +151,15 @@ data class RadioConfigState(
     val nodeDbResetPreserveFavorites: Boolean = false,
 )
 
+/** Observably reports where a staged device-profile install is, without exposing device identifiers. */
+sealed interface ProfileInstallState {
+    data object Idle : ProfileInstallState
+
+    data object Preparing : ProfileInstallState
+
+    data class Installing(val currentStage: Int, val totalStages: Int) : ProfileInstallState
+}
+
 @KoinViewModel
 @Suppress("LongParameterList", "LargeClass")
 open class RadioConfigViewModel(
@@ -193,6 +203,12 @@ open class RadioConfigViewModel(
     val lockdownTokenInfo = serviceRepository.lockdownTokenInfo
     val sessionAuthorized = serviceRepository.sessionAuthorized
     val lockdownState = serviceRepository.lockdownState
+
+    private val _profileInstallState = MutableStateFlow<ProfileInstallState>(ProfileInstallState.Idle)
+    private var profileInstallJob: Job? = null
+
+    /** Progress of a staged device-profile install; returns to [ProfileInstallState.Idle] after every outcome. */
+    val profileInstallState: StateFlow<ProfileInstallState> = _profileInstallState.asStateFlow()
 
     fun sendLockNow(): Boolean = lockdownCoordinator.lockNow()
 
@@ -787,24 +803,65 @@ open class RadioConfigViewModel(
         }
     }
 
-    fun installProfile(protobuf: DeviceProfile) {
-        val destNum = destNum ?: destNode.value?.num ?: return
-        val state = radioConfigState.value
-        val isLocal = this.destNum == null || destNum == myNodeNum
-        safeLaunch(tag = "installProfile") {
-            try {
-                installProfileUseCase(
-                    destNum = destNum,
-                    profile = protobuf,
-                    currentUser = destNode.value?.user,
-                    currentLoraConfig = state.radioConfig.lora,
-                    isLocal = isLocal,
-                )
-            } catch (_: MalformedMeshtasticUrlException) {
-                Logger.w { "[installProfile] Rejected invalid profile channel URL" }
-                snackbarManager.showSnackbar(message = UiText.Resource(Res.string.channel_invalid).resolve())
-            }
+    fun installProfile(protobuf: DeviceProfile, onResult: (Result<Unit>) -> Unit = {}) {
+        val destNum = destNum ?: destNode.value?.num
+        val currentUser = destNode.value?.user
+        val isLocal = radioConfigState.value.isLocal
+        if (destNum == null) {
+            onResult(Result.failure(IllegalStateException("No destination is available for profile installation")))
+            return
         }
+        if (!_profileInstallState.compareAndSet(ProfileInstallState.Idle, ProfileInstallState.Preparing)) {
+            onResult(Result.failure(IllegalStateException("A device profile installation is already in progress")))
+            return
+        }
+        lateinit var installJob: Job
+        installJob =
+            viewModelScope.launch(start = CoroutineStart.LAZY) {
+                try {
+                    val result = safeCatching {
+                        val outcome =
+                            installProfileUseCase(
+                                destNum = destNum,
+                                profile = protobuf,
+                                currentUser = currentUser,
+                                isLocal = isLocal,
+                            ) { progress ->
+                                _profileInstallState.value =
+                                    ProfileInstallState.Installing(progress.currentStage, progress.totalStages)
+                            }
+                        // The final stage intentionally ended the connection (Wi-Fi enabled over BLE, for
+                        // example); tell the user to reach the radio through its new transport instead of
+                        // leaving an unbounded reconnect loop running.
+                        if (outcome is ProfileInstallOutcome.TransportHandedOff) {
+                            snackbarManager.showSnackbar(
+                                message = UiText.Resource(Res.string.profile_transport_handoff_notice).resolve(),
+                            )
+                        }
+                        Unit
+                    }
+                    // Keep device/profile identifiers and exception messages out of logs while retaining the
+                    // failure type.
+                    result.onFailure { error ->
+                        Logger.w { "[installProfile] Failed to install profile; cause=${error.safeLogType()}" }
+                    }
+                    onResult(result)
+                } finally {
+                    if (profileInstallJob === installJob) profileInstallJob = null
+                    _profileInstallState.value = ProfileInstallState.Idle
+                }
+            }
+        profileInstallJob = installJob
+        if (!installJob.start()) {
+            if (profileInstallJob === installJob) profileInstallJob = null
+            _profileInstallState.value = ProfileInstallState.Idle
+            onResult(Result.failure(IllegalStateException("Profile installation could not start")))
+        }
+    }
+
+    /** Cancels the active staged device-profile install, if any. */
+    fun cancelProfileInstall() {
+        profileInstallJob?.cancel()
     }
 
     fun clearPacketResponse() {
@@ -1511,6 +1568,7 @@ internal fun Config.saveRebootBehavior(): RebootBehavior = when {
     else -> RebootBehavior.MAY_RESTART
 }
 
-/** Firmware `AdminModule::handleSetModuleConfig` reboots for every module section except status message. */
 internal fun ModuleConfig.saveRebootBehavior(): RebootBehavior =
     if (statusmessage != null) RebootBehavior.NEVER else RebootBehavior.ALWAYS
+
+private fun Throwable.safeLogType(): String = this::class.simpleName ?: "Throwable"
