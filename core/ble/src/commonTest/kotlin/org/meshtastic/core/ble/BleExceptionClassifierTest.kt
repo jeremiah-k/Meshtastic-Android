@@ -18,6 +18,7 @@ package org.meshtastic.core.ble
 
 import com.juul.kable.GattStatusException
 import com.juul.kable.NotConnectedException
+import com.juul.kable.UnmetRequirementReason
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -36,12 +37,12 @@ class BleExceptionClassifierTest {
 
     @Test
     fun `GattStatusException maps to non-permanent with status code`() {
-        val ex = GattStatusException(message = "GATT failure", status = 133)
+        val ex = GattStatusException(message = "GATT failure for AA:BB:CC:DD:EE:FF", status = 133)
         val info = ex.classifyBleException()
         assertNotNull(info)
         assertFalse(info.isPermanent)
         assertEquals(133, info.gattStatus)
-        assertTrue(info.message.contains("133"))
+        assertEquals("GATT error (status 133)", info.message)
     }
 
     @Test
@@ -52,6 +53,15 @@ class BleExceptionClassifierTest {
         assertFalse(info.isPermanent)
         assertNull(info.gattStatus)
         assertEquals("Not connected", info.message)
+    }
+
+    @Test
+    fun `unmet requirement reasons map to fixed actionable messages`() {
+        assertEquals("Bluetooth is turned off", UnmetRequirementReason.BluetoothDisabled.toBleAvailabilityMessage())
+        assertEquals(
+            "Location services are turned off",
+            UnmetRequirementReason.LocationServicesDisabled.toBleAvailabilityMessage(),
+        )
     }
 
     @Test

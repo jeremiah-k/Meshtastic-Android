@@ -1538,6 +1538,13 @@
     <string name="primary_channel_feature">Periodic position and telemetry broadcast</string>
     <string name="privacy_url" translatable="false">https://meshtastic.org/docs/legal/privacy/</string>
     <string name="private_key">Private Key</string>
+    <!-- PROFILE -->
+    <string name="profile_install_failed">Profile installation failed. Check the device and try again.</string>
+    <string name="profile_install_in_progress">Applying settings to the radio. The device may reboot between stages — please wait.</string>
+    <string name="profile_install_preparing">Preparing…</string>
+    <string name="profile_install_stage_label">Stage %1$d of %2$d</string>
+    <string name="profile_install_succeeded">Profile installed.</string>
+    <string name="profile_transport_handoff_notice">Profile installed. The radio switched transports — reconnect using its new connection settings.</string>
     <string name="project_information">Project information</string>
     <string name="provide_location_to_mesh">Provide phone location to mesh</string>
     <string name="provider_name_exists">Provider name exists.</string>

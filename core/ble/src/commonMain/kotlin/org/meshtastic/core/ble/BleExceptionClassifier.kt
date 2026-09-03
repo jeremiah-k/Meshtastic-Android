@@ -22,6 +22,7 @@ import com.juul.kable.GattRequestRejectedException
 import com.juul.kable.GattStatusException
 import com.juul.kable.NotConnectedException
 import com.juul.kable.UnmetRequirementException
+import com.juul.kable.UnmetRequirementReason
 
 /**
  * Classification of a BLE-layer exception for the transport layer to act on.
@@ -30,7 +31,8 @@ import com.juul.kable.UnmetRequirementException
  *   Currently always `false` — all known BLE exceptions can resolve without user intervention (BT toggling, permission
  *   grants, transient GATT errors). Reserved for future use.
  * @property gattStatus the platform GATT status code when available (Android-specific).
- * @property message a human-readable description of the failure.
+ * @property message a human-readable, diagnostic-safe description of the failure. Source exception messages are not
+ *   forwarded because platform BLE errors can contain stable device identifiers.
  */
 data class BleExceptionInfo(val isPermanent: Boolean, val gattStatus: Int? = null, val message: String)
 
@@ -43,11 +45,7 @@ data class BleExceptionInfo(val isPermanent: Boolean, val gattStatus: Int? = nul
  */
 fun Throwable.classifyBleException(): BleExceptionInfo? = when (this) {
     is GattStatusException ->
-        BleExceptionInfo(
-            isPermanent = false,
-            gattStatus = status,
-            message = "GATT error (status $status): $message",
-        )
+        BleExceptionInfo(isPermanent = false, gattStatus = status, message = "GATT error (status $status)")
 
     is NotConnectedException -> BleExceptionInfo(isPermanent = false, message = "Not connected")
 
@@ -62,9 +60,16 @@ fun Throwable.classifyBleException(): BleExceptionInfo? = when (this) {
         // resolve
         // without re-selecting the device, so surface them as transient and let the transport keep retrying; the
         // Connections screen carries a live card for each.
-        BleExceptionInfo(isPermanent = false, message = message ?: "Bluetooth LE unavailable")
+        BleExceptionInfo(isPermanent = false, message = reason.toBleAvailabilityMessage())
 
     else -> null
+}
+
+/** Maps Kable's typed availability requirement to fixed, user-actionable text. */
+internal fun UnmetRequirementReason.toBleAvailabilityMessage(): String = when (this) {
+    UnmetRequirementReason.BluetoothDisabled -> "Bluetooth is turned off"
+    UnmetRequirementReason.LocationServicesDisabled -> "Location services are turned off"
+    else -> "Bluetooth LE is unavailable"
 }
 
 /**
