@@ -148,7 +148,7 @@ class AndroidBluetoothRepository(
             if (!result.isCompleted) {
                 if (remoteDevice.bondState == android.bluetooth.BluetoothDevice.BOND_BONDED) {
                     result.complete(Unit)
-                } else if (remoteDevice.createBond()) {
+                } else if (createLeBond(remoteDevice)) {
                     start = BondWaitStart(createdBond = true)
                 } else {
                     // createBond() returns false when a bond is already in flight (a GATT operation on a
@@ -177,6 +177,17 @@ class AndroidBluetoothRepository(
         }
         return start
     }
+
+    // Automatic transport selection can choose BR/EDR for a cached dual-mode device even though
+    // the radio connection uses LE. The transport overload is public from API 37; older versions
+    // retain the public no-argument API instead of relying on hidden methods.
+    @SuppressLint("MissingPermission")
+    private fun createLeBond(remoteDevice: android.bluetooth.BluetoothDevice): Boolean =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.CINNAMON_BUN) {
+            remoteDevice.createBond(android.bluetooth.BluetoothDevice.TRANSPORT_LE)
+        } else {
+            remoteDevice.createBond()
+        }
 
     private data class BondWaitStart(val bondingObserved: Boolean = false, val createdBond: Boolean = false)
 
